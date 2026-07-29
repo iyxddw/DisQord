@@ -30,6 +30,7 @@ docker compose version
 在 `deploy` 目录旁创建 `central.env`，不要提交：
 
 ```dotenv
+DISQORD_DOMAIN=central.example.com
 POSTGRES_PASSWORD=生成一个强密码
 ENCRYPTION_KEY=至少32位随机字符串
 PAIRING_PEPPER=另一段至少32位随机字符串
@@ -41,24 +42,99 @@ PAIRING_PEPPER=另一段至少32位随机字符串
 openssl rand -base64 48
 ```
 
-启动：
+将 `central.example.com` 换成你实际拥有的域名，例如 `bridge.example.net`，不要填写
+`https://`，也不要在末尾添加 `/`。
+
+### 2.1 配置域名解析
+
+登录购买域名的平台，在 DNS 管理中添加记录：
+
+| 类型 | 主机记录         | 记录值                |
+| ---- | ---------------- | --------------------- |
+| A    | `bridge`（示例） | 中央服务器的公网 IPv4 |
+
+如果使用根域名，主机记录通常填写 `@`。如果服务器没有可用的公网 IPv6，不要添加 AAAA
+记录；错误的 AAAA 记录会导致部分设备无法连接。
+
+等待解析生效后，在中央服务器检查：
+
+```text
+getent ahostsv4 bridge.example.net
+```
+
+输出的 IP 应当是中央服务器的公网 IP。
+
+### 2.2 开放端口
+
+在云服务商的安全组/防火墙中允许入站：
+
+- TCP 80：证书签发和 HTTP 自动跳转
+- TCP 443：HTTPS 和 WSS
+- UDP 443：HTTP/3，可选但推荐
+
+Ubuntu 使用 UFW 时还可以执行：
+
+```text
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
+sudo ufw status
+```
+
+确认没有其他程序占用 80/443：
+
+```text
+sudo ss -lntup | grep -E ':(80|443)\b'
+```
+
+如果输出中已有 Nginx、Apache 或其他 Caddy，需要先决定保留哪个反向代理，不能让两个程序同时
+监听同一端口。
+
+### 2.3 启动 PostgreSQL、中央服务和 Caddy
+
+在 DisQord 项目根目录执行：
 
 ```text
 docker compose --env-file central.env -f deploy/docker-compose.central.yml up -d --build
 ```
 
-将 [`deploy/Caddyfile`](../deploy/Caddyfile) 中的 `central.example.com` 改成实际域名，并让
-Caddy 读取该文件。Caddy 终止 HTTPS/WSS，再反向代理到 `127.0.0.1:8080`。不要绕过 HTTPS
-把中央端口直接暴露到公网。
+这条命令会同时启动三个容器：
 
-检查：
+- `postgres`：保存中央配置、会话、日志和任务
+- `central`：DisQord 中央程序，容器内监听 8080
+- `caddy`：公网入口，监听 80/443，并把请求转发到 `central:8080`
+
+Caddy 配置位于 [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)，已经通过
+`DISQORD_DOMAIN` 读取域名，不需要手工改文件。域名解析正确且 80/443 可从公网访问时，Caddy
+会自动申请受浏览器信任的证书、把 HTTP 跳转到 HTTPS，并在证书到期前自动续期。证书与私钥保存
+在 Docker 卷 `disqord-caddy-data`，不要随意删除该卷。
+
+查看启动状态：
 
 ```text
-curl https://central.example.com/api/health
+docker compose --env-file central.env -f deploy/docker-compose.central.yml ps
+docker compose --env-file central.env -f deploy/docker-compose.central.yml logs --tail 100 caddy
 ```
 
-返回 `status: ok` 后，在浏览器打开 `https://central.example.com`。首次进入时创建至少 12 位
-管理员密码。
+Caddy 日志出现证书申请成功后，检查：
+
+```text
+curl -I https://bridge.example.net
+curl https://bridge.example.net/api/health
+```
+
+把示例域名替换成自己的。第二条应返回包含 `"status":"ok"` 的 JSON，然后用浏览器打开相同的
+HTTPS 地址。
+
+如果以后修改 `deploy/caddy/Caddyfile`，无需停止服务，可检查并重新加载：
+
+```text
+docker compose --env-file central.env -f deploy/docker-compose.central.yml exec -w /etc/caddy caddy caddy validate
+docker compose --env-file central.env -f deploy/docker-compose.central.yml exec -w /etc/caddy caddy caddy reload
+```
+
+首次进入中央面板时创建至少 12 位管理员密码。中央容器的 8080 端口只映射到服务器本机
+`127.0.0.1`，公网用户和两个节点都应使用 Caddy 提供的 HTTPS/WSS 地址。
 
 ## 3. 配置大模型
 

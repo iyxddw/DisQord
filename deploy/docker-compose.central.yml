@@ -1,4 +1,21 @@
 services:
+  caddy:
+    image: caddy:2.11.4
+    restart: unless-stopped
+    depends_on:
+      central:
+        condition: service_healthy
+    environment:
+      DISQORD_DOMAIN: ${DISQORD_DOMAIN:?set DISQORD_DOMAIN}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - disqord-caddy-data:/data
+      - disqord-caddy-config:/config
+
   postgres:
     image: postgres:17.5-bookworm
     restart: unless-stopped
@@ -44,4 +61,6 @@ services:
       retries: 10
 
 volumes:
+  disqord-caddy-data:
+  disqord-caddy-config:
   disqord-postgres:
