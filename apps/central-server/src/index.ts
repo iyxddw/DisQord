@@ -1,0 +1,99 @@
+import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+
+import { PromptVersionStore } from '@disqord/llm';
+import { createProgramDescriptor } from '@disqord/shared';
+import { PairingAuthority, type NodeSession } from '@disqord/transport';
+import { Pool } from 'pg';
+import { z } from 'zod';
+
+import { createCentralApplication } from './api.js';
+import { migrateDatabase } from './migrate.js';
+import { CentralMessageProcessor, MessageOrchestrator } from './orchestrator.js';
+import { EncryptedPostgresSecretStore, PostgresStateStore } from './state-store.js';
+
+export * from './api.js';
+export * from './auth.js';
+export * from './migrate.js';
+export * from './orchestrator.js';
+export * from './simulation.js';
+export * from './state-store.js';
+
+export const program = createProgramDescriptor('central-server');
+
+const environmentSchema = z.object({
+  CENTRAL_HOST: z.string().default('127.0.0.1'),
+  CENTRAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
+  DATABASE_URL: z.string().min(1),
+  ENCRYPTION_KEY: z.string().min(32),
+  PAIRING_PEPPER: z.string().min(32).optional(),
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
+});
+
+export async function startCentralServer(environment: NodeJS.ProcessEnv = process.env) {
+  const config = environmentSchema.parse(environment);
+  await migrateDatabase(config.DATABASE_URL);
+  const pool = new Pool({ connectionString: config.DATABASE_URL });
+  const store = new PostgresStateStore(pool);
+  const secrets = new EncryptedPostgresSecretStore(pool, config.ENCRYPTION_KEY);
+  await ensureDefaultPrompts(store);
+  const pairingAuthority = new PairingAuthority(config.PAIRING_PEPPER ?? config.ENCRYPTION_KEY);
+  for (const entry of await store.list<NodeSession>('node-session')) {
+    pairingAuthority.restoreSession(entry.value);
+  }
+  const orchestratorRef: { current?: MessageOrchestrator } = {};
+  const central = createCentralApplication({
+    store,
+    secrets,
+    pairingAuthority,
+    verificationSecret: config.ENCRYPTION_KEY,
+    secureCookies: config.COOKIE_SECURE,
+    attachNodeGateway: true,
+    onNodeFrame: async (frame) => await orchestratorRef.current?.handleNodeFrame(frame),
+    onReviewAction: async (taskId, decision) =>
+      await orchestratorRef.current?.handleReview(taskId, decision),
+  });
+  const gateway = central.getGateway();
+  if (!gateway) throw new Error('Central node gateway failed to initialize.');
+  orchestratorRef.current = new MessageOrchestrator(
+    store,
+    gateway,
+    new CentralMessageProcessor(store, secrets),
+  );
+  await central.app.listen({ host: config.CENTRAL_HOST, port: config.CENTRAL_PORT });
+
+  const stop = async () => {
+    await central.app.close();
+    await pool.end();
+  };
+  process.once('SIGINT', () => void stop());
+  process.once('SIGTERM', () => void stop());
+  return { ...central, pool, stop };
+}
+
+async function ensureDefaultPrompts(store: PostgresStateStore): Promise<void> {
+  const existing = await store.list('prompt');
+  if (existing.length) return;
+  const prompts = new PromptVersionStore();
+  prompts.createDefaultVersions(randomUUID());
+  for (const purpose of [
+    'translation-system',
+    'translation-task',
+    'moderation-system',
+    'moderation-rules',
+  ] as const) {
+    const prompt = prompts.getPublished(purpose);
+    await store.set('prompt', prompt.id, prompt);
+  }
+}
+
+const entryPath = process.argv[1];
+if (entryPath && pathToFileURL(entryPath).href === import.meta.url) {
+  startCentralServer().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : 'Central server failed to start.');
+    process.exitCode = 1;
+  });
+}

@@ -1,0 +1,14 @@
+FROM node:24-bookworm-slim
+
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g; s/security.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile && pnpm build
+
+ENV NODE_ENV=production
+EXPOSE 8080
+CMD ["node", "apps/central-server/dist/index.js"]

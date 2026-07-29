@@ -1,0 +1,188 @@
+import { randomUUID } from 'node:crypto';
+
+import { WebSocket } from 'ws';
+import { z } from 'zod';
+
+import { normalizeNapCatGroupMessage, napCatGroupMessageEventSchema } from './normalize.js';
+
+const actionResponseSchema = z.object({
+  status: z.string(),
+  retcode: z.number(),
+  data: z.unknown().optional(),
+  echo: z.string(),
+  message: z.string().optional(),
+});
+
+const groupListSchema = z.array(
+  z.object({
+    group_id: z.union([z.string(), z.number()]),
+    group_name: z.string(),
+    member_count: z.number().optional(),
+    max_member_count: z.number().optional(),
+  }),
+);
+
+interface PendingAction {
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: NodeJS.Timeout;
+}
+
+export interface NapCatClientOptions {
+  readonly url: string;
+  readonly accessToken?: string;
+  readonly nodeId: string;
+  readonly onMessage: (
+    message: NonNullable<ReturnType<typeof normalizeNapCatGroupMessage>>,
+  ) => void | Promise<void>;
+}
+
+export interface NapCatGroup {
+  readonly id: string;
+  readonly name: string;
+  readonly memberCount?: number;
+  readonly maxMemberCount?: number;
+}
+
+export class NapCatOneBotClient {
+  readonly #options: NapCatClientOptions;
+  readonly #pending = new Map<string, PendingAction>();
+  #socket: WebSocket | undefined;
+  #manualClose = false;
+  #reconnectTimer: NodeJS.Timeout | undefined;
+
+  constructor(options: NapCatClientOptions) {
+    const protocol = new URL(options.url).protocol;
+    if (protocol !== 'ws:' && protocol !== 'wss:') {
+      throw new Error('NapCat OneBot URL must use ws:// or wss://.');
+    }
+    this.#options = options;
+  }
+
+  async connect(): Promise<void> {
+    if (this.#socket?.readyState === WebSocket.OPEN) return;
+    this.#manualClose = false;
+    const headers = this.#options.accessToken
+      ? { Authorization: `Bearer ${this.#options.accessToken}` }
+      : undefined;
+    const socket = new WebSocket(this.#options.url, { headers });
+    this.#socket = socket;
+
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', resolve);
+      socket.once('error', reject);
+    });
+    socket.on('message', (data) => {
+      void this.#handleIncoming(data.toString()).catch(() => {
+        // Malformed OneBot events are ignored and should be reported by the node logger.
+      });
+    });
+    socket.on('close', () => {
+      if (this.#socket === socket) this.#socket = undefined;
+      for (const pending of this.#pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('NapCat connection closed.'));
+      }
+      this.#pending.clear();
+      this.#scheduleReconnect();
+    });
+  }
+
+  disconnect(): void {
+    this.#manualClose = true;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#socket?.close(1000, 'QQ node disconnect');
+    this.#socket = undefined;
+  }
+
+  #scheduleReconnect(): void {
+    if (this.#manualClose || this.#reconnectTimer) return;
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      void this.connect().catch(() => this.#scheduleReconnect());
+    }, 3_000);
+    this.#reconnectTimer.unref();
+  }
+
+  async listGroups(): Promise<NapCatGroup[]> {
+    const data = groupListSchema.parse(await this.call('get_group_list', {}));
+    return data.map((group) => ({
+      id: String(group.group_id),
+      name: group.group_name,
+      ...(group.member_count === undefined ? {} : { memberCount: group.member_count }),
+      ...(group.max_member_count === undefined ? {} : { maxMemberCount: group.max_member_count }),
+    }));
+  }
+
+  async sendGroupText(groupId: string, text: string): Promise<string> {
+    return await this.#sendGroupSegments(groupId, [{ type: 'text', data: { text } }]);
+  }
+
+  async sendGroupImage(groupId: string, png: Uint8Array, replyMessageId?: string): Promise<string> {
+    const message: Array<{ type: string; data: Record<string, unknown> }> = [];
+    if (replyMessageId) {
+      message.push({ type: 'reply', data: { id: replyMessageId } });
+    }
+    message.push({
+      type: 'image',
+      data: { file: `base64://${Buffer.from(png).toString('base64')}` },
+    });
+    return await this.#sendGroupSegments(groupId, message);
+  }
+
+  async call(action: string, params: Record<string, unknown>): Promise<unknown> {
+    await this.connect();
+    const socket = this.#socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error('NapCat connection is unavailable.');
+    }
+    const echo = randomUUID();
+    const response = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(echo);
+        reject(new Error(`NapCat action timed out: ${action}`));
+      }, 15_000);
+      timer.unref();
+      this.#pending.set(echo, { resolve, reject, timer });
+    });
+    socket.send(JSON.stringify({ action, params, echo }));
+    return await response;
+  }
+
+  async #sendGroupSegments(
+    groupId: string,
+    message: Array<{ type: string; data: Record<string, unknown> }>,
+  ): Promise<string> {
+    const response = z.object({ message_id: z.union([z.string(), z.number()]) }).parse(
+      await this.call('send_group_msg', {
+        group_id: groupId,
+        message,
+      }),
+    );
+    return String(response.message_id);
+  }
+
+  async #handleIncoming(text: string): Promise<void> {
+    const raw = JSON.parse(text) as unknown;
+    const response = actionResponseSchema.safeParse(raw);
+    if (response.success) {
+      const pending = this.#pending.get(response.data.echo);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.#pending.delete(response.data.echo);
+      if (response.data.status === 'ok' && response.data.retcode === 0) {
+        pending.resolve(response.data.data);
+      } else {
+        pending.reject(
+          new Error(response.data.message ?? `NapCat action failed: ${response.data.retcode}`),
+        );
+      }
+      return;
+    }
+
+    if (napCatGroupMessageEventSchema.safeParse(raw).success) {
+      const message = normalizeNapCatGroupMessage(raw, this.#options.nodeId);
+      if (message) await this.#options.onMessage(message);
+    }
+  }
+}

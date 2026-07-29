@@ -1,0 +1,21 @@
+{
+  "name": "@disqord/qq-node",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run src --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@disqord/adapter-napcat": "workspace:*",
+    "@disqord/node-runtime": "workspace:*",
+    "@disqord/queue": "workspace:*",
+    "@disqord/shared": "workspace:*",
+    "@disqord/transport": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

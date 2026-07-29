@@ -1,0 +1,66 @@
+import { randomUUID } from 'node:crypto';
+
+import { describe, expect, it } from 'vitest';
+
+import { normalizeNapCatGroupMessage } from './normalize.js';
+
+const baseEvent = {
+  post_type: 'message',
+  message_type: 'group',
+  message_id: 99,
+  self_id: 10000,
+  user_id: 20000,
+  group_id: 30000,
+  time: 1_800_000_000,
+  sender: { nickname: 'Alice', card: '群名片' },
+};
+
+describe('normalizeNapCatGroupMessage', () => {
+  it('normalizes text, image and reply segments', () => {
+    const message = normalizeNapCatGroupMessage(
+      {
+        ...baseEvent,
+        message: [
+          { type: 'reply', data: { id: '88' } },
+          { type: 'text', data: { text: '你好' } },
+          {
+            type: 'image',
+            data: { file: 'photo.png', url: 'https://example.test/photo.png' },
+          },
+        ],
+      },
+      randomUUID(),
+    );
+
+    expect(message).toMatchObject({
+      kind: 'mixed',
+      text: '你好',
+      replyTo: { sourceMessageId: '88' },
+      attachments: [{ mimeType: 'image/png' }],
+    });
+  });
+
+  it('converts unsupported OneBot segments to the unsupported card kind', () => {
+    const message = normalizeNapCatGroupMessage(
+      {
+        ...baseEvent,
+        message: [{ type: 'record', data: { file: 'voice.amr' } }],
+      },
+      randomUUID(),
+    );
+    expect(message).toMatchObject({ kind: 'unsupported', unsupportedType: 'record' });
+  });
+
+  it('ignores messages produced by the logged-in QQ account', () => {
+    expect(
+      normalizeNapCatGroupMessage(
+        {
+          ...baseEvent,
+          user_id: baseEvent.self_id,
+          message: [{ type: 'text', data: { text: 'self' } }],
+        },
+        randomUUID(),
+      ),
+    ).toBeUndefined();
+  });
+});

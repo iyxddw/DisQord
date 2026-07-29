@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17.5-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: disqord
+      POSTGRES_USER: disqord
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - disqord-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U disqord -d disqord']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  central:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.central
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CENTRAL_HOST: 0.0.0.0
+      CENTRAL_PORT: 8080
+      DATABASE_URL: postgresql://disqord:${POSTGRES_PASSWORD}@postgres:5432/disqord
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY}
+      PAIRING_PEPPER: ${PAIRING_PEPPER:?set PAIRING_PEPPER}
+      COOKIE_SECURE: 'true'
+    ports:
+      - '127.0.0.1:8080:8080'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  disqord-postgres:
