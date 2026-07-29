@@ -175,7 +175,7 @@ DisQord 和 NapCat 在同一服务器上时使用 `ws://127.0.0.1:3001`，不要
 
 ### 3.2 创建环境和服务
 
-先在中央面板“节点连接”中生成 QQ 节点的一次性配对码，然后执行：
+QQ 客户端首次启动后会自动登记到中央面板“客户端列表”，状态显示“等待验证”。先创建环境文件：
 
 ```bash
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/qq
@@ -184,7 +184,7 @@ sudo cp /opt/disqord/deploy/native/qq.env.example /etc/disqord/qq.env
 sudo nano /etc/disqord/qq.env
 ```
 
-填写中央域名、一次性配对码、NapCat Token 和节点面板 Token，然后：
+填写中央域名、NapCat Token 和节点面板 Token，然后：
 
 ```bash
 sudo chown root:disqord /etc/disqord/qq.env
@@ -195,11 +195,8 @@ sudo systemctl enable --now disqord-qq
 sudo systemctl status disqord-qq --no-pager
 ```
 
-配对成功后，编辑 `/etc/disqord/qq.env`，整行删除 `NODE_PAIRING_CODE=...`，再重启：
-
-```bash
-sudo systemctl restart disqord-qq
-```
+客户端在线后，在中央面板填写群号并发送验证码，到该 QQ 群读取验证码并回填。验证成功后该群成为
+该客户端唯一有效会话；更换群号必须重新验证。
 
 查看日志：
 
@@ -224,7 +221,7 @@ ssh -L 8090:127.0.0.1:8090 用户名@QQ服务器
 3. 授予 View Channel、Send Messages、Attach Files、Read Message History。
 4. 保存 Bot Token。
 
-按第 1 节安装并构建代码。在中央面板生成 Discord 节点配对码，然后：
+按第 1 节安装并构建代码，然后创建 Discord 客户端配置：
 
 ```bash
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/discord
@@ -233,7 +230,7 @@ sudo cp /opt/disqord/deploy/native/discord.env.example /etc/disqord/discord.env
 sudo nano /etc/disqord/discord.env
 ```
 
-填写中央域名、配对码、Discord Bot Token 和节点面板 Token，然后：
+填写中央域名、Discord Bot Token 和节点面板 Token，然后：
 
 ```bash
 sudo chown root:disqord /etc/disqord/discord.env
@@ -244,8 +241,9 @@ sudo systemctl enable --now disqord-discord
 sudo systemctl status disqord-discord --no-pager
 ```
 
-配对成功后删除 `/etc/disqord/discord.env` 中的 `NODE_PAIRING_CODE` 行并重启服务。节点面板同样通过
-SSH 隧道访问；如果 QQ 和 Discord 节点在不同服务器，两边都可在自己的电脑上映射到 8090。
+客户端首次连接后自动出现在中央面板“客户端列表”。点击配置，填写 Discord 服务器 ID 和频道
+ID；中央端命令该客户端向指定频道发送验证码，回填正确后状态变为“已验证”。更换服务器或频道
+必须重新验证。节点面板同样通过 SSH 隧道访问。
 
 ## 5. 面板配置
 
@@ -256,8 +254,8 @@ SSH 隧道访问；如果 QQ 和 Discord 节点在不同服务器，两边都可
 
 ### 聊天会话
 
-两个节点在线后进入“聊天会话”，自动发现群/频道，选择目标并发送验证码，到实际聊天中读取后
-回填。只有验证成功的会话可以加入蓝图。
+“聊天会话”页面只保存和展示已经配置过的群/频道。新增或更改会话统一在“客户端列表”完成：
+Discord 填服务器 ID 和频道 ID，QQ 填群号；发送验证码并回填。只有验证成功的会话可以加入蓝图。
 
 ### 转发蓝图
 

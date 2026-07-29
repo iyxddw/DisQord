@@ -37,6 +37,8 @@ export interface ChatSession {
 export interface NodeRuntime {
   nodeId: string;
   nodeType: 'qq' | 'discord';
+  verificationStatus?: 'pending' | 'verified';
+  configuredSession?: ChatSession;
   lastFrameKind?: string;
   lastSeenAt?: string;
   online?: boolean;

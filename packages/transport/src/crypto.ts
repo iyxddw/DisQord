@@ -28,7 +28,7 @@ export type NodeIdentity = z.infer<typeof nodeIdentitySchema>;
 export const pairingRequestSchema = z.object({
   nodeId: internalIdSchema,
   nodeType: platformSchema,
-  pairingCode: base64UrlSchema.min(8).max(128),
+  pairingCode: base64UrlSchema.min(8).max(128).optional(),
   publicKeyPem: pemSchema,
   nonce: internalIdSchema,
   createdAt: isoDateTimeSchema,
@@ -68,11 +68,11 @@ export function generateNodeIdentity(nodeType: 'qq' | 'discord'): NodeIdentity {
   };
 }
 
-export function createPairingRequest(identity: NodeIdentity, pairingCode: string): PairingRequest {
+export function createPairingRequest(identity: NodeIdentity, pairingCode?: string): PairingRequest {
   const unsigned = {
     nodeId: identity.nodeId,
     nodeType: identity.nodeType,
-    pairingCode,
+    ...(pairingCode ? { pairingCode } : {}),
     publicKeyPem: identity.publicKeyPem,
     nonce: randomUUID(),
     createdAt: new Date().toISOString(),

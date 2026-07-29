@@ -15,7 +15,6 @@ export const program = createProgramDescriptor('qq-node');
 
 const envSchema = z.object({
   CENTRAL_WSS_URL: z.url(),
-  NODE_PAIRING_CODE: z.string().min(8).optional(),
   NODE_CONFIG_PATH: z.string().min(1).default('./data/qq-node.json'),
   NODE_QUEUE_PATH: z.string().min(1).default('./data/qq-queue.sqlite'),
   ALLOW_INSECURE_CENTRAL: z.enum(['true', 'false']).default('false'),
@@ -79,7 +78,6 @@ export async function startQqNode(environment: NodeJS.ProcessEnv = process.env):
   const runtime = new NodeBridgeRuntime({
     nodeType: 'qq',
     centralUrl: env.CENTRAL_WSS_URL,
-    ...(env.NODE_PAIRING_CODE ? { pairingCode: env.NODE_PAIRING_CODE } : {}),
     configPath: resolve(env.NODE_CONFIG_PATH),
     queuePath: resolve(env.NODE_QUEUE_PATH),
     allowInsecureCentral: env.ALLOW_INSECURE_CENTRAL === 'true',

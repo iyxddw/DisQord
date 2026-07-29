@@ -41,7 +41,6 @@ const deliverCommandSchema = z.object({
 export interface NodeBridgeRuntimeOptions {
   readonly nodeType: NodeIdentity['nodeType'];
   readonly centralUrl: string;
-  readonly pairingCode?: string;
   readonly configPath: string;
   readonly queuePath: string;
   readonly allowInsecureCentral?: boolean;
@@ -73,15 +72,9 @@ export class NodeBridgeRuntime {
     this.#adapter = this.#options.createAdapter(config.identity);
     let sessionToken = config.sessionToken;
     if (!sessionToken) {
-      if (!this.#options.pairingCode) {
-        throw new Error(
-          'This node is not paired. Set NODE_PAIRING_CODE once, then restart the node.',
-        );
-      }
       sessionToken = await AuthenticatedNodeClient.pair({
         url: this.#options.centralUrl,
         identity: config.identity,
-        pairingCode: this.#options.pairingCode,
         ...(this.#options.allowInsecureCentral === undefined
           ? {}
           : { allowInsecure: this.#options.allowInsecureCentral }),

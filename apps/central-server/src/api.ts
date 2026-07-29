@@ -15,7 +15,12 @@ import {
   type ChatSession,
   type PromptTemplateVersion,
 } from '@disqord/shared';
-import { CentralNodeGateway, PairingAuthority, type ReceivedNodeFrame } from '@disqord/transport';
+import {
+  CentralNodeGateway,
+  PairingAuthority,
+  type NodeSession,
+  type ReceivedNodeFrame,
+} from '@disqord/transport';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -96,6 +101,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         await options.store.set('node-runtime', session.nodeId, {
           nodeId: session.nodeId,
           nodeType: session.nodeType,
+          verificationStatus: 'pending',
           pairedAt: new Date().toISOString(),
         });
       },
@@ -166,6 +172,13 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.get('/api/nodes', { preHandler: requireAdmin }, async () => {
     const runtime = await options.store.list<Record<string, unknown>>('node-runtime');
     const sessions = await options.store.list<Record<string, unknown>>('node-session');
+    const chatSessions = await options.store.list<ChatSession>('chat-session');
+    const verifiedByNode = new Map(
+      chatSessions
+        .map((entry) => entry.value)
+        .filter((session) => session.status === 'verified')
+        .map((session) => [session.nodeId, session]),
+    );
     const byId = new Map<string, Record<string, unknown>>();
     for (const entry of sessions) {
       byId.set(entry.key, {
@@ -179,18 +192,14 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     }
     return [...byId.values()].map((node) => ({
       ...node,
+      verificationStatus:
+        typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId) ? 'verified' : 'pending',
+      ...(typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId)
+        ? { configuredSession: verifiedByNode.get(node.nodeId) }
+        : {}),
       online:
         typeof node.nodeId === 'string' ? (gateway?.isNodeConnected(node.nodeId) ?? false) : false,
     }));
-  });
-
-  app.post('/api/nodes/pairing-code', { preHandler: requireAdmin }, async (request, reply) => {
-    try {
-      const { nodeType } = z.object({ nodeType: z.enum(['qq', 'discord']) }).parse(request.body);
-      return options.pairingAuthority.createCode(nodeType);
-    } catch (error) {
-      return await reply.code(400).send({ error: errorMessage(error) });
-    }
   });
 
   app.post('/api/nodes/:id/revoke', { preHandler: requireAdmin }, async (request, reply) => {
@@ -323,6 +332,19 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.post('/api/chat-sessions', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const candidate = sessionCandidateSchema.parse(request.body);
+      const nodeEntry = await options.store.get<NodeSession>('node-session', candidate.nodeId);
+      if (
+        !nodeEntry ||
+        nodeEntry.value.revoked ||
+        nodeEntry.value.nodeType !== candidate.platform
+      ) {
+        return await reply
+          .code(400)
+          .send({ error: 'Client does not exist or platform mismatches.' });
+      }
+      if (!gateway?.isNodeConnected(candidate.nodeId)) {
+        return await reply.code(409).send({ error: 'Client is offline.' });
+      }
       const now = new Date().toISOString();
       const session = chatSessionSchema.parse({
         id: randomUUID(),
@@ -404,6 +426,24 @@ export function createCentralApplication(options: CentralApplicationOptions) {
           return await reply.code(400).send({ error: 'Verification code is incorrect.' });
         }
         const now = new Date().toISOString();
+        const otherSessions = await options.store.list<ChatSession>('chat-session');
+        for (const other of otherSessions) {
+          if (
+            other.key !== id &&
+            other.value.nodeId === sessionEntry.value.nodeId &&
+            (other.value.status === 'verified' || other.value.status === 'pending')
+          ) {
+            await options.store.set(
+              'chat-session',
+              other.key,
+              chatSessionSchema.parse({
+                ...other.value,
+                status: 'stale',
+                updatedAt: now,
+              }),
+            );
+          }
+        }
         const verified = chatSessionSchema.parse({
           ...sessionEntry.value,
           status: 'verified',

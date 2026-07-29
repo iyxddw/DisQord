@@ -13,6 +13,20 @@ import {
 const pepper = 'a-secure-test-pepper-that-is-longer-than-32-characters';
 
 describe('PairingAuthority', () => {
+  it('automatically registers a signed client identity without a pre-issued code', () => {
+    const authority = new PairingAuthority(pepper);
+    const identity = generateNodeIdentity('discord');
+    const accepted = authority.register(createPairingRequest(identity));
+
+    expect(authority.authenticate(identity.nodeId, 'discord', accepted.sessionToken)).toMatchObject(
+      {
+        nodeId: identity.nodeId,
+        nodeType: 'discord',
+        revoked: false,
+      },
+    );
+  });
+
   it('binds a one-time code to the requested node type', () => {
     const authority = new PairingAuthority(pepper);
     const code = authority.createCode('qq');

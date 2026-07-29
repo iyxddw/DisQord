@@ -53,7 +53,7 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: '运行概览', icon: Activity },
   { id: 'sessions', label: '聊天会话', icon: MessagesSquare },
   { id: 'blueprint', label: '转发蓝图', icon: Network },
-  { id: 'nodes', label: '节点连接', icon: Server },
+  { id: 'nodes', label: '客户端列表', icon: Server },
   { id: 'settings', label: '基础设置', icon: Settings },
   { id: 'prompts', label: '高级模式', icon: Sparkles },
   { id: 'reviews', label: '人工审核', icon: ShieldCheck },
@@ -145,7 +145,8 @@ function App() {
             <h1>{current.label}</h1>
           </div>
           <div className="header-status">
-            <ShieldCheck size={17} /> 管理连接已加密
+            <ShieldCheck size={17} />
+            {location.protocol === 'https:' ? '管理连接已加密' : '管理连接使用明文 HTTP'}
           </div>
         </header>
         <section className="page">
@@ -270,13 +271,13 @@ function Overview() {
                   <span>
                     {node
                       ? node.online
-                        ? '安全通道在线'
+                        ? '客户端在线'
                         : `最后活动 ${formatTime(node.lastSeenAt)}`
                       : '等待节点首次连接'}
                   </span>
                 </div>
                 <b className={node?.online ? 'ok' : 'muted'}>
-                  {node?.online ? '在线' : node ? '已配对' : '未连接'}
+                  {node?.online ? '在线' : node ? '等待连接' : '未连接'}
                 </b>
               </div>
             );
@@ -301,156 +302,45 @@ function Stat({ label, value, icon: Icon }: { label: string; value: string; icon
 
 function Sessions() {
   const { data, reload, error } = useLoad<ChatSession[]>('/chat-sessions', []);
-  const nodes = useLoad<NodeRuntime[]>('/nodes', []);
-  const candidates = useLoad<
-    Array<{
-      nodeId: string;
-      platform: 'qq' | 'discord';
-      externalId: string;
-      spaceId: string;
-      displayName: string;
-    }>
-  >('/chat-sessions/candidates', []);
-  const [form, setForm] = useState({
-    nodeId: '',
-    platform: 'qq',
-    externalId: '',
-    spaceId: '',
-    displayName: '',
-  });
-  const [verify, setVerify] = useState<Record<string, string>>({});
-  const [notice, setNotice] = useState('');
-  const add = async () => {
-    try {
-      const session = await api<ChatSession>('/chat-sessions', { method: 'POST', json: form });
-      await api(`/chat-sessions/${session.id}/send-code`, { method: 'POST' });
-      setNotice('验证码已发送到目标会话，请在下方回填。');
-      await reload();
-    } catch (cause) {
-      setNotice(cause instanceof Error ? cause.message : '添加失败');
-    }
-  };
   return (
-    <div className="split">
-      <div className="panel">
-        <PanelTitle
-          title="已配置会话"
-          subtitle="只有完成验证码确认的会话可用于蓝图"
-          action={
-            <button className="icon-button" onClick={() => void reload()}>
-              <RefreshCw size={16} />
-            </button>
-          }
-        />
-        {error && <div className="error">{error}</div>}
-        <div className="list">
-          {data.map((session) => (
-            <div className="session-row" key={session.id}>
-              <div className={`platform ${session.platform}`}>
-                <MessagesSquare size={18} />
-              </div>
-              <div className="grow">
-                <strong>{session.displayName}</strong>
-                <span>
-                  {session.platform.toUpperCase()} · {session.externalId}
-                </span>
-              </div>
-              {session.status === 'verified' ? (
-                <span className="badge success">
-                  <Check size={13} />
-                  已验证
-                </span>
-              ) : (
-                <div className="verify-box">
-                  <input
-                    placeholder="回填验证码"
-                    value={verify[session.id] ?? ''}
-                    onChange={(event) => setVerify({ ...verify, [session.id]: event.target.value })}
-                  />
-                  <button
-                    onClick={() =>
-                      void api(`/chat-sessions/${session.id}/verify`, {
-                        method: 'POST',
-                        json: { code: verify[session.id] },
-                      }).then(reload)
-                    }
-                  >
-                    验证
-                  </button>
-                </div>
-              )}
+    <div className="panel">
+      <PanelTitle
+        title="已配置聊天会话"
+        subtitle="会话在客户端列表完成验证码验证后自动保存；只有已验证会话可用于蓝图"
+        action={
+          <button className="icon-button" onClick={() => void reload()}>
+            <RefreshCw size={16} />
+          </button>
+        }
+      />
+      {error && <div className="error">{error}</div>}
+      <div className="list">
+        {data.map((session) => (
+          <div className="session-row" key={session.id}>
+            <div className={`platform ${session.platform}`}>
+              <MessagesSquare size={18} />
             </div>
-          ))}
-          {!data.length && <Empty text="还没有聊天会话" />}
-        </div>
-      </div>
-      <div className="panel compact">
-        <PanelTitle title="添加会话" subtitle="保存后会立即向目标发送验证码" />
-        <label>
-          自动发现
-          <select
-            value=""
-            onChange={(event) => {
-              const candidate = candidates.data[Number(event.target.value)];
-              if (candidate) setForm(candidate);
-            }}
-          >
-            <option value="">从节点发现的会话中选择</option>
-            {candidates.data.map((candidate, index) => (
-              <option key={`${candidate.nodeId}:${candidate.externalId}`} value={index}>
-                {candidate.platform.toUpperCase()} · {candidate.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          所属节点
-          <select
-            value={form.nodeId}
-            onChange={(event) => {
-              const node = nodes.data.find((item) => item.nodeId === event.target.value);
-              setForm({ ...form, nodeId: event.target.value, platform: node?.nodeType ?? 'qq' });
-            }}
-          >
-            <option value="">选择已连接节点</option>
-            {nodes.data.map((node) => (
-              <option key={node.nodeId} value={node.nodeId}>
-                {node.nodeType.toUpperCase()} · {node.nodeId.slice(0, 8)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          会话名称
-          <input
-            value={form.displayName}
-            onChange={(event) => setForm({ ...form, displayName: event.target.value })}
-            placeholder="例如：产品交流 / general"
-          />
-        </label>
-        <label>
-          群号或频道 ID
-          <input
-            value={form.externalId}
-            onChange={(event) =>
-              setForm({ ...form, externalId: event.target.value, spaceId: event.target.value })
-            }
-          />
-        </label>
-        {form.platform === 'discord' && (
-          <label>
-            服务器 ID
-            <input
-              value={form.spaceId}
-              onChange={(event) => setForm({ ...form, spaceId: event.target.value })}
-            />
-          </label>
-        )}
-        {notice && <div className="notice">{notice}</div>}
-        <button className="primary" onClick={() => void add()}>
-          <Plus size={16} />
-          保存并发送验证码
-        </button>
+            <div className="grow">
+              <strong>{session.displayName}</strong>
+              <span>
+                {session.platform === 'discord'
+                  ? `服务器 ${session.spaceId} · 频道 ${session.externalId}`
+                  : `群号 ${session.externalId}`}
+              </span>
+            </div>
+            <span className={`badge ${session.status === 'verified' ? 'success' : ''}`}>
+              {session.status === 'verified' && <Check size={13} />}
+              {session.status === 'verified'
+                ? '已验证'
+                : session.status === 'pending'
+                  ? '等待验证码'
+                  : session.status === 'stale'
+                    ? '已失效'
+                    : '已禁用'}
+            </span>
+          </div>
+        ))}
+        {!data.length && <Empty text="还没有聊天会话，请先到客户端列表完成验证" />}
       </div>
     </div>
   );
@@ -583,49 +473,160 @@ function BlueprintEditor() {
 
 function Nodes() {
   const nodes = useLoad<NodeRuntime[]>('/nodes', []);
-  const [codes, setCodes] = useState<Record<string, { code: string; expiresAt: string }>>({});
-  const createCode = async (nodeType: 'qq' | 'discord') => {
-    const result = await api<{ code: string; expiresAt: string; nodeType: string }>(
-      '/nodes/pairing-code',
-      { method: 'POST', json: { nodeType } },
-    );
-    setCodes({ ...codes, [nodeType]: result });
+  const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
+  const [drafts, setDrafts] = useState<Record<string, { spaceId: string; externalId: string }>>({});
+  const [editing, setEditing] = useState<Record<string, boolean>>({});
+  const [verificationCodes, setVerificationCodes] = useState<Record<string, string>>({});
+  const [notices, setNotices] = useState<Record<string, string>>({});
+
+  const updateDraft = (nodeId: string, patch: Partial<{ spaceId: string; externalId: string }>) => {
+    setDrafts((current) => ({
+      ...current,
+      [nodeId]: { spaceId: '', externalId: '', ...current[nodeId], ...patch },
+    }));
   };
+
+  const configure = async (node: NodeRuntime) => {
+    const draft = drafts[node.nodeId] ?? { spaceId: '', externalId: '' };
+    const externalId = draft.externalId.trim();
+    const spaceId = node.nodeType === 'qq' ? externalId : draft.spaceId.trim();
+    try {
+      const session = await api<ChatSession>('/chat-sessions', {
+        method: 'POST',
+        json: {
+          nodeId: node.nodeId,
+          platform: node.nodeType,
+          externalId,
+          spaceId,
+          displayName:
+            node.nodeType === 'qq' ? `QQ群 ${externalId}` : `Discord ${spaceId} / ${externalId}`,
+        },
+      });
+      await api(`/chat-sessions/${session.id}/send-code`, { method: 'POST' });
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: '验证码已发送，请从目标群或频道读取后回填。',
+      }));
+      await sessions.reload();
+    } catch (cause) {
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: cause instanceof Error ? cause.message : '配置失败',
+      }));
+    }
+  };
+
+  const verify = async (node: NodeRuntime, session: ChatSession) => {
+    try {
+      await api(`/chat-sessions/${session.id}/verify`, {
+        method: 'POST',
+        json: { code: verificationCodes[session.id] ?? '' },
+      });
+      setEditing((current) => ({ ...current, [node.nodeId]: false }));
+      setNotices((current) => ({ ...current, [node.nodeId]: '客户端与会话验证成功。' }));
+      await Promise.all([sessions.reload(), nodes.reload()]);
+    } catch (cause) {
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: cause instanceof Error ? cause.message : '验证码错误',
+      }));
+    }
+  };
+
   return (
     <div className="node-columns">
-      {(['qq', 'discord'] as const).map((type) => {
-        const node = nodes.data.find((item) => item.nodeType === type);
-        const code = codes[type];
+      {nodes.data.map((node) => {
+        const verified = sessions.data.find(
+          (session) => session.nodeId === node.nodeId && session.status === 'verified',
+        );
+        const pending = sessions.data.find(
+          (session) => session.nodeId === node.nodeId && session.status === 'pending',
+        );
+        const draft = drafts[node.nodeId] ?? { spaceId: '', externalId: '' };
+        const showForm = !verified || editing[node.nodeId];
         return (
-          <div className="panel node-setup" key={type}>
-            <div className={`platform large ${type}`}>
+          <div className="panel node-setup" key={node.nodeId}>
+            <div className={`platform large ${node.nodeType}`}>
               <Bot size={25} />
             </div>
-            <h2>{type === 'qq' ? 'QQ 节点' : 'Discord 节点'}</h2>
-            <p>{type === 'qq' ? '连接 NapCat OneBot 11' : '连接 Discord Bot Gateway'}</p>
+            <h2>{node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'}</h2>
+            <p>{node.nodeId}</p>
             <div className="connection-state">
-              <i className={node?.online ? 'online' : ''} />
-              {node
-                ? `${node.online ? '在线' : '已配对'} · ${node.nodeId.slice(0, 12)}`
-                : '尚未配对'}
+              <i className={node.online ? 'online' : ''} />
+              {node.online ? '在线' : '离线'} · {verified ? '已验证' : '等待验证'}
             </div>
-            {code ? (
+
+            {verified && !showForm && (
               <div className="pair-code">
-                <span>一次性配对码</span>
-                <strong>{code.code}</strong>
-                <small>{formatTime(code.expiresAt)} 前有效</small>
+                <span>当前固定会话</span>
+                <strong>{verified.displayName}</strong>
+                <small>
+                  {node.nodeType === 'discord'
+                    ? `服务器 ${verified.spaceId} · 频道 ${verified.externalId}`
+                    : `群号 ${verified.externalId}`}
+                </small>
+                <button onClick={() => setEditing({ ...editing, [node.nodeId]: true })}>
+                  更改会话
+                </button>
               </div>
-            ) : (
-              <button className="primary" onClick={() => void createCode(type)}>
-                生成配对码
-              </button>
             )}
-            <p className="help">
-              将配对码临时填入该节点的 <code>NODE_PAIRING_CODE</code>，启动成功后即可删除。
-            </p>
+
+            {showForm && (
+              <>
+                {node.nodeType === 'discord' && (
+                  <label>
+                    Discord 服务器 ID
+                    <input
+                      value={draft.spaceId}
+                      onChange={(event) =>
+                        updateDraft(node.nodeId, { spaceId: event.target.value })
+                      }
+                      placeholder="例如 123456789012345678"
+                    />
+                  </label>
+                )}
+                <label>
+                  {node.nodeType === 'discord' ? 'Discord 频道 ID' : 'QQ群号'}
+                  <input
+                    value={draft.externalId}
+                    onChange={(event) =>
+                      updateDraft(node.nodeId, { externalId: event.target.value })
+                    }
+                    placeholder={
+                      node.nodeType === 'discord' ? '例如 123456789012345678' : '例如 123456789'
+                    }
+                  />
+                </label>
+                <button
+                  className="primary"
+                  disabled={!node.online}
+                  onClick={() => void configure(node)}
+                >
+                  发送验证码
+                </button>
+              </>
+            )}
+
+            {pending && (
+              <div className="verify-box">
+                <input
+                  placeholder="回填频道或群内的验证码"
+                  value={verificationCodes[pending.id] ?? ''}
+                  onChange={(event) =>
+                    setVerificationCodes({
+                      ...verificationCodes,
+                      [pending.id]: event.target.value,
+                    })
+                  }
+                />
+                <button onClick={() => void verify(node, pending)}>完成验证</button>
+              </div>
+            )}
+            {notices[node.nodeId] && <div className="notice">{notices[node.nodeId]}</div>}
           </div>
         );
       })}
+      {!nodes.data.length && <Empty text="尚无客户端；启动 QQ 或 Discord 客户端后会自动出现" />}
     </div>
   );
 }

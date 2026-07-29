@@ -66,13 +66,8 @@ export class PairingAuthority {
   }
 
   accept(request: PairingRequest): PairingAcceptance {
-    const requestTime = Date.parse(request.createdAt);
-    if (!Number.isFinite(requestTime) || Math.abs(this.#now() - requestTime) > 5 * 60 * 1_000) {
-      throw new Error('Pairing request timestamp is outside the allowed window.');
-    }
-    if (!verifyPairingRequestSignature(request)) {
-      throw new Error('Pairing request signature is invalid.');
-    }
+    this.#validateRequest(request);
+    if (!request.pairingCode) throw new Error('Pairing code is required.');
 
     const codeDigest = hashSecret(request.pairingCode, this.#pepper);
     const codeRecord = this.#codes.get(codeDigest);
@@ -86,6 +81,31 @@ export class PairingAuthority {
     }
 
     codeRecord.consumed = true;
+    return this.#createSession(request);
+  }
+
+  register(request: PairingRequest): PairingAcceptance {
+    this.#validateRequest(request);
+    if (request.pairingCode) throw new Error('Automatic registration must not include a code.');
+    const existing = this.#sessions.get(request.nodeId);
+    const fingerprint = fingerprintPublicKey(request.publicKeyPem);
+    if (existing && existing.publicKeyFingerprint !== fingerprint) {
+      throw new Error('Node ID is already registered with another identity.');
+    }
+    return this.#createSession(request);
+  }
+
+  #validateRequest(request: PairingRequest): void {
+    const requestTime = Date.parse(request.createdAt);
+    if (!Number.isFinite(requestTime) || Math.abs(this.#now() - requestTime) > 5 * 60 * 1_000) {
+      throw new Error('Pairing request timestamp is outside the allowed window.');
+    }
+    if (!verifyPairingRequestSignature(request)) {
+      throw new Error('Pairing request signature is invalid.');
+    }
+  }
+
+  #createSession(request: PairingRequest): PairingAcceptance {
     const sessionToken = createRandomToken(32);
     const session: NodeSession = {
       nodeId: request.nodeId,

@@ -34,20 +34,19 @@ describe('central control-plane API', () => {
     const central = createTestApplication();
     const unauthorized = await central.app.inject({
       method: 'POST',
-      url: '/api/nodes/pairing-code',
-      payload: { nodeType: 'qq' },
+      url: '/api/chat-sessions',
+      payload: {},
     });
     expect(unauthorized.statusCode).toBe(401);
 
     const token = await configureAdministrator(central);
-    const paired = await central.app.inject({
-      method: 'POST',
-      url: '/api/nodes/pairing-code',
+    const nodes = await central.app.inject({
+      method: 'GET',
+      url: '/api/nodes',
       cookies: { disqord_session: token },
-      payload: { nodeType: 'qq' },
     });
-    expect(paired.statusCode).toBe(200);
-    expect(paired.json()).toMatchObject({ nodeType: 'qq' });
+    expect(nodes.statusCode).toBe(200);
+    expect(nodes.json()).toEqual([]);
     await central.app.close();
   });
 

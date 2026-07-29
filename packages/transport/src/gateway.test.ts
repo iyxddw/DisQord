@@ -58,15 +58,13 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<voi
 }
 
 describe('central node WebSocket gateway', () => {
-  it('pairs, authenticates, acknowledges and reconnects a platform node', async () => {
+  it('registers, authenticates, acknowledges and reconnects a platform node', async () => {
     const received: ReceivedNodeFrame[] = [];
     const running = await startGateway((frame) => received.push(frame));
     const identity = generateNodeIdentity('qq');
-    const pairingCode = running.authority.createCode('qq');
     const token = await AuthenticatedNodeClient.pair({
       url: running.url,
       identity,
-      pairingCode: pairingCode.code,
       allowInsecure: true,
     });
     let connectionCount = 0;

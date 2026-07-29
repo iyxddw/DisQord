@@ -181,7 +181,9 @@ export class CentralNodeGateway {
       if (context.nodeId) {
         throw new Error('An authenticated connection cannot pair again.');
       }
-      const accepted = this.#authority.accept(message.request);
+      const accepted = message.request.pairingCode
+        ? this.#authority.accept(message.request)
+        : this.#authority.register(message.request);
       const session = this.#authority.getSession(accepted.nodeId);
       if (!session) throw new Error('Accepted node session was not created.');
       await this.#onPairingAccepted?.(accepted, session);
@@ -331,7 +333,7 @@ export class AuthenticatedNodeClient {
   static async pair(input: {
     readonly url: string;
     readonly identity: NodeIdentity;
-    readonly pairingCode: string;
+    readonly pairingCode?: string;
     readonly allowInsecure?: boolean;
   }): Promise<string> {
     assertSecureUrl(input.url, input.allowInsecure ?? false);
