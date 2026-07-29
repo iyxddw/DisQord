@@ -1,0 +1,28 @@
+[Unit]
+Description=DisQord Discord Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=disqord
+Group=disqord
+WorkingDirectory=/opt/disqord
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/disqord/discord.env
+ExecStart=/usr/bin/env node apps/discord-node/dist/index.js
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/disqord/discord
+
+[Install]
+WantedBy=multi-user.target

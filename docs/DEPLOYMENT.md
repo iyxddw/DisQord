@@ -1,281 +1,311 @@
-# DisQord 部署与首次配置
+# DisQord 原生部署指南（不使用 Docker）
 
-本文按“三台服务器”描述。中央服务器需要公网域名；QQ 节点和 Discord 节点只需能主动访问
-中央服务器，不必开放公网端口。若两种节点暂时部署在同一台机器，步骤相同，但生产环境仍建议隔离。
+本文按三台 Linux 服务器部署：
 
-## 1. 准备
+- 中央服务器：PostgreSQL、DisQord Central、Caddy，必须有公网域名。
+- QQ 服务器：NapCat 与 DisQord QQ Node。
+- Discord 服务器：DisQord Discord Node。
 
-三台机器均安装：
+三个 DisQord 程序均由 systemd 托管。QQ、Discord 服务器只主动连接中央服务器，无需开放
+公网端口。示例适用于 Ubuntu/Debian，默认项目目录为 `/opt/disqord`。
 
-- Git
-- Docker Engine 与 Docker Compose 插件
+## 1. 三台服务器的公共准备
 
-中央服务器额外准备一个域名，例如 `central.example.com`，将 A/AAAA 记录指向中央服务器。
-防火墙只需放行 80 和 443。节点面板默认只映射到各自服务器的 `127.0.0.1:8090`。
+安装 Git、下载工具和编译所需基础包：
 
-拉取项目后，先进入 DisQord 项目根目录（能看到 `package.json`、`deploy` 和 `docs`
-目录的位置）：
-
-```text
-cd /你的路径/DisQord
-docker --version
-docker compose version
+```bash
+sudo apt update
+sudo apt install -y git curl ca-certificates xz-utils build-essential
 ```
 
-后文所有 `docker compose` 命令都在这个目录执行。项目已经固定使用
-`https://registry.npmmirror.com/`，Docker 中央镜像安装中文字体时也使用清华 Debian 镜像。
+安装项目固定的 Node.js 24.18.0。以下命令会自动识别 x86_64 与 ARM64，并使用 npmmirror：
 
-## 2. 启动中央服务器
-
-在 `deploy` 目录旁创建 `central.env`，不要提交：
-
-```dotenv
-DISQORD_DOMAIN=central.example.com
-POSTGRES_PASSWORD=生成一个强密码
-ENCRYPTION_KEY=至少32位随机字符串
-PAIRING_PEPPER=另一段至少32位随机字符串
+```bash
+case "$(uname -m)" in
+  x86_64) NODE_ARCH=x64 ;;
+  aarch64|arm64) NODE_ARCH=arm64 ;;
+  *) echo "不支持的 CPU 架构：$(uname -m)"; exit 1 ;;
+esac
+curl -fL "https://npmmirror.com/mirrors/node/v24.18.0/node-v24.18.0-linux-${NODE_ARCH}.tar.xz" \
+  -o /tmp/node-v24.18.0.tar.xz
+sudo tar -xJf /tmp/node-v24.18.0.tar.xz -C /usr/local --strip-components=1
+node --version
 ```
 
-可用以下方式分别生成两段随机值：
+输出应为 `v24.18.0`。启用项目固定的 pnpm：
 
-```text
-openssl rand -base64 48
+```bash
+sudo corepack enable
+corepack prepare pnpm@10.14.0 --activate
+pnpm --version
 ```
 
-将 `central.example.com` 换成你实际拥有的域名，例如 `bridge.example.net`，不要填写
-`https://`，也不要在末尾添加 `/`。
+创建专用系统用户并安装代码。首次部署时执行：
 
-### 2.1 配置域名解析
-
-登录购买域名的平台，在 DNS 管理中添加记录：
-
-| 类型 | 主机记录         | 记录值                |
-| ---- | ---------------- | --------------------- |
-| A    | `bridge`（示例） | 中央服务器的公网 IPv4 |
-
-如果使用根域名，主机记录通常填写 `@`。如果服务器没有可用的公网 IPv6，不要添加 AAAA
-记录；错误的 AAAA 记录会导致部分设备无法连接。
-
-等待解析生效后，在中央服务器检查：
-
-```text
-getent ahostsv4 bridge.example.net
+```bash
+sudo useradd --system --create-home --home-dir /var/lib/disqord \
+  --shell /usr/sbin/nologin disqord 2>/dev/null || true
+sudo git clone https://github.com/iyxddw/DisQord /opt/disqord
+sudo chown -R disqord:disqord /opt/disqord
+cd /opt/disqord
+sudo -u disqord pnpm config set registry https://registry.npmmirror.com/
+sudo -u disqord pnpm install --frozen-lockfile
+sudo -u disqord pnpm build
 ```
 
-输出的 IP 应当是中央服务器的公网 IP。
+若 `/opt/disqord` 已存在，不要再次 clone，参照本文“更新”章节。
 
-### 2.2 开放端口
+## 2. 中央服务器
 
-在云服务商的安全组/防火墙中允许入站：
+### 2.1 安装并创建 PostgreSQL 数据库
 
-- TCP 80：证书签发和 HTTP 自动跳转
-- TCP 443：HTTPS 和 WSS
-- UDP 443：HTTP/3，可选但推荐
+```bash
+sudo apt install -y postgresql postgresql-contrib fonts-noto-cjk
+sudo systemctl enable --now postgresql
+sudo -u postgres createuser --pwprompt disqord
+sudo -u postgres createdb --owner=disqord disqord
+```
 
-Ubuntu 使用 UFW 时还可以执行：
+`createuser` 会让你输入两次数据库密码。密码仅使用字母、数字、下划线和连字符，避免放入
+连接地址时还要进行 URL 编码。若提示用户或数据库已经存在，不要重复创建或删除。
 
-```text
+验证本机数据库：
+
+```bash
+psql "postgresql://disqord:你的数据库密码@127.0.0.1:5432/disqord" \
+  -c "select current_database(), current_user;"
+```
+
+### 2.2 创建中央端环境文件
+
+```bash
+sudo install -d -m 0750 -o root -g disqord /etc/disqord
+sudo cp /opt/disqord/deploy/native/central.env.example /etc/disqord/central.env
+sudo nano /etc/disqord/central.env
+```
+
+把三个 `CHANGE_...` 替换掉。两段密钥分别用以下命令生成：
+
+```bash
+openssl rand -hex 48
+```
+
+中央服务固定绑定 `127.0.0.1:18080`，不会占用你原有的 8080，也不会直接暴露公网。保存后：
+
+```bash
+sudo chown root:disqord /etc/disqord/central.env
+sudo chmod 0640 /etc/disqord/central.env
+```
+
+### 2.3 安装并启动 Central
+
+```bash
+sudo cp /opt/disqord/deploy/native/disqord-central.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now disqord-central
+sudo systemctl status disqord-central --no-pager
+```
+
+程序启动时会自动执行数据库迁移。检查本机健康接口：
+
+```bash
+curl http://127.0.0.1:18080/api/health
+```
+
+应返回包含 `"status":"ok"` 的 JSON。失败时查看：
+
+```bash
+sudo journalctl -u disqord-central -n 100 --no-pager
+```
+
+### 2.4 安装 Caddy 和 HTTPS
+
+先将域名 A 记录指向中央服务器公网 IPv4。没有可用 IPv6 时不要添加 AAAA。云安全组和 UFW
+允许 TCP 80、TCP 443；UDP 443 可选：
+
+```bash
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
-sudo ufw status
 ```
 
-确认没有其他程序占用 80/443：
+通过 Caddy 官方软件源安装（兼容系统自带仓库没有 Caddy 或版本过旧的 Ubuntu/Debian）：
 
-```text
-sudo ss -lntup | grep -E ':(80|443)\b'
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
+  sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
+  sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+sudo chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update
+sudo apt install -y caddy
 ```
 
-如果输出中已有 Nginx、Apache 或其他 Caddy，需要先决定保留哪个反向代理，不能让两个程序同时
-监听同一端口。
+让 Caddy 读取域名环境变量：
 
-### 2.3 启动 PostgreSQL、中央服务和 Caddy
-
-在 DisQord 项目根目录执行：
-
-```text
-docker compose --env-file central.env -f deploy/docker-compose.central.yml up -d --build
+```bash
+echo 'DISQORD_DOMAIN=你的实际域名' | sudo tee /etc/disqord/caddy.env
+sudo chmod 0644 /etc/disqord/caddy.env
+sudo mkdir -p /etc/systemd/system/caddy.service.d
+printf '[Service]\nEnvironmentFile=/etc/disqord/caddy.env\n' | \
+  sudo tee /etc/systemd/system/caddy.service.d/disqord.conf
+sudo cp /opt/disqord/deploy/native/Caddyfile /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl daemon-reload
+sudo systemctl enable --now caddy
+sudo systemctl restart caddy
 ```
 
-这条命令会同时启动三个容器：
+这里的域名只填写 `bridge.example.com` 形式，不要带 `https://` 或路径。验证：
 
-- `postgres`：保存中央配置、会话、日志和任务
-- `central`：DisQord 中央程序，容器内监听 8080
-- `caddy`：公网入口，监听 80/443，并把请求转发到 `central:8080`
-
-Caddy 配置位于 [`deploy/caddy/Caddyfile`](../deploy/caddy/Caddyfile)，已经通过
-`DISQORD_DOMAIN` 读取域名，不需要手工改文件。域名解析正确且 80/443 可从公网访问时，Caddy
-会自动申请受浏览器信任的证书、把 HTTP 跳转到 HTTPS，并在证书到期前自动续期。证书与私钥保存
-在 Docker 卷 `disqord-caddy-data`，不要随意删除该卷。
-
-查看启动状态：
-
-```text
-docker compose --env-file central.env -f deploy/docker-compose.central.yml ps
-docker compose --env-file central.env -f deploy/docker-compose.central.yml logs --tail 100 caddy
+```bash
+sudo journalctl -u caddy -n 100 --no-pager
+curl https://你的实际域名/api/health
 ```
 
-Caddy 日志出现证书申请成功后，检查：
+Caddy 自动申请、续期证书并支持 WebSocket。浏览器打开 `https://你的实际域名`，首次进入中央
+面板时创建至少 12 位管理员密码。
 
-```text
-curl -I https://bridge.example.net
-curl https://bridge.example.net/api/health
+## 3. QQ 服务器
+
+先按第 1 节安装 Node、pnpm、代码并完成构建。
+
+### 3.1 NapCat
+
+在 NapCat WebUI 中启用 OneBot 11 WebSocket 服务端：
+
+- 监听地址：`127.0.0.1`
+- 端口：`3001`
+- 设置一个强 Access Token
+
+DisQord 和 NapCat 在同一服务器上时使用 `ws://127.0.0.1:3001`，不要把 OneBot 端口开放公网。
+
+### 3.2 创建环境和服务
+
+先在中央面板“节点连接”中生成 QQ 节点的一次性配对码，然后执行：
+
+```bash
+sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/qq
+sudo install -d -m 0750 -o root -g disqord /etc/disqord
+sudo cp /opt/disqord/deploy/native/qq.env.example /etc/disqord/qq.env
+sudo nano /etc/disqord/qq.env
 ```
 
-把示例域名替换成自己的。第二条应返回包含 `"status":"ok"` 的 JSON，然后用浏览器打开相同的
-HTTPS 地址。
+填写中央域名、一次性配对码、NapCat Token 和节点面板 Token，然后：
 
-如果以后修改 `deploy/caddy/Caddyfile`，无需停止服务，可检查并重新加载：
-
-```text
-docker compose --env-file central.env -f deploy/docker-compose.central.yml exec -w /etc/caddy caddy caddy validate
-docker compose --env-file central.env -f deploy/docker-compose.central.yml exec -w /etc/caddy caddy caddy reload
+```bash
+sudo chown root:disqord /etc/disqord/qq.env
+sudo chmod 0640 /etc/disqord/qq.env
+sudo cp /opt/disqord/deploy/native/disqord-qq.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now disqord-qq
+sudo systemctl status disqord-qq --no-pager
 ```
 
-首次进入中央面板时创建至少 12 位管理员密码。中央容器的 8080 端口只映射到服务器本机
-`127.0.0.1`，公网用户和两个节点都应使用 Caddy 提供的 HTTPS/WSS 地址。
+配对成功后，编辑 `/etc/disqord/qq.env`，整行删除 `NODE_PAIRING_CODE=...`，再重启：
 
-## 3. 配置大模型
-
-进入“基础设置”：
-
-1. 填写 OpenAI Chat Completions 兼容 API 的基础地址，例如 `https://provider.example/v1`。
-2. 填写 API 密钥。
-3. 分别填写翻译模型与审核模型。
-4. 只有审核模型确实支持图片输入时，才打开“审核模型支持图片理解”。
-5. 保存。
-
-API 密钥经 AES-256-GCM 加密后存入 PostgreSQL，读取设置时不会返回给浏览器。若更换
-`ENCRYPTION_KEY`，旧密钥将无法解密，所以必须连同数据库备份妥善保存。
-
-“高级模式”中有四套可版本化内容：
-
-- 翻译系统提示词
-- 翻译任务模板
-- 审核系统提示词
-- 审核规则
-
-修改后点击“创建并发布新版本”。固定的协议边界和“不把消息正文当指令”的规则不允许在页面中
-覆盖。
-
-## 4. 配置 QQ 节点
-
-### 4.1 NapCat
-
-先让 NapCat 登录目标 QQ。在 NapCat WebUI 的网络配置中启用 OneBot 11 WebSocket 服务端，
-建议只监听 `127.0.0.1:3001`，并设置访问 Token。DisQord QQ 节点是 WebSocket 客户端。
-
-### 4.2 创建配对码
-
-中央面板进入“节点连接”，在 QQ 节点卡片中点击“生成配对码”。配对码十分钟有效、只能使用一次，
-并且不能用于 Discord 节点。
-
-### 4.3 启动
-
-在 QQ 服务器的项目目录创建 `qq.env`：
-
-```dotenv
-CENTRAL_WSS_URL=wss://central.example.com/node
-NODE_PAIRING_CODE=中央面板生成的一次性配对码
-NAPCAT_ONEBOT_WS_URL=ws://host.docker.internal:3001
-NAPCAT_ACCESS_TOKEN=NapCat中设置的Token
-NODE_WEB_TOKEN=至少16位随机字符串
+```bash
+sudo systemctl restart disqord-qq
 ```
 
-启动：
+查看日志：
 
-```text
-docker compose --env-file qq.env -f deploy/docker-compose.qq.yml up -d --build
+```bash
+sudo journalctl -u disqord-qq -f
 ```
 
-首次配对成功后，编辑 `qq.env` 删除 `NODE_PAIRING_CODE`，再执行：
+节点面板只监听本机。你在自己的电脑上建立 SSH 隧道：
 
-```text
-docker compose --env-file qq.env -f deploy/docker-compose.qq.yml up -d
+```bash
+ssh -L 8090:127.0.0.1:8090 用户名@QQ服务器
 ```
 
-节点身份、长期会话凭据和 SQLite 队列保存在 Docker 命名卷 `disqord-qq-data`。不要删除该卷；
-否则需要重新配对。
+浏览器打开 `http://127.0.0.1:8090`，填写 `NODE_WEB_TOKEN`。
 
-本机查看节点面板：
+## 4. Discord 服务器
 
-```text
-ssh -L 8090:127.0.0.1:8090 user@qq-server
-```
+在 Discord Developer Portal：
 
-然后浏览器打开 `http://127.0.0.1:8090`，填写 `NODE_WEB_TOKEN`。
-
-## 5. 配置 Discord 节点
-
-在 Discord Developer Portal 创建 Bot：
-
-1. 打开 Message Content Intent。
-2. 邀请 Bot 进入目标服务器。
-3. 至少授予 View Channel、Send Messages、Attach Files、Read Message History 权限。
+1. 创建 Bot 并打开 Message Content Intent。
+2. 邀请 Bot 到目标服务器。
+3. 授予 View Channel、Send Messages、Attach Files、Read Message History。
 4. 保存 Bot Token。
 
-中央面板生成 Discord 节点配对码。在 Discord 服务器项目目录创建 `discord.env`：
+按第 1 节安装并构建代码。在中央面板生成 Discord 节点配对码，然后：
 
-```dotenv
-CENTRAL_WSS_URL=wss://central.example.com/node
-NODE_PAIRING_CODE=中央面板生成的一次性配对码
-DISCORD_BOT_TOKEN=Discord Bot Token
-NODE_WEB_TOKEN=至少16位随机字符串
+```bash
+sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/discord
+sudo install -d -m 0750 -o root -g disqord /etc/disqord
+sudo cp /opt/disqord/deploy/native/discord.env.example /etc/disqord/discord.env
+sudo nano /etc/disqord/discord.env
 ```
 
-启动：
+填写中央域名、配对码、Discord Bot Token 和节点面板 Token，然后：
 
-```text
-docker compose --env-file discord.env -f deploy/docker-compose.discord.yml up -d --build
+```bash
+sudo chown root:disqord /etc/disqord/discord.env
+sudo chmod 0640 /etc/disqord/discord.env
+sudo cp /opt/disqord/deploy/native/disqord-discord.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now disqord-discord
+sudo systemctl status disqord-discord --no-pager
 ```
 
-首次配对成功后，同样删除 `NODE_PAIRING_CODE` 并重新执行 `up -d`。节点数据保存在
-`disqord-discord-data`。
+配对成功后删除 `/etc/disqord/discord.env` 中的 `NODE_PAIRING_CODE` 行并重启服务。节点面板同样通过
+SSH 隧道访问；如果 QQ 和 Discord 节点在不同服务器，两边都可在自己的电脑上映射到 8090。
 
-## 6. 验证聊天会话
+## 5. 面板配置
 
-两个节点都在线后：
+### 大模型
 
-1. 中央面板进入“聊天会话”。
-2. “自动发现”会列出 NapCat 可见 QQ 群和 Discord Bot 可发送的文字频道。
-3. 选择一个会话，点击“保存并发送验证码”。
-4. 到目标 QQ 群或 Discord 频道读取验证码。
-5. 回到中央面板填入验证码完成验证。
+中央面板“基础设置”填写 OpenAI Chat Completions 兼容 API 地址、密钥、翻译模型和审核模型。
+高级模式可以编辑并发布翻译、审核提示词版本。只有模型确实支持图片输入时才打开图片理解。
 
-验证码十分钟有效，30 秒内不能重发，连续输错五次后需重新发送。只有已验证会话可以进入转发蓝图。
+### 聊天会话
 
-## 7. 创建双向转发蓝图
+两个节点在线后进入“聊天会话”，自动发现群/频道，选择目标并发送验证码，到实际聊天中读取后
+回填。只有验证成功的会话可以加入蓝图。
 
-进入“转发蓝图”：
+### 转发蓝图
 
-1. 选择 QQ 会话，添加为“来源”。
-2. 选择 Discord 会话，添加为“目标”。
-3. 从来源右侧连接点拖到目标左侧连接点。
-4. 再添加 Discord 来源与 QQ 目标并连线。
-5. 点击“保存并发布”。
+分别创建 QQ → Discord、Discord → QQ 两条连接并发布。两边最终消息都以 PNG 图片发送，包含
+头像、昵称、时间、译文和下方半透明原文。回复关系会保留；文字和图片以外的类型显示“不支持的
+消息”。
 
-发布时中央服务会验证：会话必须已验证、节点和边必须完整、图中不能有环。发布成功后新消息立即
-使用该版本。
+## 6. 更新
 
-## 8. 实际消息行为
+每台服务器分别执行：
 
-- QQ 和 Discord 两边收到的转发结果始终是 PNG 图片。
-- 卡片包含来源、发送者头像、昵称、时间、译文、原文半透明区域及图片。
-- 文字与图片混合消息会合并到卡片中；长文本会分页。
-- 文件、语音、视频、贴纸等不兼容类型会转成“ 不支持的消息 / Unsupported message type ”卡片。
-- 回复会优先使用目标平台的原生回复关系；若旧消息尚无映射，卡片仍显示回复摘要。
-- 大模型返回 `review`、图片模型能力不足或调用失败时，消息进入“人工审核”，不会静默丢失。
-
-## 9. 更新与回滚
-
-更新前先备份 PostgreSQL 和两个节点数据卷。随后拉取代码并在每台对应服务器执行：
-
-```text
-docker compose --env-file <对应env文件> -f <对应compose文件> up -d --build
+```bash
+cd /opt/disqord
+sudo -u disqord git pull --ff-only
+sudo -u disqord pnpm install --frozen-lockfile
+sudo -u disqord pnpm build
 ```
 
-数据库迁移随中央服务启动自动执行，迁移记录保存在 `schema_migrations`。生产更新前仍应先在副本
-数据库演练。
+然后只重启该服务器负责的服务：
 
-常见诊断和备份命令见 [`OPERATIONS.md`](OPERATIONS.md)。
+```bash
+sudo systemctl restart disqord-central
+# 或
+sudo systemctl restart disqord-qq
+# 或
+sudo systemctl restart disqord-discord
+```
+
+中央端更新前先备份数据库。不要同时运行同一节点数据目录的两个副本。
+
+## 7. 旧 Docker 部署的处理
+
+确认原生服务工作前，不要删除旧卷。停止旧中央容器但保留数据：
+
+```bash
+cd /原来的/DisQord/deploy
+docker compose --env-file ../central.env -f docker-compose.central.yml down
+```
+
+不要添加 `-v`。旧 PostgreSQL 数据在 Docker 卷内，原生 PostgreSQL 不会自动看到它。如果旧
+容器中已经配置过实际数据，需要先按 `OPERATIONS.md` 导出再导入；如果只是刚部署且尚未配置，
+可以直接使用新的空数据库。
