@@ -51,8 +51,35 @@ describe('LLM translation and moderation', () => {
 
     const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
       messages: Array<{ content: unknown }>;
+      response_format: { type: string };
     };
     expect(JSON.stringify(body.messages)).toContain('untrustedUserData');
+    expect(typeof body.messages[2]?.content).toBe('string');
+    expect(body.response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('includes the provider error message when an API request is rejected', async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      maxRetries: 0,
+      fetchImplementation: vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { message: 'Unsupported response format' } }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    });
+
+    await expect(
+      new LlmTranslationService(client).translate({
+        text: '你好',
+        targetLanguage: 'en',
+        model: 'translation-model',
+        prompt: { content: 'Translate accurately.', version: 1 },
+      }),
+    ).rejects.toThrow('400: Unsupported response format');
   });
 
   it('fails closed when moderation output violates the schema', async () => {
