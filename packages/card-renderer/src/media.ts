@@ -1,6 +1,8 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
+import sharp from 'sharp';
+
 export interface DownloadedImage {
   readonly bytes: Buffer;
   readonly mimeType: string;
@@ -43,10 +45,14 @@ export async function downloadExternalImage(
     if (declaredLength > maximumBytes) throw new Error('Image exceeds the configured size limit.');
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > maximumBytes) throw new Error('Image exceeds the configured size limit.');
+    // librsvg does not reliably decode embedded WebP/GIF data URIs on every Linux
+    // distribution. Normalizing remote media to PNG keeps avatars and attachments
+    // portable when the final SVG is rasterized by sharp.
+    const normalizedBytes = await sharp(bytes, { animated: false }).rotate().png().toBuffer();
     return {
-      bytes,
-      mimeType,
-      dataUri: `data:${mimeType};base64,${bytes.toString('base64')}`,
+      bytes: normalizedBytes,
+      mimeType: 'image/png',
+      dataUri: `data:image/png;base64,${normalizedBytes.toString('base64')}`,
     };
   }
   throw new Error('Image redirect limit exceeded.');
