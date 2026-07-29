@@ -63,4 +63,20 @@ describe('normalizeNapCatGroupMessage', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('renders QQ mentions with resolved group display names', () => {
+    const message = normalizeNapCatGroupMessage(
+      {
+        ...baseEvent,
+        message: [
+          { type: 'at', data: { qq: '2678615579' } },
+          { type: 'text', data: { text: ' 撤回啥了' } },
+        ],
+      },
+      randomUUID(),
+      new Map([['2678615579', '萝卜']]),
+    );
+
+    expect(message?.text).toBe('@萝卜 撤回啥了');
+  });
 });

@@ -7,6 +7,7 @@ describe('message card renderer', () => {
   it('renders a PNG with reply context and a translucent original section', async () => {
     const input = {
       sourcePlatform: 'qq' as const,
+      targetLanguage: 'en' as const,
       sourceName: '测试群',
       senderName: 'Alice',
       sentAt: '2026-07-29 18:00',
@@ -21,7 +22,8 @@ describe('message card renderer', () => {
     };
     const svg = buildMessageCardSvg(input);
     expect(svg).toContain('fill-opacity="0.10"');
-    expect(svg).toContain('原文 · ORIGINAL');
+    expect(svg).toContain('>ORIGINAL</text>');
+    expect(svg).not.toContain('>原文</text>');
     expect(svg).toContain('Earlier message');
 
     const [png] = await renderMessageCards(input);
@@ -41,5 +43,24 @@ describe('message card renderer', () => {
       images: [],
     });
     expect(cards.length).toBeGreaterThan(1);
+  });
+
+  it('uses only Chinese interface labels for QQ targets', () => {
+    const svg = buildMessageCardSvg({
+      sourcePlatform: 'discord',
+      targetLanguage: 'zh',
+      sourceName: 'general',
+      senderName: 'Alice',
+      sentAt: '2026-07-29 18:00',
+      primaryText: '',
+      originalText: 'hello',
+      unsupportedType: 'record',
+      images: [],
+    });
+
+    expect(svg).toContain('>原文</text>');
+    expect(svg).toContain('不支持的消息');
+    expect(svg).not.toContain('ORIGINAL');
+    expect(svg).not.toContain('Unsupported message');
   });
 });

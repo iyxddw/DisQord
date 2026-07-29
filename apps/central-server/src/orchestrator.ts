@@ -14,10 +14,12 @@ import {
 } from '@disqord/llm';
 import {
   blueprintVersionSchema,
+  blueprintSchema,
   chatSessionSchema,
   createMessageIdempotencyKey,
   messageEnvelopeSchema,
   promptTemplateVersionSchema,
+  type Blueprint,
   type BlueprintVersion,
   type ChatSession,
   type MessageEnvelope,
@@ -99,10 +101,22 @@ export class MessageOrchestrator {
       return;
     }
 
+    const blueprints = (await this.#store.list<Blueprint>('blueprint')).map((entry) =>
+      blueprintSchema.parse(entry.value),
+    );
+    const enabledVersions = new Map(
+      blueprints
+        .filter((blueprint) => blueprint.enabled && blueprint.activeVersion !== undefined)
+        .map((blueprint) => [blueprint.id, blueprint.activeVersion]),
+    );
     const blueprintEntries = await this.#store.list<BlueprintVersion>('blueprint-version');
     const published = blueprintEntries
       .map((entry) => blueprintVersionSchema.parse(entry.value))
-      .filter((version) => version.status === 'published');
+      .filter(
+        (version) =>
+          version.status === 'published' &&
+          enabledVersions.get(version.blueprintId) === version.version,
+      );
     const verifiedIds = new Set(sessions.map((session) => session.id));
     const targets = new Set<string>();
     for (const blueprint of published) {
@@ -300,16 +314,45 @@ export class CentralMessageProcessor implements MessageProcessor {
     const imageUrls = message.attachments
       .map((attachment) => attachment.sourceUrl)
       .filter((url): url is string => Boolean(url));
-    if (imageUrls.length && !settings.moderationSupportsVision) {
+    const containsImages = message.attachments.length > 0;
+    const imagesAreReviewable =
+      Boolean(settings.visionModel) && imageUrls.length === message.attachments.length;
+    if (containsImages && !imagesAreReviewable) {
+      const reason =
+        'Image could not be moderated because no vision model is configured or its source is unavailable.';
+      const unreviewableModeration = {
+        riskLevel:
+          settings.unreviewableImagePolicy === 'allow' ? ('low' as const) : ('high' as const),
+        decision: settings.unreviewableImagePolicy,
+        categories: ['unreviewable-image'],
+        reason,
+        confidence: 1,
+        model: settings.visionModel || 'not-configured',
+        promptVersion: moderationPrompt.version,
+      };
+      if (settings.unreviewableImagePolicy === 'allow') {
+        return {
+          decision: 'allow',
+          moderation: unreviewableModeration,
+          cards: await this.#translateAndRender(
+            message,
+            target,
+            settings,
+            apiKey,
+            translationPrompt,
+          ),
+        };
+      }
       return {
-        decision: 'review',
-        reason: 'Image moderation requires a vision-capable model.',
+        decision: 'block',
+        moderation: unreviewableModeration,
+        reason,
       };
     }
     const moderation = await new LlmModerationService(client).moderate({
       ...(message.text ? { text: message.text } : {}),
       ...(imageUrls.length ? { imageUrls } : {}),
-      model: settings.moderationModel,
+      model: containsImages ? settings.visionModel! : settings.moderationModel,
       prompt: {
         content: moderationPrompt.content,
         version: moderationPrompt.version,
@@ -322,23 +365,10 @@ export class CentralMessageProcessor implements MessageProcessor {
         reason: moderation.reason,
       };
     }
-    let translated = message.text ?? '';
-    if (message.text?.trim()) {
-      const translation = await new LlmTranslationService(client).translate({
-        text: message.text,
-        targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
-        model: settings.translationModel,
-        prompt: {
-          content: translationPrompt.content,
-          version: translationPrompt.version,
-        },
-      });
-      translated = translation.translatedText;
-    }
     return {
       decision: 'allow',
       moderation,
-      cards: await this.#render(message, target, translated),
+      cards: await this.#translateAndRender(message, target, settings, apiKey, translationPrompt),
     };
   }
 
@@ -400,6 +430,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       .map((image) => image.dataUri);
     const input: MessageCardInput = {
       sourcePlatform: message.source.platform,
+      targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
       sourceName: message.source.channelId,
       senderName: message.sender.displayName,
       ...(avatar ? { senderAvatar: avatar.dataUri } : {}),
@@ -420,6 +451,33 @@ export class CentralMessageProcessor implements MessageProcessor {
     };
     void target;
     return await renderMessageCards(input);
+  }
+
+  async #translateAndRender(
+    message: MessageEnvelope,
+    target: ChatSession,
+    settings: z.infer<typeof llmSettingsSchema>,
+    apiKey: string,
+    prompt: { content: string; version: number },
+  ): Promise<readonly Buffer[]> {
+    let translated = message.text ?? '';
+    if (message.text?.trim()) {
+      const client = new OpenAICompatibleClient({
+        baseUrl: settings.baseUrl,
+        apiKey,
+        timeoutMs: settings.timeoutMs,
+        maxRetries: settings.maxRetries,
+      });
+      translated = (
+        await new LlmTranslationService(client).translate({
+          text: message.text,
+          targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
+          model: settings.translationModel,
+          prompt,
+        })
+      ).translatedText;
+    }
+    return await this.#render(message, target, translated);
   }
 }
 

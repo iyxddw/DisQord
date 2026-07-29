@@ -464,7 +464,7 @@ button.fit {
 
 .blueprint-layout {
   display: grid;
-  grid-template-columns: 260px minmax(500px, 1fr);
+  grid-template-columns: 320px minmax(500px, 1fr);
   min-height: calc(100vh - 184px);
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -476,8 +476,101 @@ button.fit {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow-y: auto;
   border-right: 1px solid var(--line);
   background: #111722;
+}
+.blueprint-library-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.blueprint-library-head button,
+.blueprint-actions button {
+  border: 1px solid #2b374b;
+  border-radius: 7px;
+  cursor: pointer;
+  color: #aeb9cc;
+  background: #151d2a;
+}
+.blueprint-library-head button {
+  padding: 6px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+}
+.blueprint-library {
+  max-height: 230px;
+  display: grid;
+  gap: 7px;
+  overflow-y: auto;
+}
+.blueprint-record {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #263248;
+  border-radius: 9px;
+  background: #0e1520;
+}
+.blueprint-record.selected {
+  border-color: #3d8c91;
+  box-shadow: inset 2px 0 var(--cyan);
+}
+.blueprint-open {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  color: #dce4f1;
+  background: transparent;
+}
+.blueprint-open span,
+.blueprint-open small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blueprint-open span {
+  font-size: 11px;
+  font-weight: 700;
+}
+.blueprint-open small {
+  margin-top: 3px;
+  color: #7f8ca1;
+  font-size: 9px;
+}
+.blueprint-actions {
+  padding-right: 7px;
+  display: flex;
+  gap: 4px;
+}
+.blueprint-actions button {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  place-items: center;
+}
+.blueprint-actions button:hover,
+.blueprint-library-head button:hover {
+  color: #e8f9f7;
+  border-color: #43888a;
+}
+.toolbar-divider {
+  height: 1px;
+  flex: 0 0 auto;
+  background: #263044;
+}
+.editing-version {
+  color: #7f8ca1;
+  text-align: center;
+  font-size: 10px;
 }
 .button-pair {
   display: grid;

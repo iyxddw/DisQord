@@ -7,10 +7,12 @@ import fastifyStatic from '@fastify/static';
 import { simulateBlueprint, validateBlueprint } from '@disqord/blueprint';
 import {
   blueprintVersionSchema,
+  blueprintSchema,
   chatSessionSchema,
   messageEnvelopeSchema,
   promptPurposeSchema,
   promptTemplateVersionSchema,
+  type Blueprint,
   type BlueprintVersion,
   type ChatSession,
   type PromptTemplateVersion,
@@ -43,7 +45,8 @@ const llmSettingsInputSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),
-  moderationSupportsVision: z.boolean().default(false),
+  visionModel: z.string().trim().max(256).optional(),
+  unreviewableImagePolicy: z.enum(['allow', 'block']).default('block'),
 });
 const promptDraftBodySchema = z.object({ content: z.string().min(1).max(50_000) });
 const blueprintDraftBodySchema = z.object({
@@ -51,6 +54,14 @@ const blueprintDraftBodySchema = z.object({
   nodes: blueprintVersionSchema.shape.nodes,
   edges: blueprintVersionSchema.shape.edges,
 });
+const blueprintUpdateBodySchema = z
+  .object({
+    name: z.string().trim().min(1).max(256).optional(),
+    enabled: z.boolean().optional(),
+  })
+  .refine((value) => value.name !== undefined || value.enabled !== undefined, {
+    message: 'At least one blueprint field must be updated.',
+  });
 
 interface VerificationRecord {
   readonly digest: string;
@@ -463,10 +474,11 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     const blueprints = await options.store.list('blueprint');
     const versions = await options.store.list<BlueprintVersion>('blueprint-version');
     return blueprints.map((entry) => ({
-      ...(entry.value as Record<string, unknown>),
+      ...blueprintSchema.parse(entry.value),
       versions: versions
         .map((version) => version.value)
-        .filter((version) => version.blueprintId === entry.key),
+        .filter((version) => version.blueprintId === entry.key)
+        .sort((left, right) => right.version - left.version),
     }));
   });
 
@@ -493,6 +505,68 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         updatedAt: now,
       });
       await options.store.set('blueprint-version', `${blueprintId}:1`, version);
+      return await reply.code(201).send(version);
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.patch('/api/blueprints/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const id = z.uuid().parse((request.params as { id: string }).id);
+      const body = blueprintUpdateBodySchema.parse(request.body);
+      const existing = await options.store.get<Blueprint>('blueprint', id);
+      if (!existing) return await reply.code(404).send({ error: 'Blueprint not found.' });
+      const updated = blueprintSchema.parse({
+        ...existing.value,
+        ...body,
+        updatedAt: new Date().toISOString(),
+      });
+      await options.store.set('blueprint', id, updated);
+      return updated;
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.delete('/api/blueprints/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const id = z.uuid().parse((request.params as { id: string }).id);
+      const existing = await options.store.get<Blueprint>('blueprint', id);
+      if (!existing) return await reply.code(404).send({ error: 'Blueprint not found.' });
+      const versions = await options.store.list<BlueprintVersion>('blueprint-version');
+      for (const version of versions.filter((item) => item.value.blueprintId === id)) {
+        await options.store.delete('blueprint-version', version.key);
+      }
+      await options.store.delete('blueprint', id);
+      return { ok: true };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post('/api/blueprints/:id/versions', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const id = z.uuid().parse((request.params as { id: string }).id);
+      const body = blueprintDraftBodySchema.pick({ nodes: true, edges: true }).parse(request.body);
+      const blueprint = await options.store.get<Blueprint>('blueprint', id);
+      if (!blueprint) return await reply.code(404).send({ error: 'Blueprint not found.' });
+      const versions = (await options.store.list<BlueprintVersion>('blueprint-version')).filter(
+        (item) => item.value.blueprintId === id,
+      );
+      const versionNumber =
+        versions.reduce((maximum, item) => Math.max(maximum, item.value.version), 0) + 1;
+      const version = blueprintVersionSchema.parse({
+        id: randomUUID(),
+        blueprintId: id,
+        version: versionNumber,
+        status: 'draft',
+        nodes: body.nodes,
+        edges: body.edges,
+        createdBy: randomUUID(),
+        createdAt: new Date().toISOString(),
+      });
+      await options.store.set('blueprint-version', `${id}:${versionNumber}`, version);
       return await reply.code(201).send(version);
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });

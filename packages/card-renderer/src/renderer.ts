@@ -5,6 +5,7 @@ const dataImageSchema = z.string().regex(/^data:image\/(?:png|jpeg|webp|gif);bas
 
 export const messageCardInputSchema = z.object({
   sourcePlatform: z.enum(['qq', 'discord']),
+  targetLanguage: z.enum(['zh', 'en']).optional(),
   sourceName: z.string().trim().min(1).max(256),
   senderName: z.string().trim().min(1).max(256),
   senderAvatar: dataImageSchema.optional(),
@@ -32,12 +33,10 @@ const lineHeight = 48;
 
 export async function renderMessageCards(candidate: MessageCardInput): Promise<Buffer[]> {
   const input = messageCardInputSchema.parse(candidate);
-  const primaryPages = paginateText(
-    input.unsupportedType
-      ? `不支持的消息\nUnsupported message type\n${input.unsupportedType}`
-      : input.primaryText,
-    34,
-  );
+  const displayText = input.unsupportedType
+    ? unsupportedMessage(input.unsupportedType, input.targetLanguage ?? 'en')
+    : input.primaryText;
+  const primaryPages = paginateText(displayText, 34);
   const originalPages = input.originalText ? paginateText(input.originalText, 28) : [[]];
   const pageCount = Math.max(primaryPages.length, originalPages.length, 1);
   const cards: Buffer[] = [];
@@ -59,10 +58,9 @@ export async function renderMessageCards(candidate: MessageCardInput): Promise<B
 
 export function buildMessageCardSvg(candidate: MessageCardInput): string {
   const input = messageCardInputSchema.parse(candidate);
+  const language = input.targetLanguage ?? 'en';
   const primaryLines = wrapText(
-    input.unsupportedType
-      ? `不支持的消息\nUnsupported message type\n${input.unsupportedType}`
-      : input.primaryText,
+    input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
     42,
   );
   const replyLines = input.reply?.textPreview
@@ -123,7 +121,7 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
         return `
           <rect x="${horizontalPadding}" y="${top}" width="${contentWidth}" height="${originalHeight}"
             rx="22" fill="#ffffff" fill-opacity="0.10" stroke="#ffffff" stroke-opacity="0.12"/>
-          <text x="${horizontalPadding + 28}" y="${top + 38}" class="original-label">原文 · ORIGINAL</text>
+          <text x="${horizontalPadding + 28}" y="${top + 38}" class="original-label">${language === 'zh' ? '原文' : 'ORIGINAL'}</text>
           ${svgTextLines(originalLines, horizontalPadding + 28, top + 80, 36, 'original-text')}
         `;
       })()
@@ -233,4 +231,8 @@ function escapeXml(value: string): string {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&apos;');
+}
+
+function unsupportedMessage(type: string, language: 'zh' | 'en'): string {
+  return language === 'zh' ? `不支持的消息\n类型：${type}` : `Unsupported message\nType: ${type}`;
 }

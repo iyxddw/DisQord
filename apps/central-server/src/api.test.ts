@@ -79,4 +79,65 @@ describe('central control-plane API', () => {
     expect(read.body).not.toContain('top-secret-api-key');
     await central.app.close();
   });
+
+  it('lists, versions, disables, and deletes saved blueprints', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const created = await central.app.inject({
+      method: 'POST',
+      url: '/api/blueprints',
+      cookies: { disqord_session: token },
+      payload: { name: '双向转发', nodes: [], edges: [] },
+    });
+    expect(created.statusCode).toBe(201);
+    const firstVersion = created.json<{ blueprintId: string; version: number }>();
+
+    const second = await central.app.inject({
+      method: 'POST',
+      url: `/api/blueprints/${firstVersion.blueprintId}/versions`,
+      cookies: { disqord_session: token },
+      payload: { nodes: [], edges: [] },
+    });
+    expect(second.statusCode).toBe(201);
+    expect(second.json()).toMatchObject({ blueprintId: firstVersion.blueprintId, version: 2 });
+
+    const enabled = await central.app.inject({
+      method: 'PATCH',
+      url: `/api/blueprints/${firstVersion.blueprintId}`,
+      cookies: { disqord_session: token },
+      payload: { enabled: true, name: '已编辑蓝图' },
+    });
+    expect(enabled.json()).toMatchObject({ name: '已编辑蓝图', enabled: true });
+
+    const listed = await central.app.inject({
+      method: 'GET',
+      url: '/api/blueprints',
+      cookies: { disqord_session: token },
+    });
+    expect(listed.json()).toEqual([
+      expect.objectContaining({
+        id: firstVersion.blueprintId,
+        name: '已编辑蓝图',
+        enabled: true,
+        versions: [
+          expect.objectContaining({ version: 2 }),
+          expect.objectContaining({ version: 1 }),
+        ],
+      }),
+    ]);
+
+    const removed = await central.app.inject({
+      method: 'DELETE',
+      url: `/api/blueprints/${firstVersion.blueprintId}`,
+      cookies: { disqord_session: token },
+    });
+    expect(removed.statusCode).toBe(200);
+    const empty = await central.app.inject({
+      method: 'GET',
+      url: '/api/blueprints',
+      cookies: { disqord_session: token },
+    });
+    expect(empty.json()).toEqual([]);
+    await central.app.close();
+  });
 });

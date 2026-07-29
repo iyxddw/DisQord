@@ -27,12 +27,14 @@ import {
   MessagesSquare,
   Network,
   Plus,
+  Power,
   RefreshCw,
   Save,
   Server,
   Settings,
   ShieldCheck,
   Sparkles,
+  Trash2,
 } from 'lucide-react';
 
 import '@xyflow/react/dist/style.css';
@@ -40,6 +42,8 @@ import './styles.css';
 import {
   api,
   type AuthStatus,
+  type Blueprint,
+  type BlueprintVersion,
   type ChatSession,
   type NodeRuntime,
   type PromptPurpose,
@@ -362,13 +366,69 @@ function FlowNode({ data }: NodeProps<Node<FlowData>>) {
 
 function BlueprintEditor() {
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
+  const blueprints = useLoad<Blueprint[]>('/blueprints', []);
   const usable = sessions.data.filter((item) => item.status === 'verified');
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [name, setName] = useState('双向翻译');
   const [selected, setSelected] = useState('');
+  const [currentBlueprintId, setCurrentBlueprintId] = useState('');
+  const [loadedVersion, setLoadedVersion] = useState<number>();
+  const [editorKey, setEditorKey] = useState(0);
   const [notice, setNotice] = useState('');
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
+
+  const resetEditor = () => {
+    setCurrentBlueprintId('');
+    setLoadedVersion(undefined);
+    setName('双向翻译');
+    setNodes([]);
+    setEdges([]);
+    setNotice('正在创建新蓝图。');
+    setEditorKey((value) => value + 1);
+  };
+
+  const openBlueprint = (blueprint: Blueprint) => {
+    const version =
+      blueprint.versions.find((item) => item.version === blueprint.activeVersion) ??
+      blueprint.versions.find((item) => item.status === 'published') ??
+      blueprint.versions[0];
+    if (!version) {
+      setNotice('该蓝图没有可载入的版本。');
+      return;
+    }
+    const flowNodes = version.nodes
+      .filter((node) => node.type === 'chat-input' || node.type === 'chat-output')
+      .map((node) => {
+        const sessionId =
+          typeof node.config.sessionId === 'string' ? node.config.sessionId : '未知会话';
+        const session = sessions.data.find((item) => item.id === sessionId);
+        return {
+          id: node.id,
+          type: 'session',
+          position: node.position,
+          data: {
+            label: session?.displayName ?? sessionId,
+            sessionId,
+            kind: node.type === 'chat-input' ? ('input' as const) : ('output' as const),
+          },
+        };
+      });
+    setCurrentBlueprintId(blueprint.id);
+    setLoadedVersion(version.version);
+    setName(blueprint.name);
+    setNodes(flowNodes);
+    setEdges(
+      version.edges.map((edge) => ({
+        id: edge.id,
+        source: edge.sourceNodeId,
+        target: edge.targetNodeId,
+      })),
+    );
+    setNotice(`已载入 ${blueprint.name} · v${version.version}`);
+    setEditorKey((value) => value + 1);
+  };
+
   const addNode = (kind: FlowData['kind']) => {
     const session = usable.find((item) => item.id === selected);
     if (!session) return;
@@ -398,21 +458,99 @@ function BlueprintEditor() {
           targetNodeId: edge.target,
         })),
       };
-      const version = await api<{ blueprintId: string; version: number }>('/blueprints', {
-        method: 'POST',
-        json: graph,
-      });
+      let version: Pick<BlueprintVersion, 'blueprintId' | 'version'>;
+      if (currentBlueprintId) {
+        await api(`/blueprints/${currentBlueprintId}`, {
+          method: 'PATCH',
+          json: { name },
+        });
+        version = await api<BlueprintVersion>(`/blueprints/${currentBlueprintId}/versions`, {
+          method: 'POST',
+          json: { nodes: graph.nodes, edges: graph.edges },
+        });
+      } else {
+        version = await api<BlueprintVersion>('/blueprints', {
+          method: 'POST',
+          json: graph,
+        });
+      }
       await api(`/blueprints/${version.blueprintId}/versions/${version.version}/publish`, {
         method: 'POST',
       });
-      setNotice('蓝图已校验并发布，新的消息会立即使用此规则。');
+      setCurrentBlueprintId(version.blueprintId);
+      setLoadedVersion(version.version);
+      await blueprints.reload();
+      setNotice(`蓝图 v${version.version} 已发布；旧版本已归档。`);
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '发布失败');
     }
   };
+
+  const toggleBlueprint = async (blueprint: Blueprint) => {
+    try {
+      await api(`/blueprints/${blueprint.id}`, {
+        method: 'PATCH',
+        json: { enabled: !blueprint.enabled },
+      });
+      await blueprints.reload();
+      setNotice(`${blueprint.name} 已${blueprint.enabled ? '停用' : '启用'}。`);
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : '状态修改失败');
+    }
+  };
+
+  const deleteBlueprint = async (blueprint: Blueprint) => {
+    if (!window.confirm(`确定删除蓝图“${blueprint.name}”及其全部版本吗？`)) return;
+    try {
+      await api(`/blueprints/${blueprint.id}`, { method: 'DELETE' });
+      if (currentBlueprintId === blueprint.id) resetEditor();
+      await blueprints.reload();
+      setNotice(`${blueprint.name} 已删除。`);
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : '删除失败');
+    }
+  };
+
   return (
     <div className="blueprint-layout">
       <div className="flow-toolbar">
+        <div className="blueprint-library-head">
+          <strong>已保存蓝图</strong>
+          <button onClick={resetEditor}>
+            <Plus size={14} />
+            新建
+          </button>
+        </div>
+        <div className="blueprint-library">
+          {blueprints.data.map((blueprint) => (
+            <div
+              className={`blueprint-record ${
+                currentBlueprintId === blueprint.id ? 'selected' : ''
+              }`}
+              key={blueprint.id}
+            >
+              <button className="blueprint-open" onClick={() => openBlueprint(blueprint)}>
+                <span>{blueprint.name}</span>
+                <small>
+                  {blueprint.enabled ? '运行中' : '已停用'} · v{blueprint.activeVersion ?? '—'}
+                </small>
+              </button>
+              <div className="blueprint-actions">
+                <button
+                  title={blueprint.enabled ? '停用' : '启用'}
+                  onClick={() => void toggleBlueprint(blueprint)}
+                >
+                  <Power size={13} />
+                </button>
+                <button title="删除" onClick={() => void deleteBlueprint(blueprint)}>
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {!blueprints.data.length && <small className="muted">尚无已保存蓝图</small>}
+        </div>
+        <div className="toolbar-divider" />
         <label>
           蓝图名称
           <input value={name} onChange={(event) => setName(event.target.value)} />
@@ -440,8 +578,11 @@ function BlueprintEditor() {
         </div>
         <button className="primary" onClick={() => void save()}>
           <Save size={16} />
-          保存并发布
+          {currentBlueprintId ? '发布新版本' : '保存并发布'}
         </button>
+        {currentBlueprintId && loadedVersion !== undefined && (
+          <small className="editing-version">正在编辑 v{loadedVersion}</small>
+        )}
         {notice && <p className="toolbar-notice">{notice}</p>}
         <div className="tip">
           <Network size={18} />
@@ -454,6 +595,7 @@ function BlueprintEditor() {
       </div>
       <div className="flow-canvas">
         <ReactFlow
+          key={editorKey}
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
@@ -641,7 +783,8 @@ function LlmSettings() {
     timeoutMs: 30000,
     maxRetries: 2,
     concurrency: 4,
-    moderationSupportsVision: false,
+    visionModel: '',
+    unreviewableImagePolicy: 'block' as 'allow' | 'block',
   });
   const [notice, setNotice] = useState('');
   useEffect(() => {
@@ -698,6 +841,29 @@ function LlmSettings() {
           />
         </label>
         <label>
+          识图审核模型（可选）
+          <input
+            value={form.visionModel}
+            placeholder="留空表示图片无法审核"
+            onChange={(event) => setForm({ ...form, visionModel: event.target.value })}
+          />
+        </label>
+        <label>
+          图片无法审核时
+          <select
+            value={form.unreviewableImagePolicy}
+            onChange={(event) =>
+              setForm({
+                ...form,
+                unreviewableImagePolicy: event.target.value as 'allow' | 'block',
+              })
+            }
+          >
+            <option value="block">拦截（推荐）</option>
+            <option value="allow">直接通过</option>
+          </select>
+        </label>
+        <label>
           超时（毫秒）
           <input
             type="number"
@@ -714,15 +880,12 @@ function LlmSettings() {
           />
         </label>
       </div>
-      <label className="switch">
-        <input
-          type="checkbox"
-          checked={form.moderationSupportsVision}
-          onChange={(event) => setForm({ ...form, moderationSupportsVision: event.target.checked })}
-        />
-        <span />
-        审核模型支持图片理解
-      </label>
+      <div className="safety-note">
+        <ShieldCheck size={17} />
+        <span>
+          纯文字使用审核模型；含图片时使用识图审核模型。未配置识图模型或图片地址不可用时，按“图片无法审核时”的策略处理。
+        </span>
+      </div>
       {notice && <div className="notice">{notice}</div>}
       <button className="primary fit" onClick={() => void save()}>
         <Save size={16} />

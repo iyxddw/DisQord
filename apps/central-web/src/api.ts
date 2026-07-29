@@ -45,6 +45,40 @@ export interface NodeRuntime {
   revoked?: boolean;
 }
 
+export interface BlueprintNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  config: Record<string, unknown>;
+}
+
+export interface BlueprintEdge {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+}
+
+export interface BlueprintVersion {
+  id: string;
+  blueprintId: string;
+  version: number;
+  status: 'draft' | 'published' | 'archived';
+  nodes: BlueprintNode[];
+  edges: BlueprintEdge[];
+  createdAt: string;
+  publishedAt?: string;
+}
+
+export interface Blueprint {
+  id: string;
+  name: string;
+  enabled: boolean;
+  activeVersion?: number;
+  createdAt: string;
+  updatedAt: string;
+  versions: BlueprintVersion[];
+}
+
 export interface PromptVersion {
   id: string;
   purpose: PromptPurpose;

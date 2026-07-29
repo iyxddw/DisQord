@@ -21,6 +21,11 @@ const groupListSchema = z.array(
     max_member_count: z.number().optional(),
   }),
 );
+const groupMemberInfoSchema = z.object({
+  user_id: z.union([z.string(), z.number()]),
+  nickname: z.string().optional(),
+  card: z.string().optional(),
+});
 
 interface PendingAction {
   readonly resolve: (value: unknown) => void;
@@ -47,6 +52,7 @@ export interface NapCatGroup {
 export class NapCatOneBotClient {
   readonly #options: NapCatClientOptions;
   readonly #pending = new Map<string, PendingAction>();
+  readonly #memberNameCache = new Map<string, { name: string; expiresAt: number }>();
   #socket: WebSocket | undefined;
   #manualClose = false;
   #reconnectTimer: NodeJS.Timeout | undefined;
@@ -180,9 +186,54 @@ export class NapCatOneBotClient {
       return;
     }
 
-    if (napCatGroupMessageEventSchema.safeParse(raw).success) {
-      const message = normalizeNapCatGroupMessage(raw, this.#options.nodeId);
+    const event = napCatGroupMessageEventSchema.safeParse(raw);
+    if (event.success) {
+      const mentionNames = await this.#resolveMentionNames(event.data);
+      const message = normalizeNapCatGroupMessage(event.data, this.#options.nodeId, mentionNames);
       if (message) await this.#options.onMessage(message);
     }
+  }
+
+  async #resolveMentionNames(
+    event: z.infer<typeof napCatGroupMessageEventSchema>,
+  ): Promise<ReadonlyMap<string, string>> {
+    const groupId = String(event.group_id);
+    const mentionedIds = [
+      ...new Set(
+        event.message
+          .filter((segment) => segment.type === 'at')
+          .map((segment) => String(segment.data.qq ?? ''))
+          .filter((id) => id && id !== 'all'),
+      ),
+    ];
+    const names = new Map<string, string>();
+    await Promise.all(
+      mentionedIds.map(async (userId) => {
+        const cacheKey = `${groupId}:${userId}`;
+        const cached = this.#memberNameCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          names.set(userId, cached.name);
+          return;
+        }
+        try {
+          const member = groupMemberInfoSchema.parse(
+            await this.call('get_group_member_info', {
+              group_id: groupId,
+              user_id: userId,
+              no_cache: false,
+            }),
+          );
+          const name = member.card?.trim() || member.nickname?.trim() || userId;
+          names.set(userId, name);
+          this.#memberNameCache.set(cacheKey, {
+            name,
+            expiresAt: Date.now() + 60 * 60 * 1_000,
+          });
+        } catch {
+          // Keep the QQ number when NapCat cannot resolve this member.
+        }
+      }),
+    );
+    return names;
   }
 }

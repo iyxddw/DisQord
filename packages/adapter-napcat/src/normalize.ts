@@ -30,6 +30,7 @@ export type NapCatGroupMessageEvent = z.infer<typeof napCatGroupMessageEventSche
 export function normalizeNapCatGroupMessage(
   candidate: unknown,
   nodeId: string,
+  mentionNames: ReadonlyMap<string, string> = new Map(),
 ): MessageEnvelope | undefined {
   const event = napCatGroupMessageEventSchema.parse(candidate);
   if (String(event.user_id) === String(event.self_id)) {
@@ -45,7 +46,10 @@ export function normalizeNapCatGroupMessage(
     if (segment.type === 'text') {
       textParts.push(String(segment.data.text ?? ''));
     } else if (segment.type === 'at') {
-      textParts.push(`@${String(segment.data.qq ?? 'unknown')}`);
+      const mentionedId = String(segment.data.qq ?? 'unknown');
+      textParts.push(
+        mentionedId === 'all' ? '@全体成员' : `@${mentionNames.get(mentionedId) ?? mentionedId}`,
+      );
     } else if (segment.type === 'image') {
       const sourceUrl = typeof segment.data.url === 'string' ? segment.data.url : undefined;
       const file = String(segment.data.file ?? 'image');
