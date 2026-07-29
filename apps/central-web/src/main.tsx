@@ -393,7 +393,7 @@ function BlueprintEditor() {
           config: { sessionId: node.data.sessionId },
         })),
         edges: edges.map((edge) => ({
-          id: edge.id,
+          id: createBrowserId(),
           sourceNodeId: edge.source,
           targetNodeId: edge.target,
         })),
