@@ -1,20 +1,18 @@
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 import { PromptVersionStore } from '@disqord/llm';
 import { createProgramDescriptor } from '@disqord/shared';
 import { PairingAuthority, type NodeSession } from '@disqord/transport';
-import { Pool } from 'pg';
 import { z } from 'zod';
 
 import { createCentralApplication } from './api.js';
-import { migrateDatabase } from './migrate.js';
 import { CentralMessageProcessor, MessageOrchestrator } from './orchestrator.js';
-import { EncryptedPostgresSecretStore, PostgresStateStore } from './state-store.js';
+import { FileStateStore, PlaintextSecretStore, type StateStore } from './state-store.js';
 
 export * from './api.js';
 export * from './auth.js';
-export * from './migrate.js';
 export * from './orchestrator.js';
 export * from './simulation.js';
 export * from './state-store.js';
@@ -24,9 +22,8 @@ export const program = createProgramDescriptor('central-server');
 const environmentSchema = z.object({
   CENTRAL_HOST: z.string().default('127.0.0.1'),
   CENTRAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
-  DATABASE_URL: z.string().min(1),
-  ENCRYPTION_KEY: z.string().min(32),
-  PAIRING_PEPPER: z.string().min(32).optional(),
+  CENTRAL_DATA_PATH: z.string().min(1).default('./data/central.json'),
+  PAIRING_PEPPER: z.string().min(32),
   COOKIE_SECURE: z
     .enum(['true', 'false'])
     .default('true')
@@ -35,12 +32,10 @@ const environmentSchema = z.object({
 
 export async function startCentralServer(environment: NodeJS.ProcessEnv = process.env) {
   const config = environmentSchema.parse(environment);
-  await migrateDatabase(config.DATABASE_URL);
-  const pool = new Pool({ connectionString: config.DATABASE_URL });
-  const store = new PostgresStateStore(pool);
-  const secrets = new EncryptedPostgresSecretStore(pool, config.ENCRYPTION_KEY);
+  const store = new FileStateStore(resolve(config.CENTRAL_DATA_PATH));
+  const secrets = new PlaintextSecretStore(store);
   await ensureDefaultPrompts(store);
-  const pairingAuthority = new PairingAuthority(config.PAIRING_PEPPER ?? config.ENCRYPTION_KEY);
+  const pairingAuthority = new PairingAuthority(config.PAIRING_PEPPER);
   for (const entry of await store.list<NodeSession>('node-session')) {
     pairingAuthority.restoreSession(entry.value);
   }
@@ -49,7 +44,7 @@ export async function startCentralServer(environment: NodeJS.ProcessEnv = proces
     store,
     secrets,
     pairingAuthority,
-    verificationSecret: config.ENCRYPTION_KEY,
+    verificationSecret: config.PAIRING_PEPPER,
     secureCookies: config.COOKIE_SECURE,
     attachNodeGateway: true,
     onNodeFrame: async (frame) => await orchestratorRef.current?.handleNodeFrame(frame),
@@ -67,14 +62,13 @@ export async function startCentralServer(environment: NodeJS.ProcessEnv = proces
 
   const stop = async () => {
     await central.app.close();
-    await pool.end();
   };
   process.once('SIGINT', () => void stop());
   process.once('SIGTERM', () => void stop());
-  return { ...central, pool, stop };
+  return { ...central, stop };
 }
 
-async function ensureDefaultPrompts(store: PostgresStateStore): Promise<void> {
+async function ensureDefaultPrompts(store: StateStore): Promise<void> {
   const existing = await store.list('prompt');
   if (existing.length) return;
   const prompts = new PromptVersionStore();

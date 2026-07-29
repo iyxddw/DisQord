@@ -58,12 +58,11 @@ curl https://你的中央域名/api/health
 
 ```bash
 sudo journalctl -u disqord-central -n 100 --no-pager
-sudo systemctl status postgresql --no-pager
-pg_isready -h 127.0.0.1 -p 5432 -U disqord -d disqord
+sudo ls -l /var/lib/disqord/central/central.json
 ```
 
-重点检查 `/etc/disqord/central.env` 中数据库密码、密钥长度和端口。密码含 `@`、`:`、`/` 等
-字符时必须 URL 编码；最简单的做法是数据库密码仅使用字母、数字、下划线和连字符。
+重点检查 `/etc/disqord/central.env` 中数据文件路径、`PAIRING_PEPPER` 长度和端口，以及
+`/var/lib/disqord/central` 是否由 `disqord` 用户拥有。
 
 ### 节点一直重连
 
@@ -95,53 +94,35 @@ sudo systemctl restart disqord-central
 
 ## 备份与恢复
 
-### PostgreSQL
+### 中央数据
 
 备份：
 
 ```bash
-sudo -u postgres pg_dump -Fc disqord > /var/backups/disqord-$(date +%F).dump
+sudo install -d -m 0700 /var/backups/disqord
+sudo cp /var/lib/disqord/central/central.json \
+  /var/backups/disqord/central-$(date +%F-%H%M%S).json
 ```
 
-恢复前停止中央服务，然后恢复到空数据库：
+恢复时先停止中央服务，避免覆盖正在写入的数据：
 
 ```bash
 sudo systemctl stop disqord-central
-sudo -u postgres pg_restore --clean --if-exists -d disqord /备份路径/disqord.dump
+sudo cp /备份路径/central.json /var/lib/disqord/central/central.json
+sudo chown disqord:disqord /var/lib/disqord/central/central.json
+sudo chmod 0600 /var/lib/disqord/central/central.json
 sudo systemctl start disqord-central
 ```
-
-`--clean` 会覆盖目标数据库中的现有对象，只能在确认目标与备份后使用。
 
 同时离线备份：
 
 - `/etc/disqord/central.env`
+- `/var/lib/disqord/central`
 - `/var/lib/disqord/qq`
 - `/var/lib/disqord/discord`
 
-环境文件含加密主密钥，节点目录含身份私钥、长期会话 Token 和未完成队列，均按敏感数据处理。
-恢复同一节点目录时，不要同时运行两个副本。
-
-### 从旧 Docker PostgreSQL 迁移
-
-旧容器仍存在时导出：
-
-```bash
-docker exec deploy-postgres-1 pg_dump -U disqord -d disqord -Fc \
-  > /root/disqord-from-docker.dump
-```
-
-停止旧中央容器，创建并确认原生 PostgreSQL 后导入：
-
-```bash
-sudo systemctl stop disqord-central
-sudo -u postgres pg_restore --clean --if-exists -d disqord \
-  /root/disqord-from-docker.dump
-sudo systemctl start disqord-central
-```
-
-导入前必须让 `/etc/disqord/central.env` 使用旧部署相同的 `ENCRYPTION_KEY`，否则数据库中的大模型
-API 密钥无法解密。
+`central.json` 包含明文大模型 API Key；节点目录包含身份私钥、长期会话 Token 和未完成队列，
+均按敏感数据处理。恢复同一节点目录时，不要同时运行两个副本。
 
 ## 回滚代码
 
@@ -157,9 +138,12 @@ git rev-parse HEAD
 ```bash
 cd /opt/disqord
 sudo -u disqord git switch --detach 旧提交哈希
-sudo -u disqord pnpm install --frozen-lockfile
-sudo -u disqord pnpm build
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 install --frozen-lockfile
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 build
 sudo systemctl restart disqord-central
 ```
 
-数据库迁移不一定可通过切换代码自动撤销，因此中央端升级前必须备份 PostgreSQL。
+中央数据格式发生变化时，旧代码不一定能够读取新文件，因此中央端升级前必须备份
+`central.json`。

@@ -1,8 +1,7 @@
 [Unit]
 Description=DisQord Central Server
-After=network-online.target postgresql.service
+After=network-online.target
 Wants=network-online.target
-Requires=postgresql.service
 
 [Service]
 Type=simple
@@ -23,6 +22,7 @@ ProtectSystem=full
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ReadWritePaths=/var/lib/disqord/central
 
 [Install]
 WantedBy=multi-user.target

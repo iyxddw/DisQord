@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "db:migrate": "tsx src/migrate.ts",
     "dev": "tsx watch src/index.ts",
     "pretest": "pnpm --filter @disqord/shared build && pnpm --filter @disqord/transport build && pnpm --filter @disqord/blueprint build && pnpm --filter @disqord/card-renderer build && pnpm --filter @disqord/llm build",
     "start": "node dist/index.js",
@@ -22,10 +21,6 @@
     "@fastify/cookie": "11.1.2",
     "@fastify/static": "10.1.2",
     "fastify": "5.10.0",
-    "pg": "8.22.0",
     "zod": "4.4.3"
-  },
-  "devDependencies": {
-    "@types/pg": "8.20.0"
   }
 }

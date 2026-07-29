@@ -1,6 +1,5 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-
-import { type Pool } from 'pg';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 
 export interface StateEntry<T = unknown> {
   readonly key: string;
@@ -51,65 +50,96 @@ export class InMemoryStateStore implements StateStore {
   }
 }
 
-interface PostgresStateRow {
-  key: string;
-  value: unknown;
-  created_at: Date;
-  updated_at: Date;
+interface FileStateDocument {
+  version: 1;
+  namespaces: Record<string, Record<string, StateEntry>>;
 }
 
-export class PostgresStateStore implements StateStore {
-  readonly #pool: Pool;
+export class FileStateStore implements StateStore {
+  readonly #filePath: string;
+  readonly #ready: Promise<void>;
+  #document: FileStateDocument = { version: 1, namespaces: {} };
+  #writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(pool: Pool) {
-    this.#pool = pool;
+  constructor(filePath: string) {
+    this.#filePath = filePath;
+    this.#ready = this.#load();
   }
 
   async get<T>(namespace: string, key: string): Promise<StateEntry<T> | undefined> {
-    const result = await this.#pool.query<PostgresStateRow>(
-      `
-        SELECT key, value, created_at, updated_at
-        FROM central_kv
-        WHERE namespace = $1 AND key = $2
-      `,
-      [namespace, key],
-    );
-    return result.rows[0] ? mapStateRow<T>(result.rows[0]) : undefined;
+    await this.#ready;
+    await this.#writeQueue;
+    const entry = this.#document.namespaces[namespace]?.[key];
+    return entry ? (structuredClone(entry) as StateEntry<T>) : undefined;
   }
 
   async list<T>(namespace: string): Promise<readonly StateEntry<T>[]> {
-    const result = await this.#pool.query<PostgresStateRow>(
-      `
-        SELECT key, value, created_at, updated_at
-        FROM central_kv
-        WHERE namespace = $1
-        ORDER BY updated_at DESC
-      `,
-      [namespace],
-    );
-    return result.rows.map((row) => mapStateRow<T>(row));
+    await this.#ready;
+    await this.#writeQueue;
+    return Object.values(this.#document.namespaces[namespace] ?? {})
+      .map((entry) => structuredClone(entry) as StateEntry<T>)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   async set<T>(namespace: string, key: string, value: T): Promise<StateEntry<T>> {
-    const result = await this.#pool.query<PostgresStateRow>(
-      `
-        INSERT INTO central_kv (namespace, key, value, created_at, updated_at)
-        VALUES ($1, $2, $3::jsonb, NOW(), NOW())
-        ON CONFLICT (namespace, key)
-        DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
-        RETURNING key, value, created_at, updated_at
-      `,
-      [namespace, key, JSON.stringify(value)],
-    );
-    return mapStateRow<T>(result.rows[0]!);
+    return await this.#enqueue(async () => {
+      const records = (this.#document.namespaces[namespace] ??= {});
+      const existing = records[key];
+      const now = new Date().toISOString();
+      const entry: StateEntry<T> = {
+        key,
+        value: structuredClone(value),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      records[key] = entry;
+      await this.#persist();
+      return structuredClone(entry);
+    });
   }
 
   async delete(namespace: string, key: string): Promise<boolean> {
-    const result = await this.#pool.query(
-      'DELETE FROM central_kv WHERE namespace = $1 AND key = $2',
-      [namespace, key],
+    return await this.#enqueue(async () => {
+      const records = this.#document.namespaces[namespace];
+      if (!records || !(key in records)) return false;
+      delete records[key];
+      if (Object.keys(records).length === 0) delete this.#document.namespaces[namespace];
+      await this.#persist();
+      return true;
+    });
+  }
+
+  async #load(): Promise<void> {
+    try {
+      const parsed = JSON.parse(await readFile(this.#filePath, 'utf8')) as FileStateDocument;
+      if (parsed.version !== 1 || !parsed.namespaces || typeof parsed.namespaces !== 'object') {
+        throw new Error('Unsupported central data file format.');
+      }
+      this.#document = parsed;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  async #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    await this.#ready;
+    const result = this.#writeQueue.then(operation);
+    this.#writeQueue = result.then(
+      () => undefined,
+      () => undefined,
     );
-    return (result.rowCount ?? 0) > 0;
+    return await result;
+  }
+
+  async #persist(): Promise<void> {
+    await mkdir(dirname(this.#filePath), { recursive: true });
+    const temporaryPath = `${this.#filePath}.${process.pid}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(this.#document, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await rename(temporaryPath, this.#filePath);
+    await chmod(this.#filePath, 0o600).catch(() => undefined);
   }
 }
 
@@ -135,78 +165,22 @@ export class InMemorySecretStore implements SecretStore {
   }
 }
 
-export class EncryptedPostgresSecretStore implements SecretStore {
-  readonly #key: Buffer;
-  readonly #pool: Pool;
+export class PlaintextSecretStore implements SecretStore {
+  readonly #store: StateStore;
 
-  constructor(pool: Pool, encryptionKey: string) {
-    if (encryptionKey.length < 32) throw new Error('Encryption key must contain 32 characters.');
-    this.#pool = pool;
-    this.#key = createHash('sha256').update(encryptionKey).digest();
+  constructor(store: StateStore) {
+    this.#store = store;
   }
 
   async has(name: string): Promise<boolean> {
-    const result = await this.#pool.query('SELECT 1 FROM central_secrets WHERE name = $1', [name]);
-    return Boolean(result.rowCount);
+    return Boolean(await this.#store.get('plaintext-secret', name));
   }
 
   async get(name: string): Promise<string | undefined> {
-    const result = await this.#pool.query<{
-      ciphertext: string;
-      initialization_vector: string;
-      authentication_tag: string;
-    }>(
-      `
-        SELECT ciphertext, initialization_vector, authentication_tag
-        FROM central_secrets WHERE name = $1
-      `,
-      [name],
-    );
-    const row = result.rows[0];
-    if (!row) return undefined;
-    const decipher = createDecipheriv(
-      'aes-256-gcm',
-      this.#key,
-      Buffer.from(row.initialization_vector, 'base64'),
-    );
-    decipher.setAuthTag(Buffer.from(row.authentication_tag, 'base64'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(row.ciphertext, 'base64')),
-      decipher.final(),
-    ]).toString('utf8');
+    return (await this.#store.get<string>('plaintext-secret', name))?.value;
   }
 
   async set(name: string, value: string): Promise<void> {
-    const initializationVector = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', this.#key, initializationVector);
-    const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
-    const authenticationTag = cipher.getAuthTag();
-    await this.#pool.query(
-      `
-        INSERT INTO central_secrets (
-          name, ciphertext, initialization_vector, authentication_tag, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, NOW(), NOW())
-        ON CONFLICT (name) DO UPDATE SET
-          ciphertext = EXCLUDED.ciphertext,
-          initialization_vector = EXCLUDED.initialization_vector,
-          authentication_tag = EXCLUDED.authentication_tag,
-          updated_at = NOW()
-      `,
-      [
-        name,
-        ciphertext.toString('base64'),
-        initializationVector.toString('base64'),
-        authenticationTag.toString('base64'),
-      ],
-    );
+    await this.#store.set('plaintext-secret', name, value);
   }
-}
-
-function mapStateRow<T>(row: PostgresStateRow): StateEntry<T> {
-  return {
-    key: row.key,
-    value: row.value as T,
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
-  };
 }

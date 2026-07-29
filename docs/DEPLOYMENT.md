@@ -2,7 +2,7 @@
 
 本文按三台 Linux 服务器部署：
 
-- 中央服务器：PostgreSQL、DisQord Central、Caddy，必须有公网域名。
+- 中央服务器：DisQord Central、Caddy，必须有公网域名。
 - QQ 服务器：NapCat 与 DisQord QQ Node。
 - Discord 服务器：DisQord Discord Node。
 
@@ -32,12 +32,11 @@ sudo tar -xJf /tmp/node-v24.18.0.tar.xz -C /usr/local --strip-components=1
 node --version
 ```
 
-输出应为 `v24.18.0`。启用项目固定的 pnpm：
+输出应为 `v24.18.0`。无需全局安装 pnpm，使用 npm 临时调用项目固定版本：
 
 ```bash
-sudo corepack enable
-corepack prepare pnpm@10.14.0 --activate
-pnpm --version
+npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 --version
 ```
 
 创建专用系统用户并安装代码。首次部署时执行：
@@ -48,33 +47,25 @@ sudo useradd --system --create-home --home-dir /var/lib/disqord \
 sudo git clone https://github.com/iyxddw/DisQord /opt/disqord
 sudo chown -R disqord:disqord /opt/disqord
 cd /opt/disqord
-sudo -u disqord pnpm config set registry https://registry.npmmirror.com/
-sudo -u disqord pnpm install --frozen-lockfile
-sudo -u disqord pnpm build
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 install --frozen-lockfile
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 build
 ```
 
 若 `/opt/disqord` 已存在，不要再次 clone，参照本文“更新”章节。
 
 ## 2. 中央服务器
 
-### 2.1 安装并创建 PostgreSQL 数据库
+### 2.1 准备中央数据目录
 
 ```bash
-sudo apt install -y postgresql postgresql-contrib fonts-noto-cjk
-sudo systemctl enable --now postgresql
-sudo -u postgres createuser --pwprompt disqord
-sudo -u postgres createdb --owner=disqord disqord
+sudo apt install -y fonts-noto-cjk
+sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/central
 ```
 
-`createuser` 会让你输入两次数据库密码。密码仅使用字母、数字、下划线和连字符，避免放入
-连接地址时还要进行 URL 编码。若提示用户或数据库已经存在，不要重复创建或删除。
-
-验证本机数据库：
-
-```bash
-psql "postgresql://disqord:你的数据库密码@127.0.0.1:5432/disqord" \
-  -c "select current_database(), current_user;"
-```
+中央端的全部持久数据写入 `/var/lib/disqord/central/central.json`。文件首次启动时自动创建，
+包含管理员记录、节点、会话、蓝图、日志、提示词和明文大模型 API Key，权限固定为 `0600`。
 
 ### 2.2 创建中央端环境文件
 
@@ -84,7 +75,7 @@ sudo cp /opt/disqord/deploy/native/central.env.example /etc/disqord/central.env
 sudo nano /etc/disqord/central.env
 ```
 
-把三个 `CHANGE_...` 替换掉。两段密钥分别用以下命令生成：
+将 `PAIRING_PEPPER` 替换为以下命令生成的随机值：
 
 ```bash
 openssl rand -hex 48
@@ -106,7 +97,7 @@ sudo systemctl enable --now disqord-central
 sudo systemctl status disqord-central --no-pager
 ```
 
-程序启动时会自动执行数据库迁移。检查本机健康接口：
+程序启动时会自动创建数据文件。检查本机健康接口：
 
 ```bash
 curl http://127.0.0.1:18080/api/health
@@ -281,8 +272,10 @@ SSH 隧道访问；如果 QQ 和 Discord 节点在不同服务器，两边都可
 ```bash
 cd /opt/disqord
 sudo -u disqord git pull --ff-only
-sudo -u disqord pnpm install --frozen-lockfile
-sudo -u disqord pnpm build
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 install --frozen-lockfile
+sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
+  npx --yes pnpm@10.14.0 build
 ```
 
 然后只重启该服务器负责的服务：
@@ -295,17 +288,4 @@ sudo systemctl restart disqord-qq
 sudo systemctl restart disqord-discord
 ```
 
-中央端更新前先备份数据库。不要同时运行同一节点数据目录的两个副本。
-
-## 7. 旧 Docker 部署的处理
-
-确认原生服务工作前，不要删除旧卷。停止旧中央容器但保留数据：
-
-```bash
-cd /原来的/DisQord/deploy
-docker compose --env-file ../central.env -f docker-compose.central.yml down
-```
-
-不要添加 `-v`。旧 PostgreSQL 数据在 Docker 卷内，原生 PostgreSQL 不会自动看到它。如果旧
-容器中已经配置过实际数据，需要先按 `OPERATIONS.md` 导出再导入；如果只是刚部署且尚未配置，
-可以直接使用新的空数据库。
+中央端更新前复制一份 `central.json`。不要同时运行同一数据目录的两个程序副本。

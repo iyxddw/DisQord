@@ -20,4 +20,5 @@ Thumbs.db
 
 apps/*/data/
 apps/*/media-cache/
+data/
 deploy/**/secrets/

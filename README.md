@@ -2,7 +2,7 @@
 
 DisQord is a self-hosted QQ ↔ Discord bridge with three fixed programs:
 
-- `central-server`: authoritative routing, PostgreSQL state, Web control plane, LLM
+- `central-server`: authoritative routing, JSON-file state, Web control plane, LLM
   translation/moderation, image-card rendering, reviews, and logs.
 - `qq-node`: NapCat / OneBot 11 adapter, local SQLite outbox, and local node panel.
 - `discord-node`: Discord Bot adapter, local SQLite outbox, and local node panel.
@@ -25,7 +25,7 @@ references are preserved when a mapping exists.
   injection boundary, vision capability gate, timeout/retry handling, and manual-review fallback.
 - Server-side PNG rendering with avatar, reply block, translated text, source text, images,
   pagination, and unsupported-message cards.
-- Administrator login, encrypted LLM API-key storage, session verification, blueprint editor,
+- Administrator login, plaintext local API-key storage, session verification, blueprint editor,
   review decisions, trace logs, central panel, and node diagnostics panel.
 
 ## Development
@@ -41,6 +41,10 @@ pnpm build
 ```
 
 The repository is pinned to the `npmmirror.com` npm mirror in `.npmrc`.
+
+The deployed processes run compiled JavaScript. The central server has no database dependency and
+stores all persistent state, including the LLM API key, in a permission-restricted `central.json`
+inside its data directory.
 
 For deployment and the exact first-run sequence, see
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). The approved product and security requirements are in

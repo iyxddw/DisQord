@@ -1,4 +1,0 @@
-{$DISQORD_DOMAIN} {
-  encode zstd gzip
-  reverse_proxy central:8080
-}
