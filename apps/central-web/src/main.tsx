@@ -10,6 +10,7 @@ import {
   addEdge,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type Node,
@@ -351,7 +352,8 @@ function Sessions() {
 }
 
 type FlowData = { label: string; sessionId: string; kind: 'input' | 'output' };
-function FlowNode({ data }: NodeProps<Node<FlowData>>) {
+function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
+  const { deleteElements } = useReactFlow();
   return (
     <div className={`flow-node ${data.kind}`}>
       <Handle
@@ -360,6 +362,14 @@ function FlowNode({ data }: NodeProps<Node<FlowData>>) {
       />
       <span>{data.kind === 'input' ? '消息来源' : '转发目标'}</span>
       <strong>{data.label}</strong>
+      <button
+        className="flow-node-delete nodrag nopan"
+        title="删除节点"
+        aria-label={`删除${data.label}`}
+        onClick={() => void deleteElements({ nodes: [{ id }] })}
+      >
+        <Trash2 size={13} />
+      </button>
     </div>
   );
 }
@@ -602,6 +612,7 @@ function BlueprintEditor() {
           onEdgesChange={onEdgesChange}
           onConnect={(connection: Connection) => setEdges((items) => addEdge(connection, items))}
           nodeTypes={nodeTypes}
+          deleteKeyCode={['Backspace', 'Delete']}
           fitView
         >
           <Background color="#263049" gap={24} />

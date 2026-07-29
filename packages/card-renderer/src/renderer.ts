@@ -63,11 +63,22 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
     input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
     42,
   );
-  const replyLines = input.reply?.textPreview
-    ? wrapText(input.reply.textPreview, 52).slice(0, 4)
+  const replyLines = input.reply
+    ? wrapText(
+        input.reply.textPreview ||
+          (input.reply.imagePreview
+            ? ''
+            : language === 'zh'
+              ? '无可用预览'
+              : 'Preview unavailable'),
+        52,
+      ).slice(0, 4)
     : [];
+  const replyImageHeight = input.reply?.imagePreview ? 180 : 0;
   const originalLines = input.originalText ? wrapText(input.originalText, 52) : [];
-  const replyHeight = input.reply ? 88 + replyLines.length * 32 : 0;
+  const replyHeight = input.reply
+    ? 64 + replyLines.length * 32 + replyImageHeight + (replyImageHeight ? 16 : 0)
+    : 0;
   const primaryHeight = Math.max(1, primaryLines.length) * lineHeight;
   const imageHeight = input.images.length * 420;
   const originalHeight = input.originalText ? 88 + Math.max(1, originalLines.length) * 36 : 0;
@@ -88,6 +99,13 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
             rx="3" fill="#91a7ff"/>
           <text x="${horizontalPadding + 24}" y="${top + 34}" class="reply-name">${escapeXml(input.reply!.senderName)}</text>
           ${svgTextLines(replyLines, horizontalPadding + 24, top + 70, 30, 'reply-text')}
+          ${
+            input.reply!.imagePreview
+              ? `<image href="${input.reply!.imagePreview}" x="${horizontalPadding + 24}"
+                  y="${top + 54 + replyLines.length * 32}" width="${contentWidth - 48}"
+                  height="${replyImageHeight}" preserveAspectRatio="xMidYMid meet"/>`
+              : ''
+          }
         `;
       })()
     : '';
@@ -149,7 +167,7 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
           )
           .join('')}
         <style>
-          text { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "Segoe UI Emoji", sans-serif; }
+          text { font-family: "Noto Sans CJK SC", "Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif; }
           .sender { fill: #f7f8ff; font-size: 30px; font-weight: 700; }
           .meta { fill: #aeb6cc; font-size: 20px; }
           .platform { fill: #91a7ff; font-size: 19px; font-weight: 700; letter-spacing: 1px; }

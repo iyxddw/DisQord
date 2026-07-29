@@ -63,4 +63,35 @@ describe('message card renderer', () => {
     expect(svg).not.toContain('ORIGINAL');
     expect(svg).not.toContain('Unsupported message');
   });
+
+  it('renders reply images and a localized fallback when no preview is available', () => {
+    const withImage = buildMessageCardSvg({
+      sourcePlatform: 'qq',
+      targetLanguage: 'en',
+      sourceName: 'group',
+      senderName: '😀',
+      sentAt: '2026-07-29 18:00',
+      primaryText: 'reply',
+      reply: {
+        senderName: 'Previous user',
+        imagePreview: 'data:image/png;base64,aGVsbG8=',
+      },
+      images: [],
+    });
+    expect(withImage).toContain('Noto Color Emoji');
+    expect(withImage).toContain('data:image/png;base64,aGVsbG8=');
+    expect(withImage).not.toContain('Preview unavailable');
+
+    const withoutPreview = buildMessageCardSvg({
+      sourcePlatform: 'discord',
+      targetLanguage: 'zh',
+      sourceName: 'channel',
+      senderName: 'Alice',
+      sentAt: '2026-07-29 18:00',
+      primaryText: '回复',
+      reply: { senderName: '被回复用户' },
+      images: [],
+    });
+    expect(withoutPreview).toContain('无可用预览');
+  });
 });

@@ -27,10 +27,17 @@ export const napCatGroupMessageEventSchema = z.object({
 
 export type NapCatGroupMessageEvent = z.infer<typeof napCatGroupMessageEventSchema>;
 
+export interface NapCatReplyPreview {
+  readonly senderDisplayName: string;
+  readonly textPreview?: string;
+  readonly imageUrl?: string;
+}
+
 export function normalizeNapCatGroupMessage(
   candidate: unknown,
   nodeId: string,
   mentionNames: ReadonlyMap<string, string> = new Map(),
+  replyPreviews: ReadonlyMap<string, NapCatReplyPreview> = new Map(),
 ): MessageEnvelope | undefined {
   const event = napCatGroupMessageEventSchema.parse(candidate);
   if (String(event.user_id) === String(event.self_id)) {
@@ -64,9 +71,23 @@ export function normalizeNapCatGroupMessage(
         ...(sourceUrl ? { sourceUrl } : {}),
       });
     } else if (segment.type === 'reply') {
+      const sourceMessageId = String(segment.data.id ?? '');
+      const preview = replyPreviews.get(sourceMessageId);
       replyTo = {
-        sourceMessageId: String(segment.data.id ?? ''),
-        senderDisplayName: '被回复用户',
+        sourceMessageId,
+        senderDisplayName: preview?.senderDisplayName ?? '被回复用户',
+        ...(preview?.textPreview ? { textPreview: preview.textPreview.slice(0, 1_000) } : {}),
+        ...(preview?.imageUrl
+          ? {
+              imagePreview: {
+                id: randomUUID(),
+                mimeType: guessImageMime('reply-image', preview.imageUrl),
+                byteSize: 0,
+                sha256: createHash('sha256').update(preview.imageUrl).digest('hex'),
+                sourceUrl: preview.imageUrl,
+              },
+            }
+          : {}),
       };
     } else {
       unsupportedType ??= segment.type;

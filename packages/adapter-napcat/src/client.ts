@@ -3,7 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
-import { normalizeNapCatGroupMessage, napCatGroupMessageEventSchema } from './normalize.js';
+import {
+  normalizeNapCatGroupMessage,
+  napCatGroupMessageEventSchema,
+  type NapCatReplyPreview,
+} from './normalize.js';
 
 const actionResponseSchema = z.object({
   status: z.string(),
@@ -25,6 +29,23 @@ const groupMemberInfoSchema = z.object({
   user_id: z.union([z.string(), z.number()]),
   nickname: z.string().optional(),
   card: z.string().optional(),
+});
+const replyMessageSchema = z.object({
+  sender: z
+    .object({
+      user_id: z.union([z.string(), z.number()]).optional(),
+      nickname: z.string().optional(),
+      card: z.string().optional(),
+    })
+    .optional(),
+  message: z
+    .array(
+      z.object({
+        type: z.string(),
+        data: z.record(z.string(), z.unknown()).default({}),
+      }),
+    )
+    .optional(),
 });
 
 interface PendingAction {
@@ -188,10 +209,66 @@ export class NapCatOneBotClient {
 
     const event = napCatGroupMessageEventSchema.safeParse(raw);
     if (event.success) {
-      const mentionNames = await this.#resolveMentionNames(event.data);
-      const message = normalizeNapCatGroupMessage(event.data, this.#options.nodeId, mentionNames);
+      const [mentionNames, replyPreviews] = await Promise.all([
+        this.#resolveMentionNames(event.data),
+        this.#resolveReplyPreviews(event.data),
+      ]);
+      const message = normalizeNapCatGroupMessage(
+        event.data,
+        this.#options.nodeId,
+        mentionNames,
+        replyPreviews,
+      );
       if (message) await this.#options.onMessage(message);
     }
+  }
+
+  async #resolveReplyPreviews(
+    event: z.infer<typeof napCatGroupMessageEventSchema>,
+  ): Promise<ReadonlyMap<string, NapCatReplyPreview>> {
+    const replyIds = [
+      ...new Set(
+        event.message
+          .filter((segment) => segment.type === 'reply')
+          .map((segment) => String(segment.data.id ?? ''))
+          .filter(Boolean),
+      ),
+    ];
+    const previews = new Map<string, NapCatReplyPreview>();
+    await Promise.all(
+      replyIds.map(async (messageId) => {
+        try {
+          const replied = replyMessageSchema.parse(
+            await this.call('get_msg', { message_id: messageId }),
+          );
+          const text = (replied.message ?? [])
+            .filter((segment) => segment.type === 'text' || segment.type === 'at')
+            .map((segment) =>
+              segment.type === 'at'
+                ? `@${String(segment.data.qq ?? '')}`
+                : String(segment.data.text ?? ''),
+            )
+            .join('')
+            .trim();
+          const image = (replied.message ?? []).find(
+            (segment) => segment.type === 'image' && typeof segment.data.url === 'string',
+          );
+          const fallbackSender = replied.sender?.user_id
+            ? String(replied.sender.user_id)
+            : '被回复用户';
+          previews.set(messageId, {
+            senderDisplayName:
+              replied.sender?.card?.trim() || replied.sender?.nickname?.trim() || fallbackSender,
+            ...(text ? { textPreview: text.slice(0, 1_000) } : {}),
+            ...(typeof image?.data.url === 'string' ? { imageUrl: image.data.url } : {}),
+          });
+        } catch {
+          // NapCat may no longer retain the referenced message; the renderer will
+          // show an explicit unavailable-preview label instead of an empty box.
+        }
+      }),
+    );
+    return previews;
   }
 
   async #resolveMentionNames(

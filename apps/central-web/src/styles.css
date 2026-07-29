@@ -619,8 +619,9 @@ button.fit {
   background-image: radial-gradient(circle at 50% 10%, #172238, #0b1018 70%);
 }
 .flow-node {
+  position: relative;
   min-width: 175px;
-  padding: 13px 15px;
+  padding: 13px 42px 13px 15px;
   border-radius: 11px;
   border: 1px solid #3a4a65;
   color: #dce4f1;
@@ -641,6 +642,26 @@ button.fit {
 .flow-node strong {
   margin-top: 5px;
   font-size: 12px;
+}
+.flow-node-delete {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #40506b;
+  border-radius: 7px;
+  color: #9daac0;
+  background: #111925;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.flow-node-delete:hover {
+  border-color: #b95f70;
+  color: #ff9bad;
+  background: #2b1720;
 }
 .flow-node.input {
   border-left: 3px solid var(--cyan);

@@ -85,13 +85,16 @@ sudo ls -l /var/lib/disqord/central/central.json
 - 检查 View Channel、Read Message History、Send Messages 和 Attach Files。
 - 检查具体频道覆盖权限。
 
-### 中文卡片变成方框
+### 中文或 Emoji 卡片变成方框
 
 ```bash
-sudo apt install -y fonts-noto-cjk
+sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
 sudo fc-cache -f
 sudo systemctl restart disqord-central
 ```
+
+如果没有使用 systemd，停止当前 Central 进程后重新运行
+`pnpm --filter @disqord/central-server start`。字体只需安装在负责生成卡片的中央服务器。
 
 ## 备份与恢复
 

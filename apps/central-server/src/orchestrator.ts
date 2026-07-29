@@ -427,6 +427,9 @@ export class CentralMessageProcessor implements MessageProcessor {
     const avatar = message.sender.avatarUrl
       ? await downloadExternalImage(message.sender.avatarUrl).catch(() => undefined)
       : undefined;
+    const replyImage = message.replyTo?.imagePreview?.sourceUrl
+      ? await downloadExternalImage(message.replyTo.imagePreview.sourceUrl).catch(() => undefined)
+      : undefined;
     const images = (
       await Promise.all(
         message.attachments.map(async (attachment) =>
@@ -453,6 +456,7 @@ export class CentralMessageProcessor implements MessageProcessor {
             reply: {
               senderName: message.replyTo.senderDisplayName,
               ...(message.replyTo.textPreview ? { textPreview: message.replyTo.textPreview } : {}),
+              ...(replyImage ? { imagePreview: replyImage.dataUri } : {}),
             },
           }
         : {}),

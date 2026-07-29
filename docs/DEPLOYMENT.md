@@ -60,7 +60,8 @@ sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
 ### 2.1 准备中央数据目录
 
 ```bash
-sudo apt install -y fonts-noto-cjk
+sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
+sudo fc-cache -f
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/central
 ```
 

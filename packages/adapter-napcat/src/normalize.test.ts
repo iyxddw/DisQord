@@ -79,4 +79,35 @@ describe('normalizeNapCatGroupMessage', () => {
 
     expect(message?.text).toBe('@萝卜 撤回啥了');
   });
+
+  it('uses resolved QQ reply details when NapCat can retrieve the referenced message', () => {
+    const message = normalizeNapCatGroupMessage(
+      {
+        ...baseEvent,
+        message: [
+          { type: 'reply', data: { id: '88' } },
+          { type: 'text', data: { text: '测试' } },
+        ],
+      },
+      randomUUID(),
+      new Map(),
+      new Map([
+        [
+          '88',
+          {
+            senderDisplayName: '上一位用户',
+            textPreview: '上一条消息',
+            imageUrl: 'https://example.test/reply.png',
+          },
+        ],
+      ]),
+    );
+
+    expect(message?.replyTo).toMatchObject({
+      sourceMessageId: '88',
+      senderDisplayName: '上一位用户',
+      textPreview: '上一条消息',
+      imagePreview: { sourceUrl: 'https://example.test/reply.png' },
+    });
+  });
 });
