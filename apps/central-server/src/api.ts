@@ -46,7 +46,7 @@ const llmSettingsInputSchema = z.object({
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),
   visionModel: z.string().trim().max(256).optional(),
-  unreviewableImagePolicy: z.enum(['allow', 'block']).default('block'),
+  unreviewableImagePolicy: z.enum(['allow', 'block', 'block-notify']).default('block'),
 });
 const promptDraftBodySchema = z.object({ content: z.string().min(1).max(50_000) });
 const blueprintDraftBodySchema = z.object({

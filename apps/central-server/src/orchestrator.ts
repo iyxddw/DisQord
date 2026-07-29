@@ -171,7 +171,9 @@ export class MessageOrchestrator {
         });
         continue;
       }
-      if (result.decision === 'block' || !result.cards?.length) continue;
+      // A blocked result normally has no cards. The explicit "block and notify"
+      // policy returns a safe placeholder card, which still needs to be delivered.
+      if (!result.cards?.length) continue;
 
       const mappedReplyId = message.replyTo
         ? (
@@ -320,17 +322,17 @@ export class CentralMessageProcessor implements MessageProcessor {
     if (containsImages && !imagesAreReviewable) {
       const reason =
         'Image could not be moderated because no vision model is configured or its source is unavailable.';
+      const shouldAllow = settings.unreviewableImagePolicy === 'allow';
       const unreviewableModeration = {
-        riskLevel:
-          settings.unreviewableImagePolicy === 'allow' ? ('low' as const) : ('high' as const),
-        decision: settings.unreviewableImagePolicy,
+        riskLevel: shouldAllow ? ('low' as const) : ('high' as const),
+        decision: shouldAllow ? ('allow' as const) : ('block' as const),
         categories: ['unreviewable-image'],
         reason,
         confidence: 1,
         model: settings.visionModel || 'not-configured',
         promptVersion: moderationPrompt.version,
       };
-      if (settings.unreviewableImagePolicy === 'allow') {
+      if (shouldAllow) {
         return {
           decision: 'allow',
           moderation: unreviewableModeration,
@@ -341,6 +343,14 @@ export class CentralMessageProcessor implements MessageProcessor {
             apiKey,
             translationPrompt,
           ),
+        };
+      }
+      if (settings.unreviewableImagePolicy === 'block-notify') {
+        return {
+          decision: 'block',
+          moderation: unreviewableModeration,
+          reason,
+          cards: await this.#renderModerationNotice(message, target),
         };
       }
       return {
@@ -451,6 +461,23 @@ export class CentralMessageProcessor implements MessageProcessor {
     };
     void target;
     return await renderMessageCards(input);
+  }
+
+  async #renderModerationNotice(
+    message: MessageEnvelope,
+    target: ChatSession,
+  ): Promise<readonly Buffer[]> {
+    return await renderMessageCards({
+      sourcePlatform: message.source.platform,
+      targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
+      sourceName: message.source.channelId,
+      senderName: 'DisQord',
+      sentAt: message.sentAt,
+      primaryText:
+        target.platform === 'discord' ? 'Content did not pass moderation' : '内容未通过审核',
+      images: [],
+      traceLabel: message.traceId.slice(0, 8),
+    });
   }
 
   async #translateAndRender(

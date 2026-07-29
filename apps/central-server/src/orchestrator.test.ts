@@ -18,7 +18,7 @@ import {
 import { InMemorySecretStore, InMemoryStateStore } from './state-store.js';
 
 describe('message orchestrator blueprint activation', () => {
-  it('does not process messages through a disabled published blueprint', async () => {
+  it('honors disabled blueprints and delivers an explicit block notice card', async () => {
     const store = new InMemoryStateStore();
     const now = new Date().toISOString();
     const qqNodeId = randomUUID();
@@ -100,7 +100,8 @@ describe('message orchestrator blueprint activation', () => {
       decision: 'allow',
       cards: [],
     }));
-    const commandBus: NodeCommandBus = { sendToNode: vi.fn(async () => undefined) };
+    const sendToNode = vi.fn(async () => undefined);
+    const commandBus: NodeCommandBus = { sendToNode };
     const orchestrator = new MessageOrchestrator(store, commandBus, { process });
     const message: MessageEnvelope = {
       schemaVersion: 1,
@@ -129,12 +130,47 @@ describe('message orchestrator blueprint activation', () => {
     });
 
     expect(process).not.toHaveBeenCalled();
-    expect(commandBus.sendToNode).not.toHaveBeenCalled();
+    expect(sendToNode).not.toHaveBeenCalled();
+
+    await store.set('blueprint', blueprintId, {
+      ...blueprint,
+      enabled: true,
+      updatedAt: new Date().toISOString(),
+    });
+    process.mockResolvedValue({
+      decision: 'block',
+      cards: [Buffer.from('moderation notice')],
+    });
+    const notificationMessage: MessageEnvelope = {
+      ...message,
+      eventId: randomUUID(),
+      source: { ...message.source, messageId: 'message-2' },
+      traceId: randomUUID(),
+    };
+
+    await orchestrator.handleNodeFrame({
+      nodeId: qqNodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: notificationMessage,
+      frameId: randomUUID(),
+    });
+
+    expect(process).toHaveBeenCalledOnce();
+    expect(sendToNode).toHaveBeenCalledWith(
+      discordNodeId,
+      'message.deliver',
+      expect.objectContaining({
+        sourceMessageId: 'message-2',
+        targetSessionId,
+        cards: [Buffer.from('moderation notice').toString('base64')],
+      }),
+    );
   });
 });
 
 describe('unreviewable image moderation policy', () => {
-  async function createProcessor(policy: 'allow' | 'block') {
+  async function createProcessor(policy: 'allow' | 'block' | 'block-notify') {
     const store = new InMemoryStateStore();
     const secrets = new InMemorySecretStore();
     await store.set('settings', 'llm', {
@@ -214,6 +250,18 @@ describe('unreviewable image moderation policy', () => {
     expect(result.cards).toHaveLength(1);
     expect(result.moderation).toMatchObject({
       decision: 'allow',
+      categories: ['unreviewable-image'],
+    });
+  });
+
+  it('blocks the original image and renders a safe notice when policy is block-notify', async () => {
+    const result = await (
+      await createProcessor('block-notify')
+    ).process(createImageMessage(), target);
+    expect(result.decision).toBe('block');
+    expect(result.cards).toHaveLength(1);
+    expect(result.moderation).toMatchObject({
+      decision: 'block',
       categories: ['unreviewable-image'],
     });
   });

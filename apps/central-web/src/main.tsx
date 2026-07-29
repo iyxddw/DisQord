@@ -784,7 +784,7 @@ function LlmSettings() {
     maxRetries: 2,
     concurrency: 4,
     visionModel: '',
-    unreviewableImagePolicy: 'block' as 'allow' | 'block',
+    unreviewableImagePolicy: 'block' as 'allow' | 'block' | 'block-notify',
   });
   const [notice, setNotice] = useState('');
   useEffect(() => {
@@ -855,11 +855,12 @@ function LlmSettings() {
             onChange={(event) =>
               setForm({
                 ...form,
-                unreviewableImagePolicy: event.target.value as 'allow' | 'block',
+                unreviewableImagePolicy: event.target.value as 'allow' | 'block' | 'block-notify',
               })
             }
           >
-            <option value="block">拦截（推荐）</option>
+            <option value="block">拦截（不发送任何内容）</option>
+            <option value="block-notify">拦截并保留占位消息</option>
             <option value="allow">直接通过</option>
           </select>
         </label>
