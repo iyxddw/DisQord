@@ -140,10 +140,7 @@ function App() {
       </aside>
       <main className="workspace">
         <header>
-          <div>
-            <p className="eyebrow">CONTROL PLANE</p>
-            <h1>{current.label}</h1>
-          </div>
+          <h1>{current.label}</h1>
           <div className="header-status">
             <ShieldCheck size={17} />
             {location.protocol === 'https:' ? '管理连接已加密' : '管理连接使用明文 HTTP'}
@@ -187,20 +184,17 @@ function Login({ configured, onDone }: { configured: boolean; onDone: () => void
   };
   return (
     <div className="auth-page">
-      <div className="auth-copy">
-        <p className="eyebrow">QQ ↔ DISCORD</p>
-        <h1>
-          让两边的对话，
-          <br />
-          在这里安全汇合。
-        </h1>
-        <p>三端隔离架构、AI 双语翻译与审核、统一图片渲染。</p>
-      </div>
       <div className="auth-card">
-        <div className="brand-mark">
-          <MessagesSquare size={22} />
+        <div className="auth-brand">
+          <div className="brand-mark">
+            <MessagesSquare size={20} />
+          </div>
+          <div>
+            <strong>DisQord</strong>
+            <span>跨平台消息中枢</span>
+          </div>
         </div>
-        <h2>{configured ? '欢迎回来' : '创建管理员'}</h2>
+        <h1>{configured ? '登录管理面板' : '创建管理员'}</h1>
         <p>{configured ? '输入管理密码进入控制台。' : '首次启动，请设置至少 12 位管理密码。'}</p>
         <label>
           管理密码
@@ -241,9 +235,6 @@ function Overview() {
           </span>
           <h2>消息桥接状态良好</h2>
           <p>中心服务正在接收节点心跳，并按已发布蓝图处理消息。</p>
-        </div>
-        <div className="orb">
-          <Network size={38} />
         </div>
       </div>
       <div className="stats">
