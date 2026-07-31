@@ -23,7 +23,6 @@ import {
   ChevronRight,
   CircleAlert,
   FileClock,
-  Languages,
   LogOut,
   MessagesSquare,
   Network,
@@ -47,12 +46,9 @@ import {
   type BlueprintVersion,
   type ChatSession,
   type NodeRuntime,
-  type PromptPurpose,
-  type PromptVersion,
 } from './api';
 
-type Page =
-  'overview' | 'sessions' | 'blueprint' | 'nodes' | 'settings' | 'prompts' | 'reviews' | 'logs';
+type Page = 'overview' | 'sessions' | 'blueprint' | 'nodes' | 'settings' | 'reviews' | 'logs';
 
 const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: '运行概览', icon: Activity },
@@ -60,7 +56,6 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'blueprint', label: '转发蓝图', icon: Network },
   { id: 'nodes', label: '客户端列表', icon: Server },
   { id: 'settings', label: '基础设置', icon: Settings },
-  { id: 'prompts', label: '高级模式', icon: Sparkles },
   { id: 'reviews', label: '人工审核', icon: ShieldCheck },
   { id: 'logs', label: '运行日志', icon: FileClock },
 ];
@@ -160,7 +155,6 @@ function App() {
           {page === 'blueprint' && <BlueprintEditor />}
           {page === 'nodes' && <Nodes />}
           {page === 'settings' && <LlmSettings />}
-          {page === 'prompts' && <Prompts />}
           {page === 'reviews' && <Records kind="reviews" />}
           {page === 'logs' && <Records kind="logs" />}
         </section>
@@ -351,17 +345,98 @@ function Sessions() {
   );
 }
 
-type FlowData = { label: string; sessionId: string; kind: 'input' | 'output' };
+type FlowKind = 'input' | 'output' | 'translation' | 'moderation' | 'fixed' | 'renderer';
+type FlowData = {
+  label: string;
+  kind: FlowKind;
+  sessionId?: string;
+  prompt?: string;
+  memoryMode?: boolean;
+  threshold?: number;
+  text?: string;
+};
+
+const defaultTranslationPrompt =
+  '请将消息自然、准确地翻译成目标聊天使用的语言。保留姓名、@提及、网址、代码、Emoji、换行和语气，不要回答、解释、审查或概括消息。';
+const defaultModerationPrompt =
+  '请评估文本的违规程度。正常对话应接近 0，明确严重违规应接近 1。重点考虑骚扰、仇恨、色情、暴力、自残、违法活动、隐私泄露和垃圾信息。';
+
 function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
-  const { deleteElements } = useReactFlow();
+  const { deleteElements, updateNodeData } = useReactFlow();
+  const hasInput = data.kind !== 'input';
+  const hasOutput = data.kind !== 'output' && data.kind !== 'moderation';
   return (
     <div className={`flow-node ${data.kind}`}>
-      <Handle
-        type={data.kind === 'input' ? 'source' : 'target'}
-        position={data.kind === 'input' ? Position.Right : Position.Left}
-      />
-      <span>{data.kind === 'input' ? '消息来源' : '转发目标'}</span>
+      {hasInput && <Handle type="target" position={Position.Left} />}
+      {hasOutput && <Handle type="source" position={Position.Right} />}
+      {data.kind === 'moderation' && (
+        <>
+          <Handle id="passed" type="source" position={Position.Right} style={{ top: '38%' }} />
+          <Handle id="blocked" type="source" position={Position.Right} style={{ top: '74%' }} />
+          <span className="flow-handle-label passed">过审</span>
+          <span className="flow-handle-label blocked">未过</span>
+        </>
+      )}
+      <span className="flow-node-kind">
+        {data.kind === 'input'
+          ? '消息入口'
+          : data.kind === 'output'
+            ? '发送目标'
+            : data.kind === 'translation'
+              ? '文本翻译'
+              : data.kind === 'moderation'
+                ? '文本审核'
+                : data.kind === 'fixed'
+                  ? '固定文本'
+                  : '图片合成'}
+      </span>
       <strong>{data.label}</strong>
+      {data.kind === 'translation' && (
+        <div className="flow-node-config nodrag nopan">
+          <textarea
+            value={data.prompt ?? ''}
+            onChange={(event) => updateNodeData(id, { prompt: event.target.value })}
+            placeholder="翻译提示词"
+          />
+          <label className="memory-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(data.memoryMode)}
+              onChange={(event) => updateNodeData(id, { memoryMode: event.target.checked })}
+            />
+            <span>记忆模式</span>
+          </label>
+        </div>
+      )}
+      {data.kind === 'moderation' && (
+        <div className="flow-node-config nodrag nopan">
+          <label>
+            允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={data.threshold ?? 0.5}
+              onChange={(event) => updateNodeData(id, { threshold: Number(event.target.value) })}
+            />
+          </label>
+          <textarea
+            value={data.prompt ?? ''}
+            onChange={(event) => updateNodeData(id, { prompt: event.target.value })}
+            placeholder="审核提示词"
+          />
+        </div>
+      )}
+      {data.kind === 'fixed' && (
+        <div className="flow-node-config nodrag nopan">
+          <textarea
+            value={data.text ?? ''}
+            onChange={(event) => updateNodeData(id, { text: event.target.value })}
+            placeholder="经过此模块后输出的固定文本"
+          />
+        </div>
+      )}
       <button
         className="flow-node-delete nodrag nopan"
         title="删除节点"
@@ -408,19 +483,56 @@ function BlueprintEditor() {
       return;
     }
     const flowNodes = version.nodes
-      .filter((node) => node.type === 'chat-input' || node.type === 'chat-output')
+      .filter((node) =>
+        [
+          'chat-input',
+          'chat-output',
+          'llm-translation',
+          'llm-moderation',
+          'fixed-text',
+          'card-renderer',
+        ].includes(node.type),
+      )
       .map((node) => {
-        const sessionId =
-          typeof node.config.sessionId === 'string' ? node.config.sessionId : '未知会话';
+        const sessionId = typeof node.config.sessionId === 'string' ? node.config.sessionId : '';
         const session = sessions.data.find((item) => item.id === sessionId);
+        const kind: FlowKind =
+          node.type === 'chat-input'
+            ? 'input'
+            : node.type === 'chat-output'
+              ? 'output'
+              : node.type === 'llm-translation'
+                ? 'translation'
+                : node.type === 'llm-moderation'
+                  ? 'moderation'
+                  : node.type === 'fixed-text'
+                    ? 'fixed'
+                    : 'renderer';
         return {
           id: node.id,
           type: 'session',
           position: node.position,
           data: {
-            label: session?.displayName ?? sessionId,
-            sessionId,
-            kind: node.type === 'chat-input' ? ('input' as const) : ('output' as const),
+            label:
+              kind === 'input' || kind === 'output'
+                ? (session?.displayName ?? sessionId)
+                : kind === 'translation'
+                  ? '翻译当前文本'
+                  : kind === 'moderation'
+                    ? '按违规分数分流'
+                    : kind === 'fixed'
+                      ? '替换当前文本'
+                      : '使用原消息资料生成 PNG',
+            kind,
+            ...(sessionId ? { sessionId } : {}),
+            ...(typeof node.config.prompt === 'string' ? { prompt: node.config.prompt } : {}),
+            ...(typeof node.config.memoryMode === 'boolean'
+              ? { memoryMode: node.config.memoryMode }
+              : {}),
+            ...(typeof node.config.threshold === 'number'
+              ? { threshold: node.config.threshold }
+              : {}),
+            ...(typeof node.config.text === 'string' ? { text: node.config.text } : {}),
           },
         };
       });
@@ -433,22 +545,54 @@ function BlueprintEditor() {
         id: edge.id,
         source: edge.sourceNodeId,
         target: edge.targetNodeId,
+        ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
+        ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
       })),
     );
     setNotice(`已载入 ${blueprint.name} · v${version.version}`);
     setEditorKey((value) => value + 1);
   };
 
-  const addNode = (kind: FlowData['kind']) => {
+  const addNode = (kind: FlowKind) => {
     const session = usable.find((item) => item.id === selected);
-    if (!session) return;
+    if ((kind === 'input' || kind === 'output') && !session) {
+      setNotice('添加消息入口或发送目标前，请先选择一个已验证会话。');
+      return;
+    }
+    const moduleDefaults: Record<Exclude<FlowKind, 'input' | 'output'>, FlowData> = {
+      translation: {
+        kind: 'translation',
+        label: '翻译当前文本',
+        prompt: defaultTranslationPrompt,
+        memoryMode: false,
+      },
+      moderation: {
+        kind: 'moderation',
+        label: '按违规分数分流',
+        prompt: defaultModerationPrompt,
+        threshold: 0.5,
+      },
+      fixed: { kind: 'fixed', label: '替换当前文本', text: '内容未通过审核' },
+      renderer: { kind: 'renderer', label: '使用原消息资料生成 PNG' },
+    };
+    const data: FlowData =
+      kind === 'input' || kind === 'output'
+        ? {
+            kind,
+            label: session!.displayName,
+            sessionId: session!.id,
+          }
+        : moduleDefaults[kind];
     setNodes((current) => [
       ...current,
       {
         id: createBrowserId(),
         type: 'session',
-        position: { x: kind === 'input' ? 80 : 520, y: 80 + current.length * 82 },
-        data: { label: session.displayName, sessionId: session.id, kind },
+        position: {
+          x: kind === 'input' ? 60 : kind === 'output' ? 920 : 300,
+          y: 60 + current.length * 95,
+        },
+        data,
       },
     ]);
   };
@@ -458,14 +602,36 @@ function BlueprintEditor() {
         name,
         nodes: nodes.map((node) => ({
           id: node.id,
-          type: node.data.kind === 'input' ? 'chat-input' : 'chat-output',
+          type:
+            node.data.kind === 'input'
+              ? 'chat-input'
+              : node.data.kind === 'output'
+                ? 'chat-output'
+                : node.data.kind === 'translation'
+                  ? 'llm-translation'
+                  : node.data.kind === 'moderation'
+                    ? 'llm-moderation'
+                    : node.data.kind === 'fixed'
+                      ? 'fixed-text'
+                      : 'card-renderer',
           position: node.position,
-          config: { sessionId: node.data.sessionId },
+          config:
+            node.data.kind === 'input' || node.data.kind === 'output'
+              ? { sessionId: node.data.sessionId }
+              : node.data.kind === 'translation'
+                ? { prompt: node.data.prompt, memoryMode: Boolean(node.data.memoryMode) }
+                : node.data.kind === 'moderation'
+                  ? { prompt: node.data.prompt, threshold: node.data.threshold ?? 0.5 }
+                  : node.data.kind === 'fixed'
+                    ? { text: node.data.text ?? '' }
+                    : {},
         })),
         edges: edges.map((edge) => ({
-          id: createBrowserId(),
+          id: edge.id,
           sourceNodeId: edge.source,
           targetNodeId: edge.target,
+          ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
+          ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
         })),
       };
       let version: Pick<BlueprintVersion, 'blueprintId' | 'version'>;
@@ -576,14 +742,30 @@ function BlueprintEditor() {
             ))}
           </select>
         </label>
-        <div className="button-pair">
+        <div className="module-palette">
           <button onClick={() => addNode('input')}>
             <Plus size={15} />
-            来源
+            消息入口
           </button>
           <button onClick={() => addNode('output')}>
             <Plus size={15} />
-            目标
+            发送目标
+          </button>
+          <button onClick={() => addNode('translation')}>
+            <Plus size={15} />
+            翻译
+          </button>
+          <button onClick={() => addNode('moderation')}>
+            <Plus size={15} />
+            审核
+          </button>
+          <button onClick={() => addNode('fixed')}>
+            <Plus size={15} />
+            固定文本
+          </button>
+          <button onClick={() => addNode('renderer')}>
+            <Plus size={15} />
+            图片合成
           </button>
         </div>
         <button className="primary" onClick={() => void save()}>
@@ -599,7 +781,7 @@ function BlueprintEditor() {
           <p>
             <strong>连线方法</strong>
             <br />
-            从“消息来源”右侧圆点拖到“转发目标”左侧圆点。创建反向连线即可双向互通。
+            从左到右连接模块。审核节点右侧上方为“过审”，下方为“未过”。每个方向建立一条独立流水线。
           </p>
         </div>
       </div>
@@ -610,7 +792,9 @@ function BlueprintEditor() {
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
-          onConnect={(connection: Connection) => setEdges((items) => addEdge(connection, items))}
+          onConnect={(connection: Connection) =>
+            setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items))
+          }
           nodeTypes={nodeTypes}
           deleteKeyCode={['Backspace', 'Delete']}
           fitView
@@ -794,8 +978,6 @@ function LlmSettings() {
     timeoutMs: 30000,
     maxRetries: 2,
     concurrency: 4,
-    visionModel: '',
-    unreviewableImagePolicy: 'block' as 'allow' | 'block' | 'block-notify',
   });
   const [notice, setNotice] = useState('');
   useEffect(() => {
@@ -852,30 +1034,6 @@ function LlmSettings() {
           />
         </label>
         <label>
-          识图审核模型（可选）
-          <input
-            value={form.visionModel}
-            placeholder="留空表示图片无法审核"
-            onChange={(event) => setForm({ ...form, visionModel: event.target.value })}
-          />
-        </label>
-        <label>
-          图片无法审核时
-          <select
-            value={form.unreviewableImagePolicy}
-            onChange={(event) =>
-              setForm({
-                ...form,
-                unreviewableImagePolicy: event.target.value as 'allow' | 'block' | 'block-notify',
-              })
-            }
-          >
-            <option value="block">拦截（不发送任何内容）</option>
-            <option value="block-notify">拦截并保留占位消息</option>
-            <option value="allow">直接通过</option>
-          </select>
-        </label>
-        <label>
           超时（毫秒）
           <input
             type="number"
@@ -894,9 +1052,7 @@ function LlmSettings() {
       </div>
       <div className="safety-note">
         <ShieldCheck size={17} />
-        <span>
-          纯文字使用审核模型；含图片时使用识图审核模型。未配置识图模型或图片地址不可用时，按“图片无法审核时”的策略处理。
-        </span>
+        <span>这里只配置模型连接；翻译、审核提示词与审核阈值均在蓝图模块内设置。</span>
       </div>
       {notice && <div className="notice">{notice}</div>}
       <button className="primary fit" onClick={() => void save()}>
@@ -907,73 +1063,13 @@ function LlmSettings() {
   );
 }
 
-const promptLabels: Record<PromptPurpose, string> = {
-  'translation-system': '翻译系统提示词',
-  'translation-task': '翻译任务模板',
-  'moderation-system': '审核系统提示词',
-  'moderation-rules': '审核规则',
-};
-function Prompts() {
-  const [purpose, setPurpose] = useState<PromptPurpose>('translation-system');
-  const versions = useLoad<PromptVersion[]>(`/prompts/${purpose}`, []);
-  const published = versions.data.find((item) => item.status === 'published');
-  const [content, setContent] = useState('');
-  const [notice, setNotice] = useState('');
-  useEffect(() => setContent(published?.content ?? ''), [published?.id]);
-  const publish = async () => {
-    try {
-      const draft = await api<PromptVersion>(`/prompts/${purpose}/drafts`, {
-        method: 'POST',
-        json: { content },
-      });
-      await api(`/prompts/${purpose}/${draft.id}/publish`, { method: 'POST' });
-      setNotice(`版本 ${draft.version} 已发布。`);
-      await versions.reload();
-    } catch (cause) {
-      setNotice(cause instanceof Error ? cause.message : '发布失败');
-    }
-  };
-  return (
-    <div className="prompt-layout">
-      <div className="prompt-tabs">
-        {(Object.keys(promptLabels) as PromptPurpose[]).map((item) => (
-          <button
-            className={item === purpose ? 'active' : ''}
-            onClick={() => setPurpose(item)}
-            key={item}
-          >
-            <Languages size={17} />
-            {promptLabels[item]}
-            <span>{versions.data.filter((version) => version.purpose === item).length || ''}</span>
-          </button>
-        ))}
-      </div>
-      <div className="panel editor-panel">
-        <PanelTitle
-          title={promptLabels[purpose]}
-          subtitle={`当前发布版本：${published ? `v${published.version}` : '无'}`}
-        />
-        <div className="safety-note">
-          <ShieldCheck size={17} />
-          <span>系统固定安全边界不会被此处内容覆盖；用户消息始终作为不可信数据传入。</span>
-        </div>
-        <textarea
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-          spellCheck={false}
-        />
-        {notice && <div className="notice">{notice}</div>}
-        <button className="primary fit" onClick={() => void publish()}>
-          <Save size={16} />
-          创建并发布新版本
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function Records({ kind }: { kind: 'reviews' | 'logs' }) {
   const records = useLoad<Array<Record<string, unknown>>>(`/${kind}`, []);
+  const [logLevel, setLogLevel] = useState('all');
+  const visibleRecords =
+    kind === 'logs' && logLevel !== 'all'
+      ? records.data.filter((record) => String(record.level ?? 'info') === logLevel)
+      : records.data;
   const decide = async (taskId: string, decision: 'approve' | 'reject') => {
     await api(`/reviews/${taskId}/decision`, { method: 'POST', json: { decision } });
     await records.reload();
@@ -984,22 +1080,41 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
         title={kind === 'reviews' ? '待审核消息' : '追踪日志'}
         subtitle={
           kind === 'reviews'
-            ? '大模型不确定或图片能力不足的消息会停在这里'
+            ? '兼容查看升级前遗留的人工审核任务；新版审核由蓝图双出口处理'
             : '按 traceId 追踪消息在中心的处理过程'
         }
         action={
-          <button className="icon-button" onClick={() => void records.reload()}>
-            <RefreshCw size={16} />
-          </button>
+          <div className="log-actions">
+            {kind === 'logs' && (
+              <select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>
+                <option value="all">全部级别</option>
+                <option value="debug">Debug</option>
+                <option value="info">Info</option>
+                <option value="warn">Warn</option>
+                <option value="error">Error</option>
+              </select>
+            )}
+            <button className="icon-button" onClick={() => void records.reload()}>
+              <RefreshCw size={16} />
+            </button>
+          </div>
         }
       />
       <div className="record-list">
-        {records.data.map((record, index) => (
-          <div className="record" key={String(record.taskId ?? record.id ?? index)}>
+        {visibleRecords.map((record, index) => (
+          <div
+            className={`record ${kind === 'logs' ? `log-${String(record.level ?? 'info')}` : ''}`}
+            key={String(record.taskId ?? record.id ?? index)}
+          >
             <div>
               <strong>{String(record.event ?? record.reason ?? '审核任务')}</strong>
               <span>{formatTime(String(record.createdAt ?? ''))}</span>
             </div>
+            {kind === 'logs' && (
+              <span className={`log-level ${String(record.level ?? 'info')}`}>
+                {String(record.level ?? 'info').toUpperCase()}
+              </span>
+            )}
             <code>{String(record.traceId ?? record.taskId ?? '')}</code>
             {kind === 'reviews' && record.status === 'pending' && (
               <div className="review-actions">
@@ -1015,7 +1130,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
             <pre>{JSON.stringify(record, null, 2)}</pre>
           </div>
         ))}
-        {!records.data.length && (
+        {!visibleRecords.length && (
           <Empty text={kind === 'reviews' ? '目前没有待处理内容' : '暂无日志'} />
         )}
       </div>

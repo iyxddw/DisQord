@@ -354,6 +354,40 @@ h1 {
   display: grid;
   gap: 10px;
 }
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.log-actions select {
+  width: 130px;
+  padding: 8px 10px;
+}
+.log-level {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #a9d8ff;
+  background: #173047;
+}
+.log-level.debug {
+  color: #b9bfc9;
+  background: #252b34;
+}
+.log-level.warn {
+  color: #ffd088;
+  background: #3a2d16;
+}
+.log-level.error {
+  color: #ffabb7;
+  background: #3d1d26;
+}
+.record.log-error {
+  border-color: #633142;
+}
 .grow {
   min-width: 0;
   flex: 1;
@@ -572,12 +606,14 @@ button.fit {
   text-align: center;
   font-size: 10px;
 }
-.button-pair {
+.button-pair,
+.module-palette {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
-.button-pair button {
+.button-pair button,
+.module-palette button {
   padding: 9px;
   border: 1px solid #2b374b;
   border-radius: 8px;
@@ -628,11 +664,16 @@ button.fit {
   background: #182131;
   box-shadow: 0 10px 30px rgb(0 0 0 / 25%);
 }
+.flow-node.translation,
+.flow-node.moderation,
+.flow-node.fixed {
+  width: 330px;
+}
 .flow-node span,
 .flow-node strong {
   display: block;
 }
-.flow-node span {
+.flow-node .flow-node-kind {
   color: #7f90aa;
   font-size: 9px;
   font-weight: 700;
@@ -645,7 +686,7 @@ button.fit {
 }
 .flow-node-delete {
   position: absolute;
-  top: 50%;
+  top: 10px;
   right: 10px;
   width: 26px;
   height: 26px;
@@ -656,7 +697,7 @@ button.fit {
   color: #9daac0;
   background: #111925;
   cursor: pointer;
-  transform: translateY(-50%);
+  transform: none;
 }
 .flow-node-delete:hover {
   border-color: #b95f70;
@@ -668,6 +709,67 @@ button.fit {
 }
 .flow-node.output {
   border-left: 3px solid var(--blue);
+}
+.flow-node.translation {
+  border-left: 3px solid #9b8cff;
+}
+.flow-node.moderation {
+  border-left: 3px solid #ffb65c;
+}
+.flow-node.fixed {
+  border-left: 3px solid #ec7f9a;
+}
+.flow-node.renderer {
+  border-left: 3px solid #63c6ff;
+}
+.flow-node-config {
+  margin-top: 11px;
+  display: grid;
+  gap: 9px;
+}
+.flow-node-config textarea {
+  min-height: 88px;
+  resize: vertical;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.flow-node-config label {
+  font-size: 10px;
+}
+.flow-node-config input[type='range'] {
+  padding: 0;
+  accent-color: var(--cyan);
+}
+.memory-toggle {
+  display: flex !important;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+.memory-toggle input {
+  width: 15px;
+  height: 15px;
+}
+.memory-toggle span {
+  color: #c4cddd;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.flow-handle-label {
+  position: absolute;
+  right: 15px;
+  color: #8795aa !important;
+  font-size: 9px !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  transform: translateY(-50%);
+}
+.flow-handle-label.passed {
+  top: 38%;
+}
+.flow-handle-label.blocked {
+  top: 74%;
 }
 .react-flow__handle {
   width: 10px;

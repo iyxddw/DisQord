@@ -150,24 +150,35 @@ export class NodeBridgeRuntime {
     }
     if (kind === 'message.deliver') {
       const command = deliverCommandSchema.parse(payload);
-      let firstMessageId: string | undefined;
-      for (const [index, card] of command.cards.entries()) {
-        if (!this.#adapter) throw new Error('Platform adapter is not running.');
-        const messageId = await this.#adapter.sendCard(
-          command.externalId,
-          Buffer.from(card, 'base64'),
-          index === 0 ? command.replyMessageId : undefined,
-        );
-        firstMessageId ??= messageId;
+      try {
+        let firstMessageId: string | undefined;
+        for (const [index, card] of command.cards.entries()) {
+          if (!this.#adapter) throw new Error('Platform adapter is not running.');
+          const messageId = await this.#adapter.sendCard(
+            command.externalId,
+            Buffer.from(card, 'base64'),
+            index === 0 ? command.replyMessageId : undefined,
+          );
+          firstMessageId ??= messageId;
+        }
+        if (!firstMessageId) throw new Error('The platform did not return a message ID.');
+        await this.#client?.send('message.delivered', {
+          taskId: command.taskId,
+          sourceSessionId: command.sourceSessionId,
+          sourceMessageId: command.sourceMessageId,
+          targetSessionId: command.targetSessionId,
+          targetMessageId: firstMessageId,
+        });
+      } catch (error) {
+        await this.#client?.send('message.delivery_failed', {
+          taskId: command.taskId,
+          sourceSessionId: command.sourceSessionId,
+          sourceMessageId: command.sourceMessageId,
+          targetSessionId: command.targetSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
       }
-      if (!firstMessageId) throw new Error('The platform did not return a message ID.');
-      await this.#client?.send('message.delivered', {
-        taskId: command.taskId,
-        sourceSessionId: command.sourceSessionId,
-        sourceMessageId: command.sourceMessageId,
-        targetSessionId: command.targetSessionId,
-        targetMessageId: firstMessageId,
-      });
     }
   }
 

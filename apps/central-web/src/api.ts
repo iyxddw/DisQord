@@ -56,6 +56,8 @@ export interface BlueprintEdge {
   id: string;
   sourceNodeId: string;
   targetNodeId: string;
+  sourceHandle?: string;
+  targetHandle?: string;
 }
 
 export interface BlueprintVersion {

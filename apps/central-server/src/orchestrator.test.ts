@@ -1,268 +1,336 @@
 import { randomUUID } from 'node:crypto';
 
-import { PromptVersionStore } from '@disqord/llm';
 import {
   type Blueprint,
+  type BlueprintNode,
   type BlueprintVersion,
   type ChatSession,
   type MessageEnvelope,
 } from '@disqord/shared';
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  CentralMessageProcessor,
-  MessageOrchestrator,
-  type MessageProcessor,
-  type NodeCommandBus,
-} from './orchestrator.js';
-import { InMemorySecretStore, InMemoryStateStore } from './state-store.js';
+import { MessageOrchestrator, type MessageProcessor } from './orchestrator.js';
+import { InMemoryStateStore } from './state-store.js';
 
-describe('message orchestrator blueprint activation', () => {
-  it('honors disabled blueprints and delivers an explicit block notice card', async () => {
-    const store = new InMemoryStateStore();
-    const now = new Date().toISOString();
-    const qqNodeId = randomUUID();
-    const discordNodeId = randomUUID();
-    const sourceSessionId = randomUUID();
-    const targetSessionId = randomUUID();
-    const blueprintId = randomUUID();
-    const inputNodeId = randomUUID();
-    const outputNodeId = randomUUID();
-    const sessions: ChatSession[] = [
-      {
-        id: sourceSessionId,
-        nodeId: qqNodeId,
-        platform: 'qq',
-        externalId: 'qq-group',
-        spaceId: 'qq-group',
-        displayName: 'QQ group',
-        status: 'verified',
-        verifiedAt: now,
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        id: targetSessionId,
-        nodeId: discordNodeId,
-        platform: 'discord',
-        externalId: 'discord-channel',
-        spaceId: 'discord-server',
-        displayName: 'Discord channel',
-        status: 'verified',
-        verifiedAt: now,
-        createdAt: now,
-        updatedAt: now,
-      },
-    ];
-    for (const session of sessions) await store.set('chat-session', session.id, session);
-    const blueprint: Blueprint = {
-      id: blueprintId,
-      name: 'Disabled route',
-      enabled: false,
-      activeVersion: 1,
-      createdAt: now,
-      updatedAt: now,
-    };
-    const version: BlueprintVersion = {
-      id: randomUUID(),
-      blueprintId,
-      version: 1,
-      status: 'published',
-      nodes: [
-        {
-          id: inputNodeId,
-          type: 'chat-input',
-          position: { x: 0, y: 0 },
-          config: { sessionId: sourceSessionId },
-        },
-        {
-          id: outputNodeId,
-          type: 'chat-output',
-          position: { x: 300, y: 0 },
-          config: { sessionId: targetSessionId },
-        },
-      ],
-      edges: [
-        {
-          id: randomUUID(),
-          sourceNodeId: inputNodeId,
-          targetNodeId: outputNodeId,
-        },
-      ],
-      createdBy: randomUUID(),
-      createdAt: now,
-      publishedAt: now,
-    };
-    await store.set('blueprint', blueprintId, blueprint);
-    await store.set('blueprint-version', `${blueprintId}:1`, version);
+function message(nodeId: string, text = '你好'): MessageEnvelope {
+  return {
+    schemaVersion: 1,
+    eventId: randomUUID(),
+    source: {
+      nodeId,
+      platform: 'qq',
+      spaceId: 'qq-group',
+      channelId: 'qq-group',
+      messageId: randomUUID(),
+    },
+    sender: { id: 'sender', displayName: 'Sender' },
+    sentAt: new Date().toISOString(),
+    kind: 'text',
+    text,
+    attachments: [],
+    traceId: randomUUID(),
+  };
+}
 
-    const process = vi.fn<MessageProcessor['process']>(async () => ({
-      decision: 'allow',
-      cards: [],
-    }));
-    const sendToNode = vi.fn(async () => undefined);
-    const commandBus: NodeCommandBus = { sendToNode };
-    const orchestrator = new MessageOrchestrator(store, commandBus, { process });
-    const message: MessageEnvelope = {
-      schemaVersion: 1,
-      eventId: randomUUID(),
-      source: {
-        nodeId: qqNodeId,
-        platform: 'qq',
-        spaceId: 'qq-group',
-        channelId: 'qq-group',
-        messageId: 'message-1',
-      },
-      sender: { id: 'sender', displayName: 'Sender' },
-      sentAt: now,
-      kind: 'text',
-      text: 'hello',
-      attachments: [],
-      traceId: randomUUID(),
-    };
-
-    await orchestrator.handleNodeFrame({
-      nodeId: qqNodeId,
-      nodeType: 'qq',
-      kind: 'message.upload',
-      payload: message,
-      frameId: randomUUID(),
-    });
-
-    expect(process).not.toHaveBeenCalled();
-    expect(sendToNode).not.toHaveBeenCalled();
-
-    await store.set('blueprint', blueprintId, {
-      ...blueprint,
-      enabled: true,
-      updatedAt: new Date().toISOString(),
-    });
-    process.mockResolvedValue({
-      decision: 'block',
-      cards: [Buffer.from('moderation notice')],
-    });
-    const notificationMessage: MessageEnvelope = {
-      ...message,
-      eventId: randomUUID(),
-      source: { ...message.source, messageId: 'message-2' },
-      traceId: randomUUID(),
-    };
-
-    await orchestrator.handleNodeFrame({
-      nodeId: qqNodeId,
-      nodeType: 'qq',
-      kind: 'message.upload',
-      payload: notificationMessage,
-      frameId: randomUUID(),
-    });
-
-    expect(process).toHaveBeenCalledOnce();
-    expect(sendToNode).toHaveBeenCalledWith(
-      discordNodeId,
-      'message.deliver',
-      expect.objectContaining({
-        sourceMessageId: 'message-2',
-        targetSessionId,
-        cards: [Buffer.from('moderation notice').toString('base64')],
-      }),
-    );
-  });
-});
-
-describe('unreviewable image moderation policy', () => {
-  async function createProcessor(policy: 'allow' | 'block' | 'block-notify') {
-    const store = new InMemoryStateStore();
-    const secrets = new InMemorySecretStore();
-    await store.set('settings', 'llm', {
-      baseUrl: 'https://llm.example.test/v1',
-      translationModel: 'translation-model',
-      moderationModel: 'moderation-model',
-      timeoutMs: 30_000,
-      maxRetries: 0,
-      concurrency: 1,
-      unreviewableImagePolicy: policy,
-    });
-    await secrets.set('llm-api-key', 'test-key');
-    const prompts = new PromptVersionStore();
-    prompts.createDefaultVersions(randomUUID());
-    for (const purpose of [
-      'translation-system',
-      'translation-task',
-      'moderation-system',
-      'moderation-rules',
-    ] as const) {
-      const prompt = prompts.getPublished(purpose);
-      await store.set('prompt', prompt.id, prompt);
-    }
-    return new CentralMessageProcessor(store, secrets);
-  }
-
-  function createImageMessage(): MessageEnvelope {
-    return {
-      schemaVersion: 1,
-      eventId: randomUUID(),
-      source: {
-        nodeId: randomUUID(),
-        platform: 'qq',
-        spaceId: 'qq-group',
-        channelId: 'qq-group',
-        messageId: 'image-message',
-      },
-      sender: { id: 'sender', displayName: 'Sender' },
-      sentAt: new Date().toISOString(),
-      kind: 'image',
-      attachments: [
-        {
-          id: randomUUID(),
-          fileName: 'image.jpg',
-          mimeType: 'image/jpeg',
-          byteSize: 0,
-          sha256: '0'.repeat(64),
-        },
-      ],
-      traceId: randomUUID(),
-    };
-  }
-
-  const target: ChatSession = {
+async function fixture(
+  nodes: BlueprintNode[],
+  edges: BlueprintVersion['edges'],
+  processor: MessageProcessor,
+) {
+  const store = new InMemoryStateStore();
+  const now = new Date().toISOString();
+  const qqNodeId = randomUUID();
+  const discordNodeId = randomUUID();
+  const sourceSession: ChatSession = {
     id: randomUUID(),
-    nodeId: randomUUID(),
+    nodeId: qqNodeId,
+    platform: 'qq',
+    externalId: 'qq-group',
+    spaceId: 'qq-group',
+    displayName: 'QQ group',
+    status: 'verified',
+    verifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const targetSession: ChatSession = {
+    id: randomUUID(),
+    nodeId: discordNodeId,
     platform: 'discord',
     externalId: 'discord-channel',
     spaceId: 'discord-server',
     displayName: 'Discord channel',
     status: 'verified',
-    verifiedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    verifiedAt: now,
+    createdAt: now,
+    updatedAt: now,
   };
+  for (const session of [sourceSession, targetSession]) {
+    await store.set('chat-session', session.id, session);
+  }
+  const blueprintId = randomUUID();
+  const resolvedNodes = nodes.map((node) => ({
+    ...node,
+    config: {
+      ...node.config,
+      ...(node.config.sessionRole === 'source' ? { sessionId: sourceSession.id } : {}),
+      ...(node.config.sessionRole === 'target' ? { sessionId: targetSession.id } : {}),
+    },
+  }));
+  const blueprint: Blueprint = {
+    id: blueprintId,
+    name: 'Pipeline',
+    enabled: true,
+    activeVersion: 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const version: BlueprintVersion = {
+    id: randomUUID(),
+    blueprintId,
+    version: 1,
+    status: 'published',
+    nodes: resolvedNodes,
+    edges,
+    createdBy: randomUUID(),
+    createdAt: now,
+    publishedAt: now,
+  };
+  await store.set('blueprint', blueprintId, blueprint);
+  await store.set('blueprint-version', `${blueprintId}:1`, version);
+  const sendToNode = vi.fn(async () => undefined);
+  const orchestrator = new MessageOrchestrator(store, { sendToNode }, processor);
+  return { store, orchestrator, sendToNode, sourceSession, targetSession, blueprint };
+}
 
-  it('blocks an image when no vision model is configured and policy is block', async () => {
-    const result = await (await createProcessor('block')).process(createImageMessage(), target);
-    expect(result).toMatchObject({ decision: 'block' });
-    expect(result.reason).toContain('no vision model');
-    expect(result.moderation).toMatchObject({ categories: ['unreviewable-image'] });
+function node(
+  id: string,
+  type: BlueprintNode['type'],
+  config: Record<string, unknown> = {},
+): BlueprintNode {
+  return { id, type, position: { x: 0, y: 0 }, config };
+}
+
+describe('blueprint message pipeline', () => {
+  it('does not execute a disabled blueprint and keeps legacy direct routes compatible', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const process = vi.fn(async () => ({
+      decision: 'allow' as const,
+      cards: [Buffer.from('legacy-card')],
+    }));
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { process },
+    );
+    await setup.store.set('blueprint', setup.blueprint.id, {
+      ...setup.blueprint,
+      enabled: false,
+    });
+    const incoming = message(setup.sourceSession.nodeId);
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+    expect(process).not.toHaveBeenCalled();
+
+    await setup.store.set('blueprint', setup.blueprint.id, setup.blueprint);
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: message(setup.sourceSession.nodeId),
+      frameId: randomUUID(),
+    });
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver',
+      expect.objectContaining({ cards: [Buffer.from('legacy-card').toString('base64')] }),
+    );
   });
 
-  it('allows and renders an image when no vision model is configured and policy is allow', async () => {
-    const result = await (await createProcessor('allow')).process(createImageMessage(), target);
-    expect(result.decision).toBe('allow');
-    expect(result.cards).toHaveLength(1);
-    expect(result.moderation).toMatchObject({
-      decision: 'allow',
-      categories: ['unreviewable-image'],
+  it('translates with memory, evaluates the score, and follows the passed output', async () => {
+    const input = randomUUID();
+    const translation = randomUUID();
+    const moderation = randomUUID();
+    const renderer = randomUUID();
+    const output = randomUUID();
+    const blocked = randomUUID();
+    const translate = vi.fn(async () => ({
+      detectedLanguage: 'zh',
+      translatedText: 'Hello',
+      confidence: 0.99,
+      model: 'translator',
+      promptVersion: 1,
+    }));
+    const moderate = vi.fn(async () => ({
+      violationScore: 0.2,
+      categories: [],
+      reason: '正常内容',
+      confidence: 0.98,
+      model: 'moderator',
+    }));
+    const render = vi.fn(async (_message, _target, text) => [Buffer.from(text)]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(translation, 'llm-translation', { prompt: '翻译提示词', memoryMode: true }),
+        node(moderation, 'llm-moderation', { prompt: '审核提示词', threshold: 0.5 }),
+        node(renderer, 'card-renderer'),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+        node(blocked, 'discard'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
+        { id: randomUUID(), sourceNodeId: translation, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: renderer,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'blocked',
+          targetNodeId: blocked,
+        },
+        { id: randomUUID(), sourceNodeId: renderer, targetNodeId: output },
+      ],
+      { translate, moderate, render },
+    );
+    await setup.store.set('message-history', randomUUID(), {
+      sessionId: setup.sourceSession.id,
+      message: message(setup.sourceSession.nodeId, '上一条'),
     });
+    const incoming = message(setup.sourceSession.nodeId);
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    expect(translate).toHaveBeenCalledWith(
+      incoming,
+      setup.targetSession,
+      '你好',
+      '翻译提示词',
+      expect.arrayContaining([expect.objectContaining({ text: '上一条' })]),
+      true,
+    );
+    expect(moderate).toHaveBeenCalledWith('Hello', '审核提示词');
+    expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, 'Hello', false);
+    expect(setup.sendToNode).toHaveBeenCalledOnce();
+    const sentCommand = setup.sendToNode.mock.calls[0]![2] as {
+      taskId: string;
+      sourceSessionId: string;
+      sourceMessageId: string;
+      targetSessionId: string;
+    };
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'message.delivered',
+      payload: { ...sentCommand, targetMessageId: 'discord-message-id' },
+      frameId: randomUUID(),
+    });
+    const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
+      (entry) => entry.value,
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ level: 'info', event: 'translation_response' }),
+        expect.objectContaining({ level: 'info', event: 'moderation_response' }),
+        expect.objectContaining({ level: 'info', event: 'delivery_queued' }),
+        expect.objectContaining({ level: 'info', event: 'delivery_succeeded' }),
+      ]),
+    );
   });
 
-  it('blocks the original image and renders a safe notice when policy is block-notify', async () => {
-    const result = await (
-      await createProcessor('block-notify')
-    ).process(createImageMessage(), target);
-    expect(result.decision).toBe('block');
-    expect(result.cards).toHaveLength(1);
-    expect(result.moderation).toMatchObject({
-      decision: 'block',
-      categories: ['unreviewable-image'],
+  it('routes a high score through fixed text and renders the replacement', async () => {
+    const input = randomUUID();
+    const moderation = randomUUID();
+    const fixed = randomUUID();
+    const renderer = randomUUID();
+    const output = randomUUID();
+    const passed = randomUUID();
+    const render = vi.fn(async (_message, _target, text) => [Buffer.from(text)]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(moderation, 'llm-moderation', { prompt: '评分', threshold: 0.4 }),
+        node(fixed, 'fixed-text', { text: '内容未通过审核' }),
+        node(renderer, 'card-renderer'),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+        node(passed, 'discard'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: passed,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'blocked',
+          targetNodeId: fixed,
+        },
+        { id: randomUUID(), sourceNodeId: fixed, targetNodeId: renderer },
+        { id: randomUUID(), sourceNodeId: renderer, targetNodeId: output },
+      ],
+      {
+        moderate: vi.fn(async () => ({
+          violationScore: 0.9,
+          categories: ['abuse'],
+          reason: '违规',
+          confidence: 1,
+          model: 'moderator',
+        })),
+        render,
+      },
+    );
+    const incoming = message(setup.sourceSession.nodeId);
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
     });
+    expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, '内容未通过审核', true);
+    expect(setup.sendToNode).toHaveBeenCalledOnce();
+    const sentCommand = setup.sendToNode.mock.calls[0]![2] as {
+      taskId: string;
+      sourceSessionId: string;
+      sourceMessageId: string;
+      targetSessionId: string;
+    };
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'message.delivery_failed',
+      payload: { ...sentCommand, error: 'Discord API unavailable' },
+      frameId: randomUUID(),
+    });
+    const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
+      (entry) => entry.value,
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ level: 'error', event: 'delivery_failed' }),
+      ]),
+    );
   });
 });

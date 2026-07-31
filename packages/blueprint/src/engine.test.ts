@@ -105,4 +105,29 @@ describe('blueprint validation and simulation', () => {
     const result = validateBlueprint(blueprint, { isVerifiedSession: () => true });
     expect(result.errors).toContainEqual(expect.objectContaining({ code: 'CYCLE' }));
   });
+
+  it('validates moderation thresholds and named outputs', () => {
+    const blueprint = createBlueprint();
+    const moderationId = randomUUID();
+    blueprint.nodes.push({
+      id: moderationId,
+      type: 'llm-moderation',
+      position: { x: 500, y: 200 },
+      config: { prompt: '评估违规分数', threshold: 0.5 },
+    });
+    blueprint.edges.push({
+      id: randomUUID(),
+      sourceNodeId: moderationId,
+      targetNodeId: blueprint.nodes.at(-2)!.id,
+    });
+
+    expect(validateBlueprint(blueprint, { isVerifiedSession: () => true }).errors).toContainEqual(
+      expect.objectContaining({ code: 'INVALID_MODERATION_EDGE' }),
+    );
+
+    blueprint.edges.at(-1)!.sourceHandle = 'passed';
+    expect(
+      validateBlueprint(blueprint, { isVerifiedSession: () => true }).errors,
+    ).not.toContainEqual(expect.objectContaining({ code: 'INVALID_MODERATION_EDGE' }));
+  });
 });

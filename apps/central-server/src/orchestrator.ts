@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { simulateBlueprint } from '@disqord/blueprint';
+import { validateBlueprint } from '@disqord/blueprint';
 import {
   downloadExternalImage,
   renderMessageCards,
@@ -11,6 +11,7 @@ import {
   LlmTranslationService,
   OpenAICompatibleClient,
   llmSettingsSchema,
+  type ViolationAssessment,
 } from '@disqord/llm';
 import {
   blueprintVersionSchema,
@@ -18,12 +19,13 @@ import {
   chatSessionSchema,
   createMessageIdempotencyKey,
   messageEnvelopeSchema,
-  promptTemplateVersionSchema,
   type Blueprint,
+  type BlueprintEdge,
+  type BlueprintNode,
   type BlueprintVersion,
   type ChatSession,
   type MessageEnvelope,
-  type PromptTemplateVersion,
+  type TranslationResult,
 } from '@disqord/shared';
 import { type ReceivedNodeFrame } from '@disqord/transport';
 import { z } from 'zod';
@@ -38,6 +40,27 @@ const deliveredFrameSchema = z.object({
   targetMessageId: z.string().min(1),
 });
 
+const deliveryFailedFrameSchema = z.object({
+  taskId: z.uuid(),
+  sourceSessionId: z.uuid(),
+  sourceMessageId: z.string().min(1),
+  targetSessionId: z.uuid(),
+  error: z.string().min(1).max(4_000),
+});
+
+const chatConfigSchema = z.object({ sessionId: z.uuid() });
+const translationConfigSchema = z.object({
+  prompt: z.string().trim().min(1).max(50_000),
+  memoryMode: z.boolean().default(false),
+});
+const moderationConfigSchema = z.object({
+  prompt: z.string().trim().min(1).max(50_000),
+  threshold: z.number().min(0).max(1),
+});
+const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 export interface NodeCommandBus {
   sendToNode(nodeId: string, kind: string, payload: unknown): Promise<void>;
 }
@@ -50,8 +73,35 @@ export interface ProcessingResult {
 }
 
 export interface MessageProcessor {
-  process(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult>;
+  process?(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult>;
   processApproved?(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult>;
+  translate?(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    prompt: string,
+    recentMessages: readonly MessageEnvelope[],
+    memoryMode: boolean,
+  ): Promise<TranslationResult>;
+  moderate?(text: string, prompt: string): Promise<ViolationAssessment>;
+  render?(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+  ): Promise<readonly Buffer[]>;
+}
+
+interface PipelineState {
+  readonly text: string;
+  readonly fixedText: boolean;
+  readonly cards?: readonly Buffer[];
+  readonly renderedForSessionId?: string;
+}
+
+interface WorkItem {
+  readonly nodeId: string;
+  readonly state: PipelineState;
 }
 
 export class MessageOrchestrator {
@@ -70,6 +120,8 @@ export class MessageOrchestrator {
       await this.#handleMessageUpload(frame);
     } else if (frame.kind === 'message.delivered') {
       await this.#handleDelivered(frame.payload);
+    } else if (frame.kind === 'message.delivery_failed') {
+      await this.#handleDeliveryFailed(frame.payload);
     } else if (frame.kind === 'session.candidates') {
       await this.#store.set('session-candidates', frame.nodeId, frame.payload);
     }
@@ -81,10 +133,17 @@ export class MessageOrchestrator {
       throw new Error('Uploaded message source does not match the authenticated node.');
     }
     const dedupeKey = createMessageIdempotencyKey(message);
-    if (await this.#store.get('message-dedupe', dedupeKey)) return;
+    if (await this.#store.get('message-dedupe', dedupeKey)) {
+      await this.#log(message.traceId, 'debug', 'message_deduplicated', { dedupeKey });
+      return;
+    }
     await this.#store.set('message-dedupe', dedupeKey, {
       eventId: message.eventId,
       receivedAt: new Date().toISOString(),
+    });
+    await this.#log(message.traceId, 'info', 'message_received', {
+      authenticatedNode: { nodeId: frame.nodeId, nodeType: frame.nodeType },
+      message,
     });
 
     const sessions = (await this.#store.list<ChatSession>('chat-session'))
@@ -97,9 +156,17 @@ export class MessageOrchestrator {
         session.externalId === message.source.channelId,
     );
     if (!sourceSession) {
-      await this.#log(message.traceId, 'unmatched_session', { nodeId: frame.nodeId });
+      await this.#log(message.traceId, 'warn', 'unmatched_session', { nodeId: frame.nodeId });
       return;
     }
+    await this.#log(message.traceId, 'debug', 'source_session_matched', { sourceSession });
+
+    const recentMessages = await this.#recentMessages(sourceSession.id);
+    await this.#store.set('message-history', randomUUID(), {
+      sessionId: sourceSession.id,
+      message,
+      createdAt: new Date().toISOString(),
+    });
 
     const blueprints = (await this.#store.list<Blueprint>('blueprint')).map((entry) =>
       blueprintSchema.parse(entry.value),
@@ -109,8 +176,7 @@ export class MessageOrchestrator {
         .filter((blueprint) => blueprint.enabled && blueprint.activeVersion !== undefined)
         .map((blueprint) => [blueprint.id, blueprint.activeVersion]),
     );
-    const blueprintEntries = await this.#store.list<BlueprintVersion>('blueprint-version');
-    const published = blueprintEntries
+    const published = (await this.#store.list<BlueprintVersion>('blueprint-version'))
       .map((entry) => blueprintVersionSchema.parse(entry.value))
       .filter(
         (version) =>
@@ -118,131 +184,310 @@ export class MessageOrchestrator {
           enabledVersions.get(version.blueprintId) === version.version,
       );
     const verifiedIds = new Set(sessions.map((session) => session.id));
-    const targets = new Set<string>();
-    for (const blueprint of published) {
-      const result = simulateBlueprint(blueprint, sourceSession.id, message, {
-        isVerifiedSession: (sessionId) => verifiedIds.has(sessionId),
-      });
-      for (const target of result.outputSessionIds) targets.add(target);
-    }
+    const matching = published.filter((blueprint) =>
+      blueprint.nodes.some(
+        (node) =>
+          node.type === 'chat-input' &&
+          chatConfigSchema.safeParse(node.config).success &&
+          chatConfigSchema.parse(node.config).sessionId === sourceSession.id,
+      ),
+    );
 
-    if (!targets.size) {
-      await this.#log(message.traceId, 'unmatched_blueprint', { sessionId: sourceSession.id });
+    if (!matching.length) {
+      await this.#log(message.traceId, 'warn', 'unmatched_blueprint', {
+        sessionId: sourceSession.id,
+      });
       return;
     }
 
-    for (const targetId of targets) {
-      const target = sessions.find((session) => session.id === targetId);
-      if (!target) continue;
-      const taskId = randomUUID();
-      let result: ProcessingResult;
-      try {
-        result = await this.#processor.process(message, target);
-      } catch (error) {
-        result = {
-          decision: 'review',
-          reason:
-            error instanceof Error
-              ? `自动处理失败：${error.message}`
-              : '自动处理失败，需要人工审核。',
-        };
-      }
-      await this.#store.set('delivery-task', taskId, {
-        id: taskId,
-        traceId: message.traceId,
-        sourceSessionId: sourceSession.id,
-        targetSessionId: target.id,
-        decision: result.decision,
-        moderation: result.moderation,
-        reason: result.reason,
-        createdAt: new Date().toISOString(),
+    for (const blueprint of matching) {
+      const validation = validateBlueprint(blueprint, {
+        isVerifiedSession: (sessionId) => verifiedIds.has(sessionId),
       });
-      if (result.decision === 'review') {
-        await this.#store.set('moderation-review', taskId, {
-          taskId,
-          traceId: message.traceId,
-          sourceSession,
-          targetSession: target,
-          message,
-          moderation: result.moderation,
-          reason: result.reason,
-          status: 'pending',
-          createdAt: new Date().toISOString(),
+      if (!validation.valid) {
+        await this.#log(message.traceId, 'error', 'blueprint_invalid', {
+          blueprintId: blueprint.blueprintId,
+          version: blueprint.version,
+          errors: validation.errors,
         });
         continue;
       }
-      // A blocked result normally has no cards. The explicit "block and notify"
-      // policy returns a safe placeholder card, which still needs to be delivered.
-      if (!result.cards?.length) continue;
+      await this.#log(message.traceId, 'info', 'blueprint_started', {
+        blueprintId: blueprint.blueprintId,
+        version: blueprint.version,
+      });
+      try {
+        await this.#executeBlueprint(blueprint, sourceSession, sessions, message, recentMessages);
+        await this.#log(message.traceId, 'info', 'blueprint_completed', {
+          blueprintId: blueprint.blueprintId,
+          version: blueprint.version,
+        });
+      } catch (error) {
+        await this.#log(message.traceId, 'error', 'blueprint_failed', {
+          blueprintId: blueprint.blueprintId,
+          version: blueprint.version,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
 
-      const mappedReplyId = message.replyTo
-        ? (
-            await this.#store.get<{ targetMessageId: string }>(
-              'reply-mapping',
-              mappingKey(sourceSession.id, message.replyTo.sourceMessageId, target.id),
-            )
-          )?.value.targetMessageId
-        : undefined;
-      await this.#commandBus.sendToNode(target.nodeId, 'message.deliver', {
+  async #executeBlueprint(
+    blueprint: BlueprintVersion,
+    sourceSession: ChatSession,
+    sessions: readonly ChatSession[],
+    message: MessageEnvelope,
+    recentMessages: readonly MessageEnvelope[],
+  ): Promise<void> {
+    const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
+    const outgoing = new Map<string, BlueprintEdge[]>();
+    for (const edge of blueprint.edges) {
+      const current = outgoing.get(edge.sourceNodeId) ?? [];
+      current.push(edge);
+      outgoing.set(edge.sourceNodeId, current);
+    }
+    const starts = blueprint.nodes.filter(
+      (node) =>
+        node.type === 'chat-input' &&
+        chatConfigSchema.parse(node.config).sessionId === sourceSession.id,
+    );
+    const work: WorkItem[] = starts.map((node) => ({
+      nodeId: node.id,
+      state: { text: message.text ?? '', fixedText: false },
+    }));
+    let processedSteps = 0;
+
+    while (work.length) {
+      if ((processedSteps += 1) > 2_000)
+        throw new Error('Blueprint execution step limit exceeded.');
+      const item = work.shift()!;
+      const node = nodes.get(item.nodeId);
+      if (!node) continue;
+      let state = item.state;
+      await this.#log(message.traceId, 'debug', 'blueprint_node_entered', {
+        blueprintId: blueprint.blueprintId,
+        version: blueprint.version,
+        nodeId: node.id,
+        nodeType: node.type,
+        currentText: state.text,
+      });
+
+      if (node.type === 'llm-translation' && state.text.trim()) {
+        const config = translationConfigSchema.parse(node.config);
+        const target = this.#findDownstreamTarget(node.id, nodes, outgoing, sessions);
+        if (!target) throw new Error('Translation node has no reachable verified target session.');
+        if (!this.#processor.translate) throw new Error('Translation processor is unavailable.');
+        await this.#log(message.traceId, 'debug', 'translation_requested', {
+          nodeId: node.id,
+          modelTarget: target.platform === 'discord' ? 'en' : 'zh',
+          prompt: config.prompt,
+          memoryMode: config.memoryMode,
+          inputText: state.text,
+          recentMessages: config.memoryMode ? recentMessages : [],
+          repliedMessage: config.memoryMode ? message.replyTo : undefined,
+        });
+        const result = await this.#processor.translate(
+          message,
+          target,
+          state.text,
+          config.prompt,
+          recentMessages,
+          config.memoryMode,
+        );
+        await this.#log(message.traceId, 'info', 'translation_response', {
+          nodeId: node.id,
+          rawResult: result,
+        });
+        state = { ...state, text: result.translatedText, fixedText: false };
+      } else if (node.type === 'llm-moderation') {
+        const config = moderationConfigSchema.parse(node.config);
+        let assessment: ViolationAssessment;
+        if (!state.text.trim()) {
+          assessment = {
+            violationScore: 0,
+            categories: [],
+            reason: '消息没有可供文本审核模块处理的文字。',
+            confidence: 1,
+            model: 'skipped-empty-text',
+          };
+        } else {
+          if (!this.#processor.moderate) throw new Error('Moderation processor is unavailable.');
+          await this.#log(message.traceId, 'debug', 'moderation_requested', {
+            nodeId: node.id,
+            threshold: config.threshold,
+            prompt: config.prompt,
+            inputText: state.text,
+          });
+          assessment = await this.#processor.moderate(state.text, config.prompt);
+        }
+        const passed = assessment.violationScore <= config.threshold;
+        await this.#log(message.traceId, 'info', 'moderation_response', {
+          nodeId: node.id,
+          threshold: config.threshold,
+          passed,
+          selectedOutput: passed ? 'passed' : 'blocked',
+          rawResult: assessment,
+        });
+        const selectedEdges = (outgoing.get(node.id) ?? []).filter(
+          (edge) => edge.sourceHandle === (passed ? 'passed' : 'blocked'),
+        );
+        for (const edge of selectedEdges) {
+          work.push({ nodeId: edge.targetNodeId, state });
+        }
+        continue;
+      } else if (node.type === 'fixed-text') {
+        const config = fixedTextConfigSchema.parse(node.config);
+        state = { text: config.text, fixedText: true };
+        await this.#log(message.traceId, 'debug', 'fixed_text_applied', {
+          nodeId: node.id,
+          outputText: config.text,
+        });
+      } else if (node.type === 'card-renderer') {
+        const target = this.#findDownstreamTarget(node.id, nodes, outgoing, sessions);
+        if (!target) throw new Error('Image renderer has no reachable verified target session.');
+        const cards = await this.#render(message, target, state.text, state.fixedText);
+        state = { ...state, cards, renderedForSessionId: target.id };
+        await this.#log(message.traceId, 'info', 'render_succeeded', {
+          nodeId: node.id,
+          targetSessionId: target.id,
+          cardCount: cards.length,
+          byteSizes: cards.map((card) => card.byteLength),
+        });
+      } else if (node.type === 'chat-output') {
+        const targetId = chatConfigSchema.parse(node.config).sessionId;
+        const target = sessions.find((session) => session.id === targetId);
+        if (!target) throw new Error(`Target session ${targetId} is unavailable.`);
+        const cards =
+          state.cards && state.renderedForSessionId === target.id
+            ? state.cards
+            : await this.#render(message, target, state.text, state.fixedText);
+        await this.#dispatchDelivery(blueprint, sourceSession, target, message, cards, state.text);
+        continue;
+      } else if (node.type === 'discard') {
+        await this.#log(message.traceId, 'info', 'message_discarded', { nodeId: node.id });
+        continue;
+      }
+
+      for (const edge of outgoing.get(node.id) ?? []) {
+        work.push({ nodeId: edge.targetNodeId, state });
+      }
+    }
+  }
+
+  #findDownstreamTarget(
+    startNodeId: string,
+    nodes: ReadonlyMap<string, BlueprintNode>,
+    outgoing: ReadonlyMap<string, readonly BlueprintEdge[]>,
+    sessions: readonly ChatSession[],
+  ): ChatSession | undefined {
+    const queue = (outgoing.get(startNodeId) ?? []).map((edge) => edge.targetNodeId);
+    const visited = new Set<string>();
+    while (queue.length) {
+      const nodeId = queue.shift()!;
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+      const node = nodes.get(nodeId);
+      if (!node) continue;
+      if (node.type === 'chat-output') {
+        const targetId = chatConfigSchema.parse(node.config).sessionId;
+        return sessions.find((session) => session.id === targetId);
+      }
+      queue.push(...(outgoing.get(nodeId) ?? []).map((edge) => edge.targetNodeId));
+    }
+    return undefined;
+  }
+
+  async #render(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+  ): Promise<readonly Buffer[]> {
+    if (this.#processor.render)
+      return await this.#processor.render(message, target, text, fixedText);
+    if (this.#processor.process) {
+      const legacy = await this.#processor.process(message, target);
+      if (legacy.cards?.length) return legacy.cards;
+    }
+    throw new Error('Card renderer is unavailable.');
+  }
+
+  async #dispatchDelivery(
+    blueprint: BlueprintVersion,
+    sourceSession: ChatSession,
+    target: ChatSession,
+    message: MessageEnvelope,
+    cards: readonly Buffer[],
+    processedText: string,
+  ): Promise<void> {
+    const taskId = randomUUID();
+    const now = new Date().toISOString();
+    await this.#store.set('delivery-task', taskId, {
+      id: taskId,
+      traceId: message.traceId,
+      blueprintId: blueprint.blueprintId,
+      blueprintVersion: blueprint.version,
+      sourceSessionId: sourceSession.id,
+      targetSessionId: target.id,
+      status: 'queued',
+      processedText,
+      cardCount: cards.length,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const mappedReplyId = message.replyTo
+      ? (
+          await this.#store.get<{ targetMessageId: string }>(
+            'reply-mapping',
+            mappingKey(sourceSession.id, message.replyTo.sourceMessageId, target.id),
+          )
+        )?.value.targetMessageId
+      : undefined;
+    const command = {
+      taskId,
+      sourceSessionId: sourceSession.id,
+      sourceMessageId: message.source.messageId,
+      targetSessionId: target.id,
+      externalId: target.externalId,
+      cards: cards.map((card) => card.toString('base64')),
+      ...(mappedReplyId ? { replyMessageId: mappedReplyId } : {}),
+    };
+    try {
+      await this.#commandBus.sendToNode(target.nodeId, 'message.deliver', command);
+      await this.#log(message.traceId, 'info', 'delivery_queued', {
         taskId,
-        sourceSessionId: sourceSession.id,
-        sourceMessageId: message.source.messageId,
+        target: {
+          nodeId: target.nodeId,
+          platform: target.platform,
+          sessionId: target.id,
+          externalId: target.externalId,
+        },
+        cardCount: cards.length,
+        replyMessageId: mappedReplyId,
+      });
+    } catch (error) {
+      await this.#store.set('delivery-task', taskId, {
+        ...(await this.#store.get<Record<string, unknown>>('delivery-task', taskId))?.value,
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      });
+      await this.#log(message.traceId, 'error', 'delivery_command_failed', {
+        taskId,
         targetSessionId: target.id,
-        externalId: target.externalId,
-        cards: result.cards.map((card) => card.toString('base64')),
-        ...(mappedReplyId ? { replyMessageId: mappedReplyId } : {}),
+        error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   async handleReview(taskId: string, decision: 'approve' | 'reject'): Promise<void> {
-    const entry = await this.#store.get<{
-      taskId: string;
-      sourceSession: ChatSession;
-      targetSession: ChatSession;
-      message: MessageEnvelope;
-      status: string;
-    }>('moderation-review', taskId);
+    const entry = await this.#store.get<Record<string, unknown>>('moderation-review', taskId);
     if (!entry) throw new Error('Moderation review not found.');
-    if (entry.value.status !== 'pending') throw new Error('Moderation review is already resolved.');
-    if (decision === 'reject') {
-      await this.#store.set('moderation-review', taskId, {
-        ...entry.value,
-        status: 'rejected',
-        resolvedAt: new Date().toISOString(),
-      });
-      return;
-    }
-    const process = this.#processor.processApproved?.bind(this.#processor);
-    const result = process
-      ? await process(entry.value.message, entry.value.targetSession)
-      : await this.#processor.process(entry.value.message, entry.value.targetSession);
-    if (!result.cards?.length) throw new Error('Approved message did not produce a card.');
-    const mappedReplyId = entry.value.message.replyTo
-      ? (
-          await this.#store.get<{ targetMessageId: string }>(
-            'reply-mapping',
-            mappingKey(
-              entry.value.sourceSession.id,
-              entry.value.message.replyTo.sourceMessageId,
-              entry.value.targetSession.id,
-            ),
-          )
-        )?.value.targetMessageId
-      : undefined;
-    await this.#commandBus.sendToNode(entry.value.targetSession.nodeId, 'message.deliver', {
-      taskId,
-      sourceSessionId: entry.value.sourceSession.id,
-      sourceMessageId: entry.value.message.source.messageId,
-      targetSessionId: entry.value.targetSession.id,
-      externalId: entry.value.targetSession.externalId,
-      cards: result.cards.map((card) => card.toString('base64')),
-      ...(mappedReplyId ? { replyMessageId: mappedReplyId } : {}),
-    });
     await this.#store.set('moderation-review', taskId, {
       ...entry.value,
-      status: 'approved',
+      status: decision === 'approve' ? 'approved' : 'rejected',
       resolvedAt: new Date().toISOString(),
+      note: '该任务来自旧版全局审核流程；新版请使用蓝图审核节点。',
     });
   }
 
@@ -261,12 +506,42 @@ export class MessageOrchestrator {
         targetMessageId: delivered.targetMessageId,
         updatedAt: new Date().toISOString(),
       });
+      await this.#log(String(task.value.traceId), 'info', 'delivery_succeeded', {
+        ...delivered,
+      });
     }
   }
 
-  async #log(traceId: string, event: string, details: unknown): Promise<void> {
+  async #handleDeliveryFailed(payload: unknown): Promise<void> {
+    const failed = deliveryFailedFrameSchema.parse(payload);
+    const task = await this.#store.get<Record<string, unknown>>('delivery-task', failed.taskId);
+    if (task) {
+      await this.#store.set('delivery-task', failed.taskId, {
+        ...task.value,
+        status: 'failed',
+        error: failed.error,
+        updatedAt: new Date().toISOString(),
+      });
+      await this.#log(String(task.value.traceId), 'error', 'delivery_failed', failed);
+    }
+  }
+
+  async #recentMessages(sessionId: string): Promise<readonly MessageEnvelope[]> {
+    const entries = await this.#store.list<{ sessionId: string; message: MessageEnvelope }>(
+      'message-history',
+    );
+    return entries
+      .filter((entry) => entry.value.sessionId === sessionId)
+      .slice(0, 5)
+      .map((entry) => messageEnvelopeSchema.parse(entry.value.message))
+      .reverse();
+  }
+
+  async #log(traceId: string, level: LogLevel, event: string, details: unknown): Promise<void> {
     await this.#store.set('trace-log', randomUUID(), {
+      id: randomUUID(),
       traceId,
+      level,
       event,
       details,
       createdAt: new Date().toISOString(),
@@ -284,145 +559,63 @@ export class CentralMessageProcessor implements MessageProcessor {
   }
 
   async process(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult> {
-    if (message.kind === 'unsupported') {
-      return {
-        decision: 'allow',
-        cards: await this.#render(message, target, ''),
-      };
-    }
-    const settingsEntry = await this.#store.get('settings', 'llm');
-    const apiKey = await this.#secrets.get('llm-api-key');
-    if (!settingsEntry || !apiKey) {
-      return { decision: 'review', reason: 'LLM settings or API key are not configured.' };
-    }
-    const settings = llmSettingsSchema.parse(settingsEntry.value);
-    const prompts = (await this.#store.list<PromptTemplateVersion>('prompt')).map((entry) =>
-      promptTemplateVersionSchema.parse(entry.value),
-    );
-    const moderationPrompt = combinePrompts(
-      selectPrompt(prompts, 'moderation-system'),
-      selectPrompt(prompts, 'moderation-rules'),
-    );
-    const translationPrompt = combinePrompts(
-      selectPrompt(prompts, 'translation-system'),
-      selectPrompt(prompts, 'translation-task'),
-    );
-    const client = new OpenAICompatibleClient({
-      baseUrl: settings.baseUrl,
-      apiKey,
-      timeoutMs: settings.timeoutMs,
-      maxRetries: settings.maxRetries,
-    });
-    const imageUrls = message.attachments
-      .map((attachment) => attachment.sourceUrl)
-      .filter((url): url is string => Boolean(url));
-    const containsImages = message.attachments.length > 0;
-    const imagesAreReviewable =
-      Boolean(settings.visionModel) && imageUrls.length === message.attachments.length;
-    if (containsImages && !imagesAreReviewable) {
-      const reason =
-        'Image could not be moderated because no vision model is configured or its source is unavailable.';
-      const shouldAllow = settings.unreviewableImagePolicy === 'allow';
-      const unreviewableModeration = {
-        riskLevel: shouldAllow ? ('low' as const) : ('high' as const),
-        decision: shouldAllow ? ('allow' as const) : ('block' as const),
-        categories: ['unreviewable-image'],
-        reason,
-        confidence: 1,
-        model: settings.visionModel || 'not-configured',
-        promptVersion: moderationPrompt.version,
-      };
-      if (shouldAllow) {
-        return {
-          decision: 'allow',
-          moderation: unreviewableModeration,
-          cards: await this.#translateAndRender(
-            message,
-            target,
-            settings,
-            apiKey,
-            translationPrompt,
-          ),
-        };
-      }
-      if (settings.unreviewableImagePolicy === 'block-notify') {
-        return {
-          decision: 'block',
-          moderation: unreviewableModeration,
-          reason,
-          cards: await this.#renderModerationNotice(message, target),
-        };
-      }
-      return {
-        decision: 'block',
-        moderation: unreviewableModeration,
-        reason,
-      };
-    }
-    const moderation = await new LlmModerationService(client).moderate({
-      ...(message.text ? { text: message.text } : {}),
-      ...(imageUrls.length ? { imageUrls } : {}),
-      model: containsImages ? settings.visionModel! : settings.moderationModel,
-      prompt: {
-        content: moderationPrompt.content,
-        version: moderationPrompt.version,
-      },
-    });
-    if (moderation.decision !== 'allow') {
-      return {
-        decision: moderation.decision,
-        moderation,
-        reason: moderation.reason,
-      };
-    }
     return {
       decision: 'allow',
-      moderation,
-      cards: await this.#translateAndRender(message, target, settings, apiKey, translationPrompt),
+      cards: await this.render(message, target, message.text ?? '', false),
     };
   }
 
   async processApproved(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult> {
-    if (message.kind === 'unsupported') {
-      return { decision: 'allow', cards: await this.#render(message, target, '') };
-    }
-    const settingsEntry = await this.#store.get('settings', 'llm');
-    const apiKey = await this.#secrets.get('llm-api-key');
-    let translated = message.text ?? '';
-    if (message.text?.trim() && settingsEntry && apiKey) {
-      const settings = llmSettingsSchema.parse(settingsEntry.value);
-      const prompts = (await this.#store.list<PromptTemplateVersion>('prompt')).map((entry) =>
-        promptTemplateVersionSchema.parse(entry.value),
-      );
-      const prompt = combinePrompts(
-        selectPrompt(prompts, 'translation-system'),
-        selectPrompt(prompts, 'translation-task'),
-      );
-      const client = new OpenAICompatibleClient({
-        baseUrl: settings.baseUrl,
-        apiKey,
-        timeoutMs: settings.timeoutMs,
-        maxRetries: settings.maxRetries,
-      });
-      translated = (
-        await new LlmTranslationService(client).translate({
-          text: message.text,
-          targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
-          model: settings.translationModel,
-          prompt,
-        })
-      ).translatedText;
-    }
-    return {
-      decision: 'allow',
-      cards: await this.#render(message, target, translated),
-    };
+    return await this.process(message, target);
   }
 
-  async #render(
+  async translate(
     message: MessageEnvelope,
     target: ChatSession,
-    primaryText: string,
+    text: string,
+    prompt: string,
+    recentMessages: readonly MessageEnvelope[],
+    memoryMode: boolean,
+  ): Promise<TranslationResult> {
+    const { settings, client } = await this.#client();
+    return await new LlmTranslationService(client).translate({
+      text,
+      targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
+      model: settings.translationModel,
+      prompt: { content: prompt, version: 1 },
+      ...(memoryMode
+        ? {
+            recentMessages: recentMessages
+              .filter((item) => item.text?.trim())
+              .slice(-5)
+              .map((item) => ({ sender: item.sender.displayName, text: item.text! })),
+            ...(message.replyTo?.textPreview
+              ? {
+                  repliedMessage: {
+                    sender: message.replyTo.senderDisplayName,
+                    text: message.replyTo.textPreview,
+                  },
+                }
+              : {}),
+          }
+        : {}),
+    });
+  }
+
+  async moderate(text: string, prompt: string): Promise<ViolationAssessment> {
+    const { settings, client } = await this.#client();
+    return await new LlmModerationService(client).moderate({
+      text,
+      model: settings.moderationModel,
+      prompt: { content: prompt, version: 1 },
+    });
+  }
+
+  async render(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
   ): Promise<readonly Buffer[]> {
     const avatar = message.sender.avatarUrl
       ? await downloadExternalImage(message.sender.avatarUrl).catch(() => undefined)
@@ -448,8 +641,8 @@ export class CentralMessageProcessor implements MessageProcessor {
       senderName: message.sender.displayName,
       ...(avatar ? { senderAvatar: avatar.dataUri } : {}),
       sentAt: message.sentAt,
-      primaryText,
-      ...(message.text ? { originalText: message.text } : {}),
+      primaryText: text,
+      ...(!fixedText && message.text ? { originalText: message.text } : {}),
       images,
       ...(message.replyTo
         ? {
@@ -460,77 +653,34 @@ export class CentralMessageProcessor implements MessageProcessor {
             },
           }
         : {}),
-      ...(message.unsupportedType ? { unsupportedType: message.unsupportedType } : {}),
+      ...(!fixedText && message.unsupportedType
+        ? { unsupportedType: message.unsupportedType }
+        : {}),
       traceLabel: message.traceId.slice(0, 8),
     };
-    void target;
     return await renderMessageCards(input);
   }
 
-  async #renderModerationNotice(
-    message: MessageEnvelope,
-    target: ChatSession,
-  ): Promise<readonly Buffer[]> {
-    return await renderMessageCards({
-      sourcePlatform: message.source.platform,
-      targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
-      sourceName: message.source.channelId,
-      senderName: 'DisQord',
-      sentAt: message.sentAt,
-      primaryText:
-        target.platform === 'discord' ? 'Content did not pass moderation' : '内容未通过审核',
-      images: [],
-      traceLabel: message.traceId.slice(0, 8),
-    });
-  }
-
-  async #translateAndRender(
-    message: MessageEnvelope,
-    target: ChatSession,
-    settings: z.infer<typeof llmSettingsSchema>,
-    apiKey: string,
-    prompt: { content: string; version: number },
-  ): Promise<readonly Buffer[]> {
-    let translated = message.text ?? '';
-    if (message.text?.trim()) {
-      const client = new OpenAICompatibleClient({
+  async #client(): Promise<{
+    settings: z.infer<typeof llmSettingsSchema>;
+    apiKey: string;
+    client: OpenAICompatibleClient;
+  }> {
+    const settingsEntry = await this.#store.get('settings', 'llm');
+    const apiKey = await this.#secrets.get('llm-api-key');
+    if (!settingsEntry || !apiKey) throw new Error('大模型 API 设置或密钥尚未配置。');
+    const settings = llmSettingsSchema.parse(settingsEntry.value);
+    return {
+      settings,
+      apiKey,
+      client: new OpenAICompatibleClient({
         baseUrl: settings.baseUrl,
         apiKey,
         timeoutMs: settings.timeoutMs,
         maxRetries: settings.maxRetries,
-      });
-      translated = (
-        await new LlmTranslationService(client).translate({
-          text: message.text,
-          targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
-          model: settings.translationModel,
-          prompt,
-        })
-      ).translatedText;
-    }
-    return await this.#render(message, target, translated);
+      }),
+    };
   }
-}
-
-function selectPrompt(
-  prompts: readonly PromptTemplateVersion[],
-  purpose: PromptTemplateVersion['purpose'],
-): PromptTemplateVersion {
-  const prompt = prompts.find(
-    (candidate) => candidate.purpose === purpose && candidate.status === 'published',
-  );
-  if (!prompt) throw new Error(`No published prompt exists for ${purpose}.`);
-  return prompt;
-}
-
-function combinePrompts(
-  first: PromptTemplateVersion,
-  second: PromptTemplateVersion,
-): { content: string; version: number } {
-  return {
-    content: `${first.content}\n\n${second.content}`,
-    version: Math.max(first.version, second.version),
-  };
 }
 
 function mappingKey(

@@ -39,7 +39,9 @@ describe('LLM translation and moderation', () => {
         text: '你好',
         targetLanguage: 'en',
         model: 'translation-model',
-        prompt: { content: 'Translate accurately.', version: 3 },
+        prompt: { content: '准确翻译。', version: 3 },
+        recentMessages: [{ sender: 'Bob', text: '上一条消息' }],
+        repliedMessage: { sender: 'Carol', text: '被回复消息' },
       }),
     ).resolves.toEqual({
       detectedLanguage: 'zh',
@@ -54,6 +56,8 @@ describe('LLM translation and moderation', () => {
       response_format: { type: string };
     };
     expect(JSON.stringify(body.messages)).toContain('untrustedUserData');
+    expect(JSON.stringify(body.messages)).toContain('上一条消息');
+    expect(JSON.stringify(body.messages)).toContain('被回复消息');
     expect(typeof body.messages[2]?.content).toBe('string');
     expect(body.response_format).toEqual({ type: 'json_object' });
   });
@@ -106,6 +110,35 @@ describe('LLM translation and moderation', () => {
         prompt: { content: 'Classify risk.', version: 1 },
       }),
     ).rejects.toThrow();
+  });
+
+  it('returns a schema-validated violation score for threshold routing', async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      fetchImplementation: vi.fn(async () =>
+        jsonCompletion({
+          violationScore: 0.72,
+          categories: ['harassment'],
+          reason: '存在明确的人身攻击',
+          confidence: 0.94,
+        }),
+      ),
+    });
+
+    await expect(
+      new LlmModerationService(client).moderate({
+        text: '测试文本',
+        model: 'moderation-model',
+        prompt: { content: '评估违规程度。', version: 1 },
+      }),
+    ).resolves.toEqual({
+      violationScore: 0.72,
+      categories: ['harassment'],
+      reason: '存在明确的人身攻击',
+      confidence: 0.94,
+      model: 'moderation-model',
+    });
   });
 });
 

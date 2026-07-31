@@ -16,6 +16,15 @@ const textConditionConfigSchema = z.object({
   contains: z.string().min(1).max(1_000),
   caseSensitive: z.boolean().default(false),
 });
+const translationConfigSchema = z.object({
+  prompt: z.string().trim().min(1).max(50_000),
+  memoryMode: z.boolean().default(false),
+});
+const moderationConfigSchema = z.object({
+  prompt: z.string().trim().min(1).max(50_000),
+  threshold: z.number().min(0).max(1),
+});
+const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 
 export interface BlueprintValidationError {
   readonly code: string;
@@ -61,6 +70,30 @@ export function validateBlueprint(
           nodeId: node.id,
         });
       }
+    } else if (node.type === 'llm-translation') {
+      if (!translationConfigSchema.safeParse(node.config).success) {
+        errors.push({
+          code: 'INVALID_TRANSLATION_NODE',
+          message: 'Translation nodes require a prompt and memoryMode.',
+          nodeId: node.id,
+        });
+      }
+    } else if (node.type === 'llm-moderation') {
+      if (!moderationConfigSchema.safeParse(node.config).success) {
+        errors.push({
+          code: 'INVALID_MODERATION_NODE',
+          message: 'Moderation nodes require a prompt and threshold from 0 to 1.',
+          nodeId: node.id,
+        });
+      }
+    } else if (node.type === 'fixed-text') {
+      if (!fixedTextConfigSchema.safeParse(node.config).success) {
+        errors.push({
+          code: 'INVALID_FIXED_TEXT_NODE',
+          message: 'Fixed-text nodes require text.',
+          nodeId: node.id,
+        });
+      }
     }
   }
 
@@ -78,6 +111,18 @@ export function validateBlueprint(
         edgeId: edge.id,
       });
       continue;
+    }
+    const source = nodes.get(edge.sourceNodeId);
+    if (
+      source?.type === 'llm-moderation' &&
+      edge.sourceHandle !== 'passed' &&
+      edge.sourceHandle !== 'blocked'
+    ) {
+      errors.push({
+        code: 'INVALID_MODERATION_EDGE',
+        message: 'Moderation edges must use the passed or blocked output.',
+        edgeId: edge.id,
+      });
     }
     outgoing.get(edge.sourceNodeId)!.push(edge.targetNodeId);
     indegree.set(edge.targetNodeId, (indegree.get(edge.targetNodeId) ?? 0) + 1);

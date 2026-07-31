@@ -9,6 +9,7 @@ export const blueprintNodeTypeSchema = z.enum([
   'text-condition',
   'llm-moderation',
   'llm-translation',
+  'fixed-text',
   'card-renderer',
   'manual-review',
   'split',
