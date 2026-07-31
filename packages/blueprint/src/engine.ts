@@ -114,13 +114,16 @@ export function validateBlueprint(
     }
     const source = nodes.get(edge.sourceNodeId);
     if (
-      source?.type === 'llm-moderation' &&
+      (source?.type === 'llm-moderation' || source?.type === 'manual-review') &&
       edge.sourceHandle !== 'passed' &&
       edge.sourceHandle !== 'blocked'
     ) {
       errors.push({
-        code: 'INVALID_MODERATION_EDGE',
-        message: 'Moderation edges must use the passed or blocked output.',
+        code:
+          source.type === 'manual-review'
+            ? 'INVALID_MANUAL_REVIEW_EDGE'
+            : 'INVALID_MODERATION_EDGE',
+        message: `${source.type === 'manual-review' ? 'Manual review' : 'Moderation'} edges must use the passed or blocked output.`,
         edgeId: edge.id,
       });
     }

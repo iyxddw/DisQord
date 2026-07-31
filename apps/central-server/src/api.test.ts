@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import { PairingAuthority } from '@disqord/transport';
@@ -6,15 +8,19 @@ import { createCentralApplication } from './api.js';
 import { InMemorySecretStore, InMemoryStateStore } from './state-store.js';
 
 function createTestApplication() {
-  return createCentralApplication({
-    store: new InMemoryStateStore(),
-    secrets: new InMemorySecretStore(),
-    pairingAuthority: new PairingAuthority(
-      'api-test-pairing-pepper-that-is-longer-than-32-characters',
-    ),
-    verificationSecret: 'api-test-verification-secret-longer-than-32-characters',
-    secureCookies: false,
-  });
+  const store = new InMemoryStateStore();
+  return {
+    ...createCentralApplication({
+      store,
+      secrets: new InMemorySecretStore(),
+      pairingAuthority: new PairingAuthority(
+        'api-test-pairing-pepper-that-is-longer-than-32-characters',
+      ),
+      verificationSecret: 'api-test-verification-secret-longer-than-32-characters',
+      secureCookies: false,
+    }),
+    store,
+  };
 }
 
 async function configureAdministrator(
@@ -138,6 +144,60 @@ describe('central control-plane API', () => {
       cookies: { disqord_session: token },
     });
     expect(empty.json()).toEqual([]);
+    await central.app.close();
+  });
+
+  it('updates remarks and deletes chat sessions', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    await central.store.set('chat-session', id, {
+      id,
+      nodeId: randomUUID(),
+      platform: 'qq',
+      externalId: '123456',
+      spaceId: '123456',
+      displayName: 'QQ 测试群',
+      status: 'verified',
+      verifiedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const updated = await central.app.inject({
+      method: 'PATCH',
+      url: `/api/chat-sessions/${id}`,
+      cookies: { disqord_session: token },
+      payload: { remark: '工作群' },
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ remark: '工作群' });
+
+    const removed = await central.app.inject({
+      method: 'DELETE',
+      url: `/api/chat-sessions/${id}`,
+      cookies: { disqord_session: token },
+    });
+    expect(removed.statusCode).toBe(200);
+    expect(await central.store.get('chat-session', id)).toBeUndefined();
+    await central.app.close();
+  });
+
+  it('clears all manual review records', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    await central.store.set('moderation-review', randomUUID(), { status: 'pending' });
+    await central.store.set('moderation-review', randomUUID(), { status: 'approved' });
+
+    const response = await central.app.inject({
+      method: 'DELETE',
+      url: '/api/reviews',
+      cookies: { disqord_session: token },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ deleted: 2 });
+    expect(await central.store.list('moderation-review')).toEqual([]);
     await central.app.close();
   });
 });

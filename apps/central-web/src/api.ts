@@ -31,14 +31,23 @@ export interface ChatSession {
   externalId: string;
   spaceId: string;
   displayName: string;
+  remark?: string;
   status: 'pending' | 'verified' | 'disabled' | 'stale';
+}
+
+export interface SessionCandidate {
+  nodeId: string;
+  platform: 'qq' | 'discord';
+  externalId: string;
+  spaceId: string;
+  displayName: string;
 }
 
 export interface NodeRuntime {
   nodeId: string;
   nodeType: 'qq' | 'discord';
   verificationStatus?: 'pending' | 'verified';
-  configuredSession?: ChatSession;
+  configuredSessions?: ChatSession[];
   lastFrameKind?: string;
   lastSeenAt?: string;
   online?: boolean;

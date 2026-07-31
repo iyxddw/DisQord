@@ -24,8 +24,10 @@ import {
   CircleAlert,
   FileClock,
   LogOut,
+  LoaderCircle,
   MessagesSquare,
   Network,
+  Pencil,
   Plus,
   Power,
   RefreshCw,
@@ -33,7 +35,6 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  Sparkles,
   Trash2,
 } from 'lucide-react';
 
@@ -46,6 +47,7 @@ import {
   type BlueprintVersion,
   type ChatSession,
   type NodeRuntime,
+  type SessionCandidate,
 } from './api';
 
 type Page = 'overview' | 'sessions' | 'blueprint' | 'nodes' | 'settings' | 'reviews' | 'logs';
@@ -54,7 +56,7 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: '运行概览', icon: Activity },
   { id: 'sessions', label: '聊天会话', icon: MessagesSquare },
   { id: 'blueprint', label: '转发蓝图', icon: Network },
-  { id: 'nodes', label: '客户端列表', icon: Server },
+  { id: 'nodes', label: '绑定会话', icon: Server },
   { id: 'settings', label: '基础设置', icon: Settings },
   { id: 'reviews', label: '人工审核', icon: ShieldCheck },
   { id: 'logs', label: '运行日志', icon: FileClock },
@@ -63,16 +65,20 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
 function useLoad<T>(path: string, fallback: T) {
   const [data, setData] = useState<T>(fallback);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const reload = useCallback(async () => {
+    setLoading(true);
     try {
       setData(await api<T>(path));
       setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '加载失败');
+    } finally {
+      setLoading(false);
     }
   }, [path]);
   useEffect(() => void reload(), [reload]);
-  return { data, error, reload, setData };
+  return { data, error, loading, reload, setData };
 }
 
 function App() {
@@ -99,9 +105,7 @@ function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">
-            <MessagesSquare size={21} />
-          </div>
+          <MessagesSquare className="brand-symbol" size={22} />
           <div>
             <strong>DisQord</strong>
             <span>跨平台消息中枢</span>
@@ -112,9 +116,11 @@ function App() {
             const Icon = item.icon;
             return (
               <button
+                aria-label={item.label}
                 className={page === item.id ? 'active' : ''}
                 key={item.id}
                 onClick={() => setPage(item.id)}
+                title={item.label}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
@@ -163,9 +169,7 @@ function App() {
 function Splash() {
   return (
     <div className="splash">
-      <div className="brand-mark">
-        <MessagesSquare />
-      </div>
+      <MessagesSquare className="brand-symbol" size={28} />
       <p>正在连接 DisQord…</p>
     </div>
   );
@@ -186,9 +190,7 @@ function Login({ configured, onDone }: { configured: boolean; onDone: () => void
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <div className="brand-mark">
-            <MessagesSquare size={20} />
-          </div>
+          <MessagesSquare className="brand-symbol" size={21} />
           <div>
             <strong>DisQord</strong>
             <span>跨平台消息中枢</span>
@@ -225,37 +227,52 @@ function Overview() {
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
   const reviews = useLoad<unknown[]>('/reviews', []);
   const online = nodes.data.filter((node) => node.online).length;
+  if (nodes.loading || sessions.loading || reviews.loading) {
+    return <LoadingState text="正在汇总运行状态" />;
+  }
   return (
     <>
-      <div className="hero-card">
+      <section className="overview-summary">
         <div>
-          <span className="live">
+          <span className="system-state">
             <i />
-            系统运行中
+            {online === nodes.data.length && nodes.data.length > 0
+              ? '全部客户端在线'
+              : `${online} 个客户端在线`}
           </span>
-          <h2>消息桥接状态良好</h2>
-          <p>中心服务正在接收节点心跳，并按已发布蓝图处理消息。</p>
+          <h2>中央服务正常</h2>
+          <p>节点心跳、会话和待审核消息均来自当前中央服务。</p>
         </div>
-      </div>
-      <div className="stats">
-        <Stat label="在线节点" value={`${online} / 2`} icon={Server} />
-        <Stat
-          label="已验证会话"
-          value={String(sessions.data.filter((item) => item.status === 'verified').length)}
-          icon={MessagesSquare}
-        />
-        <Stat label="待人工审核" value={String(reviews.data.length)} icon={ShieldCheck} />
-      </div>
+        <dl className="overview-metrics">
+          <div>
+            <dt>在线客户端</dt>
+            <dd>
+              {online} / {nodes.data.length}
+            </dd>
+          </div>
+          <div>
+            <dt>已验证会话</dt>
+            <dd>{sessions.data.filter((item) => item.status === 'verified').length}</dd>
+          </div>
+          <div>
+            <dt>等待人工审核</dt>
+            <dd>
+              {
+                reviews.data.filter((item) => (item as { status?: string }).status === 'pending')
+                  .length
+              }
+            </dd>
+          </div>
+        </dl>
+      </section>
       <div className="panel">
-        <PanelTitle title="节点近况" subtitle="QQ 与 Discord 分别运行在独立服务器" />
+        <PanelTitle title="客户端连接" subtitle="QQ 与 Discord 节点的当前连接状态" />
         <div className="node-grid">
           {(['qq', 'discord'] as const).map((type) => {
             const node = nodes.data.find((item) => item.nodeType === type);
             return (
               <div className="node-card" key={type}>
-                <div className={`platform ${type}`}>
-                  <Bot size={20} />
-                </div>
+                <Bot className={`platform-icon ${type}`} size={18} />
                 <div>
                   <strong>{type === 'qq' ? 'QQ / NapCat' : 'Discord Bot'}</strong>
                   <span>
@@ -278,25 +295,29 @@ function Overview() {
   );
 }
 
-function Stat({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Server }) {
-  return (
-    <div className="stat">
-      <div>
-        <span>{label}</span>
-        <strong>{value}</strong>
-      </div>
-      <Icon size={22} />
-    </div>
-  );
-}
-
 function Sessions() {
-  const { data, reload, error } = useLoad<ChatSession[]>('/chat-sessions', []);
+  const { data, reload, error, loading } = useLoad<ChatSession[]>('/chat-sessions', []);
+  const [editingId, setEditingId] = useState('');
+  const [remark, setRemark] = useState('');
+  const saveRemark = async (session: ChatSession) => {
+    await api(`/chat-sessions/${session.id}`, {
+      method: 'PATCH',
+      json: { remark: remark.trim() || null },
+    });
+    setEditingId('');
+    await reload();
+  };
+  const remove = async (session: ChatSession) => {
+    if (!window.confirm(`确定删除会话“${session.displayName}”吗？引用它的蓝图需要重新编辑。`))
+      return;
+    await api(`/chat-sessions/${session.id}`, { method: 'DELETE' });
+    await reload();
+  };
   return (
     <div className="panel">
       <PanelTitle
         title="已配置聊天会话"
-        subtitle="会话在客户端列表完成验证码验证后自动保存；只有已验证会话可用于蓝图"
+        subtitle="会话在绑定页面完成验证码验证后自动保存；只有已验证会话可用于蓝图"
         action={
           <button className="icon-button" onClick={() => void reload()}>
             <RefreshCw size={16} />
@@ -304,6 +325,7 @@ function Sessions() {
         }
       />
       {error && <div className="error">{error}</div>}
+      {loading && <LoadingState text="正在读取聊天会话" />}
       <div className="list">
         {data.map((session) => (
           <div className="session-row" key={session.id}>
@@ -312,12 +334,41 @@ function Sessions() {
             </div>
             <div className="grow">
               <strong>{session.displayName}</strong>
+              {session.remark && <em className="session-remark">备注：{session.remark}</em>}
               <span>
                 {session.platform === 'discord'
                   ? `服务器 ${session.spaceId} · 频道 ${session.externalId}`
                   : `群号 ${session.externalId}`}
               </span>
             </div>
+            {editingId === session.id ? (
+              <div className="remark-editor">
+                <input
+                  autoFocus
+                  value={remark}
+                  placeholder="输入备注，留空可清除"
+                  onChange={(event) => setRemark(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && void saveRemark(session)}
+                />
+                <button onClick={() => void saveRemark(session)}>保存</button>
+                <button onClick={() => setEditingId('')}>取消</button>
+              </div>
+            ) : (
+              <div className="session-actions">
+                <button
+                  title={session.remark ? '编辑备注' : '添加备注'}
+                  onClick={() => {
+                    setEditingId(session.id);
+                    setRemark(session.remark ?? '');
+                  }}
+                >
+                  <Pencil size={14} />
+                </button>
+                <button title="删除会话" onClick={() => void remove(session)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            )}
             <span className={`badge ${session.status === 'verified' ? 'success' : ''}`}>
               {session.status === 'verified' && <Check size={13} />}
               {session.status === 'verified'
@@ -330,13 +381,13 @@ function Sessions() {
             </span>
           </div>
         ))}
-        {!data.length && <Empty text="还没有聊天会话，请先到客户端列表完成验证" />}
+        {!loading && !data.length && <Empty text="还没有聊天会话，请先到绑定会话完成验证" />}
       </div>
     </div>
   );
 }
 
-type FlowKind = 'input' | 'output' | 'translation' | 'moderation' | 'fixed' | 'renderer';
+type FlowKind = 'input' | 'output' | 'translation' | 'moderation' | 'review' | 'fixed' | 'renderer';
 type FlowData = {
   label: string;
   kind: FlowKind;
@@ -355,7 +406,7 @@ const defaultModerationPrompt =
 function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
   const { deleteElements, updateNodeData } = useReactFlow();
   const hasInput = data.kind !== 'input';
-  const hasOutput = data.kind !== 'output' && data.kind !== 'moderation';
+  const hasOutput = data.kind !== 'output' && data.kind !== 'moderation' && data.kind !== 'review';
   return (
     <div className={`flow-node ${data.kind}`}>
       {hasInput && <Handle type="target" position={Position.Left} />}
@@ -368,6 +419,14 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           <span className="flow-handle-label blocked">未过</span>
         </>
       )}
+      {data.kind === 'review' && (
+        <>
+          <Handle id="passed" type="source" position={Position.Right} style={{ top: '42%' }} />
+          <Handle id="blocked" type="source" position={Position.Right} style={{ top: '76%' }} />
+          <span className="flow-handle-label passed">通过</span>
+          <span className="flow-handle-label blocked">拦截</span>
+        </>
+      )}
       <span className="flow-node-kind">
         {data.kind === 'input'
           ? '消息入口'
@@ -377,9 +436,11 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
               ? '文本翻译'
               : data.kind === 'moderation'
                 ? '文本审核'
-                : data.kind === 'fixed'
-                  ? '固定文本'
-                  : '图片合成'}
+                : data.kind === 'review'
+                  ? '人工审核'
+                  : data.kind === 'fixed'
+                    ? '固定文本'
+                    : '旧版图片合成'}
       </span>
       <strong>{data.label}</strong>
       {data.kind === 'translation' && (
@@ -454,6 +515,10 @@ function BlueprintEditor() {
   const [notice, setNotice] = useState('');
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
 
+  if (sessions.loading || blueprints.loading) {
+    return <LoadingState text="正在载入蓝图和会话" />;
+  }
+
   const resetEditor = () => {
     setCurrentBlueprintId('');
     setLoadedVersion(undefined);
@@ -480,6 +545,7 @@ function BlueprintEditor() {
           'chat-output',
           'llm-translation',
           'llm-moderation',
+          'manual-review',
           'fixed-text',
           'card-renderer',
         ].includes(node.type),
@@ -496,9 +562,11 @@ function BlueprintEditor() {
                 ? 'translation'
                 : node.type === 'llm-moderation'
                   ? 'moderation'
-                  : node.type === 'fixed-text'
-                    ? 'fixed'
-                    : 'renderer';
+                  : node.type === 'manual-review'
+                    ? 'review'
+                    : node.type === 'fixed-text'
+                      ? 'fixed'
+                      : 'renderer';
         return {
           id: node.id,
           type: 'session',
@@ -511,9 +579,11 @@ function BlueprintEditor() {
                   ? '翻译当前文本'
                   : kind === 'moderation'
                     ? '按违规分数分流'
-                    : kind === 'fixed'
-                      ? '替换当前文本'
-                      : '使用原消息资料生成 PNG',
+                    : kind === 'review'
+                      ? '等待管理员处理'
+                      : kind === 'fixed'
+                        ? '替换当前文本'
+                        : '使用原消息资料生成 PNG',
             kind,
             ...(sessionId ? { sessionId } : {}),
             ...(typeof node.config.prompt === 'string' ? { prompt: node.config.prompt } : {}),
@@ -563,6 +633,7 @@ function BlueprintEditor() {
         prompt: defaultModerationPrompt,
         threshold: 0.5,
       },
+      review: { kind: 'review', label: '等待管理员处理' },
       fixed: { kind: 'fixed', label: '替换当前文本', text: '内容未通过审核' },
       renderer: { kind: 'renderer', label: '使用原消息资料生成 PNG' },
     };
@@ -602,9 +673,11 @@ function BlueprintEditor() {
                   ? 'llm-translation'
                   : node.data.kind === 'moderation'
                     ? 'llm-moderation'
-                    : node.data.kind === 'fixed'
-                      ? 'fixed-text'
-                      : 'card-renderer',
+                    : node.data.kind === 'review'
+                      ? 'manual-review'
+                      : node.data.kind === 'fixed'
+                        ? 'fixed-text'
+                        : 'card-renderer',
           position: node.position,
           config:
             node.data.kind === 'input' || node.data.kind === 'output'
@@ -750,13 +823,13 @@ function BlueprintEditor() {
             <Plus size={15} />
             审核
           </button>
+          <button onClick={() => addNode('review')}>
+            <Plus size={15} />
+            人工审核
+          </button>
           <button onClick={() => addNode('fixed')}>
             <Plus size={15} />
             固定文本
-          </button>
-          <button onClick={() => addNode('renderer')}>
-            <Plus size={15} />
-            图片合成
           </button>
         </div>
         <button className="primary" onClick={() => void save()}>
@@ -772,7 +845,7 @@ function BlueprintEditor() {
           <p>
             <strong>连线方法</strong>
             <br />
-            从左到右连接模块。审核节点右侧上方为“过审”，下方为“未过”。每个方向建立一条独立流水线。
+            从左到右连接模块；发送目标会自动把最终消息合成为图片。点击已有连线即可删除。审核节点右侧上方为“通过”，下方为“拦截”。
           </p>
         </div>
       </div>
@@ -785,6 +858,9 @@ function BlueprintEditor() {
           onEdgesChange={onEdgesChange}
           onConnect={(connection: Connection) =>
             setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items))
+          }
+          onEdgeClick={(_event, edge) =>
+            setEdges((items) => items.filter((item) => item.id !== edge.id))
           }
           nodeTypes={nodeTypes}
           deleteKeyCode={['Backspace', 'Delete']}
@@ -802,35 +878,28 @@ function BlueprintEditor() {
 function Nodes() {
   const nodes = useLoad<NodeRuntime[]>('/nodes', []);
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
-  const [drafts, setDrafts] = useState<Record<string, { spaceId: string; externalId: string }>>({});
-  const [editing, setEditing] = useState<Record<string, boolean>>({});
+  const candidates = useLoad<SessionCandidate[]>('/chat-sessions/candidates', []);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [adding, setAdding] = useState<Record<string, boolean>>({});
   const [verificationCodes, setVerificationCodes] = useState<Record<string, string>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
 
-  const updateDraft = (nodeId: string, patch: Partial<{ spaceId: string; externalId: string }>) => {
-    setDrafts((current) => ({
-      ...current,
-      [nodeId]: { spaceId: '', externalId: '', ...current[nodeId], ...patch },
-    }));
-  };
-
   const configure = async (node: NodeRuntime) => {
-    const draft = drafts[node.nodeId] ?? { spaceId: '', externalId: '' };
-    const externalId = draft.externalId.trim();
-    const spaceId = node.nodeType === 'qq' ? externalId : draft.spaceId.trim();
+    const candidate = candidates.data.find(
+      (item) => item.nodeId === node.nodeId && candidateKey(item) === drafts[node.nodeId],
+    );
+    if (!candidate) {
+      setNotices((current) => ({ ...current, [node.nodeId]: '请先选择一个会话。' }));
+      return;
+    }
     try {
       const session = await api<ChatSession>('/chat-sessions', {
         method: 'POST',
-        json: {
-          nodeId: node.nodeId,
-          platform: node.nodeType,
-          externalId,
-          spaceId,
-          displayName:
-            node.nodeType === 'qq' ? `QQ群 ${externalId}` : `Discord ${spaceId} / ${externalId}`,
-        },
+        json: candidate,
       });
       await api(`/chat-sessions/${session.id}/send-code`, { method: 'POST' });
+      setAdding((current) => ({ ...current, [node.nodeId]: false }));
+      setDrafts((current) => ({ ...current, [node.nodeId]: '' }));
       setNotices((current) => ({
         ...current,
         [node.nodeId]: '验证码已发送，请从目标群或频道读取后回填。',
@@ -850,7 +919,6 @@ function Nodes() {
         method: 'POST',
         json: { code: verificationCodes[session.id] ?? '' },
       });
-      setEditing((current) => ({ ...current, [node.nodeId]: false }));
       setNotices((current) => ({ ...current, [node.nodeId]: '客户端与会话验证成功。' }));
       await Promise.all([sessions.reload(), nodes.reload()]);
     } catch (cause) {
@@ -861,102 +929,144 @@ function Nodes() {
     }
   };
 
+  const reload = async () => {
+    await Promise.all([nodes.reload(), sessions.reload(), candidates.reload()]);
+  };
+
+  if (nodes.loading || sessions.loading || candidates.loading) {
+    return <LoadingState text="正在同步客户端和可绑定会话" />;
+  }
+
   return (
-    <div className="node-columns">
-      {nodes.data.map((node) => {
-        const verified = sessions.data.find(
-          (session) => session.nodeId === node.nodeId && session.status === 'verified',
-        );
-        const pending = sessions.data.find(
-          (session) => session.nodeId === node.nodeId && session.status === 'pending',
-        );
-        const draft = drafts[node.nodeId] ?? { spaceId: '', externalId: '' };
-        const showForm = !verified || editing[node.nodeId];
-        return (
-          <div className="panel node-setup" key={node.nodeId}>
-            <div className={`platform large ${node.nodeType}`}>
-              <Bot size={25} />
-            </div>
-            <h2>{node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'}</h2>
-            <p>{node.nodeId}</p>
-            <div className="connection-state">
-              <i className={node.online ? 'online' : ''} />
-              {node.online ? '在线' : '离线'} · {verified ? '已验证' : '等待验证'}
-            </div>
-
-            {verified && !showForm && (
-              <div className="pair-code">
-                <span>当前固定会话</span>
-                <strong>{verified.displayName}</strong>
-                <small>
-                  {node.nodeType === 'discord'
-                    ? `服务器 ${verified.spaceId} · 频道 ${verified.externalId}`
-                    : `群号 ${verified.externalId}`}
-                </small>
-                <button onClick={() => setEditing({ ...editing, [node.nodeId]: true })}>
-                  更改会话
-                </button>
+    <div className="panel binding-panel">
+      <PanelTitle
+        title="客户端与会话"
+        subtitle="每个客户端可以验证并绑定多个群或频道"
+        action={
+          <button className="icon-button" title="刷新" onClick={() => void reload()}>
+            <RefreshCw size={16} />
+          </button>
+        }
+      />
+      <div className="node-list">
+        {nodes.data.map((node) => {
+          const verified = sessions.data.filter(
+            (session) => session.nodeId === node.nodeId && session.status === 'verified',
+          );
+          const pending = sessions.data.filter(
+            (session) => session.nodeId === node.nodeId && session.status === 'pending',
+          );
+          const used = new Set([...verified, ...pending].map((session) => session.externalId));
+          const available = candidates.data.filter(
+            (candidate) => candidate.nodeId === node.nodeId && !used.has(candidate.externalId),
+          );
+          return (
+            <section className="node-setup" key={node.nodeId}>
+              <div className="binding-head">
+                <Bot className={`platform-icon ${node.nodeType}`} size={20} />
+                <div>
+                  <h2>{node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'}</h2>
+                  <p>{node.nodeId}</p>
+                </div>
               </div>
-            )}
+              <div className="connection-state">
+                <i className={node.online ? 'online' : ''} />
+                {node.online ? '在线' : '离线'} · 已绑定 {verified.length} 个会话
+              </div>
 
-            {showForm && (
-              <>
-                {node.nodeType === 'discord' && (
-                  <label>
-                    Discord 服务器 ID
-                    <input
-                      value={draft.spaceId}
-                      onChange={(event) =>
-                        updateDraft(node.nodeId, { spaceId: event.target.value })
-                      }
-                      placeholder="例如 123456789012345678"
-                    />
-                  </label>
-                )}
-                <label>
-                  {node.nodeType === 'discord' ? 'Discord 频道 ID' : 'QQ群号'}
+              <div className="bound-session-list">
+                {verified.map((session) => (
+                  <div className="bound-session" key={session.id}>
+                    <div>
+                      <strong>{session.displayName}</strong>
+                      <span>{session.remark || '已验证，可在蓝图中使用'}</span>
+                    </div>
+                    <span className="badge success">
+                      <Check size={13} />
+                      已绑定
+                    </span>
+                  </div>
+                ))}
+                {!verified.length && <Empty text="这个客户端还没有已绑定会话" />}
+              </div>
+
+              {pending.map((session) => (
+                <div className="verify-box" key={session.id}>
+                  <strong>{session.displayName}</strong>
                   <input
-                    value={draft.externalId}
+                    placeholder="回填频道或群内的验证码"
+                    value={verificationCodes[session.id] ?? ''}
                     onChange={(event) =>
-                      updateDraft(node.nodeId, { externalId: event.target.value })
-                    }
-                    placeholder={
-                      node.nodeType === 'discord' ? '例如 123456789012345678' : '例如 123456789'
+                      setVerificationCodes((current) => ({
+                        ...current,
+                        [session.id]: event.target.value,
+                      }))
                     }
                   />
-                </label>
-                <button
-                  className="primary"
-                  disabled={!node.online}
-                  onClick={() => void configure(node)}
-                >
-                  发送验证码
-                </button>
-              </>
-            )}
+                  <button onClick={() => void verify(node, session)}>完成验证</button>
+                </div>
+              ))}
 
-            {pending && (
-              <div className="verify-box">
-                <input
-                  placeholder="回填频道或群内的验证码"
-                  value={verificationCodes[pending.id] ?? ''}
-                  onChange={(event) =>
-                    setVerificationCodes({
-                      ...verificationCodes,
-                      [pending.id]: event.target.value,
-                    })
-                  }
-                />
-                <button onClick={() => void verify(node, pending)}>完成验证</button>
-              </div>
-            )}
-            {notices[node.nodeId] && <div className="notice">{notices[node.nodeId]}</div>}
-          </div>
-        );
-      })}
-      {!nodes.data.length && <Empty text="尚无客户端；启动 QQ 或 Discord 客户端后会自动出现" />}
+              {adding[node.nodeId] ? (
+                <div className="binding-form">
+                  <label>
+                    选择客户端可见的会话
+                    <select
+                      value={drafts[node.nodeId] ?? ''}
+                      onChange={(event) =>
+                        setDrafts((current) => ({ ...current, [node.nodeId]: event.target.value }))
+                      }
+                    >
+                      <option value="">请选择</option>
+                      {available.map((candidate) => (
+                        <option key={candidateKey(candidate)} value={candidateKey(candidate)}>
+                          {node.nodeType === 'qq'
+                            ? `QQ ${candidate.displayName}`
+                            : `Discord ${candidate.displayName}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {!available.length && (
+                    <small>没有新的可绑定会话，请确认客户端已加入目标会话后刷新。</small>
+                  )}
+                  <div className="binding-actions">
+                    <button
+                      className="primary"
+                      disabled={!node.online || !available.length}
+                      onClick={() => void configure(node)}
+                    >
+                      发送验证码
+                    </button>
+                    <button
+                      onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: false }))}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  className="add-binding"
+                  disabled={!node.online}
+                  onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: true }))}
+                >
+                  <Plus size={15} />
+                  绑定另一个会话
+                </button>
+              )}
+              {notices[node.nodeId] && <div className="notice">{notices[node.nodeId]}</div>}
+            </section>
+          );
+        })}
+        {!nodes.data.length && <Empty text="尚无客户端；启动 QQ 或 Discord 客户端后会自动出现" />}
+      </div>
     </div>
   );
+}
+
+function candidateKey(candidate: SessionCandidate): string {
+  return `${candidate.spaceId}\u001f${candidate.externalId}`;
 }
 
 function LlmSettings() {
@@ -986,6 +1096,7 @@ function LlmSettings() {
       setNotice(cause instanceof Error ? cause.message : '保存失败');
     }
   };
+  if (settings.loading) return <LoadingState text="正在读取模型设置" />;
   return (
     <div className="panel form-panel">
       <PanelTitle
@@ -1058,11 +1169,18 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
   const records = useLoad<Array<Record<string, unknown>>>(`/${kind}`, []);
   const [logLevel, setLogLevel] = useState('all');
   const visibleRecords =
-    kind === 'logs' && logLevel !== 'all'
-      ? records.data.filter((record) => String(record.level ?? 'info') === logLevel)
-      : records.data;
+    kind === 'reviews'
+      ? records.data.filter((record) => record.status === 'pending')
+      : logLevel !== 'all'
+        ? records.data.filter((record) => String(record.level ?? 'info') === logLevel)
+        : records.data;
   const decide = async (taskId: string, decision: 'approve' | 'reject') => {
     await api(`/reviews/${taskId}/decision`, { method: 'POST', json: { decision } });
+    await records.reload();
+  };
+  const clearReviews = async () => {
+    if (!window.confirm('确定清除全部人工审核记录吗？仍在等待的消息将不会继续转发。')) return;
+    await api('/reviews', { method: 'DELETE' });
     await records.reload();
   };
   return (
@@ -1071,7 +1189,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
         title={kind === 'reviews' ? '待审核消息' : '追踪日志'}
         subtitle={
           kind === 'reviews'
-            ? '兼容查看升级前遗留的人工审核任务；新版审核由蓝图双出口处理'
+            ? '消息会停在人工审核节点；操作后从“通过”或“拦截”出口继续'
             : '按 traceId 追踪消息在中心的处理过程'
         }
         action={
@@ -1085,12 +1203,25 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
                 <option value="error">Error</option>
               </select>
             )}
+            {kind === 'reviews' && (
+              <button
+                className="clear-button"
+                disabled={!records.data.length}
+                onClick={() => void clearReviews()}
+              >
+                <Trash2 size={15} />
+                一键清除
+              </button>
+            )}
             <button className="icon-button" onClick={() => void records.reload()}>
               <RefreshCw size={16} />
             </button>
           </div>
         }
       />
+      {records.loading && (
+        <LoadingState text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
+      )}
       <div className="record-list">
         {visibleRecords.map((record, index) => (
           <div
@@ -1121,7 +1252,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
             <pre>{JSON.stringify(record, null, 2)}</pre>
           </div>
         ))}
-        {!visibleRecords.length && (
+        {!records.loading && !visibleRecords.length && (
           <Empty text={kind === 'reviews' ? '目前没有待处理内容' : '暂无日志'} />
         )}
       </div>
@@ -1151,7 +1282,14 @@ function PanelTitle({
 function Empty({ text }: { text: string }) {
   return (
     <div className="empty">
-      <Sparkles size={20} />
+      <span>{text}</span>
+    </div>
+  );
+}
+function LoadingState({ text }: { text: string }) {
+  return (
+    <div className="loading-state" role="status" aria-live="polite">
+      <LoaderCircle size={20} />
       <span>{text}</span>
     </div>
   );

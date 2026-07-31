@@ -12,6 +12,7 @@ export const chatSessionSchema = z.object({
   externalId: externalIdSchema,
   spaceId: externalIdSchema,
   displayName: z.string().trim().min(1).max(256),
+  remark: z.string().trim().max(256).optional(),
   status: chatSessionStatusSchema,
   verifiedAt: isoDateTimeSchema.optional(),
   lastSuccessfulSendAt: isoDateTimeSchema.optional(),

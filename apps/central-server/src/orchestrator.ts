@@ -104,6 +104,23 @@ interface WorkItem {
   readonly state: PipelineState;
 }
 
+interface ManualReviewRecord {
+  readonly taskId: string;
+  readonly traceId: string;
+  readonly status: 'pending' | 'processing' | 'approved' | 'rejected';
+  readonly reason: string;
+  readonly blueprintId: string;
+  readonly blueprintVersion: number;
+  readonly reviewNodeId: string;
+  readonly sourceSessionId: string;
+  readonly message: MessageEnvelope;
+  readonly recentMessages: readonly MessageEnvelope[];
+  readonly state: Pick<PipelineState, 'text' | 'fixedText'>;
+  readonly createdAt: string;
+  readonly resolvedAt?: string;
+  readonly error?: string;
+}
+
 export class MessageOrchestrator {
   readonly #store: StateStore;
   readonly #commandBus: NodeCommandBus;
@@ -214,11 +231,22 @@ export class MessageOrchestrator {
         version: blueprint.version,
       });
       try {
-        await this.#executeBlueprint(blueprint, sourceSession, sessions, message, recentMessages);
-        await this.#log(message.traceId, 'info', 'blueprint_completed', {
-          blueprintId: blueprint.blueprintId,
-          version: blueprint.version,
-        });
+        const result = await this.#executeBlueprint(
+          blueprint,
+          sourceSession,
+          sessions,
+          message,
+          recentMessages,
+        );
+        await this.#log(
+          message.traceId,
+          'info',
+          result.paused ? 'blueprint_paused' : 'blueprint_completed',
+          {
+            blueprintId: blueprint.blueprintId,
+            version: blueprint.version,
+          },
+        );
       } catch (error) {
         await this.#log(message.traceId, 'error', 'blueprint_failed', {
           blueprintId: blueprint.blueprintId,
@@ -235,7 +263,8 @@ export class MessageOrchestrator {
     sessions: readonly ChatSession[],
     message: MessageEnvelope,
     recentMessages: readonly MessageEnvelope[],
-  ): Promise<void> {
+    initialWork?: readonly WorkItem[],
+  ): Promise<{ paused: boolean }> {
     const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
     const outgoing = new Map<string, BlueprintEdge[]>();
     for (const edge of blueprint.edges) {
@@ -248,11 +277,14 @@ export class MessageOrchestrator {
         node.type === 'chat-input' &&
         chatConfigSchema.parse(node.config).sessionId === sourceSession.id,
     );
-    const work: WorkItem[] = starts.map((node) => ({
-      nodeId: node.id,
-      state: { text: message.text ?? '', fixedText: false },
-    }));
+    const work: WorkItem[] = initialWork
+      ? [...initialWork]
+      : starts.map((node) => ({
+          nodeId: node.id,
+          state: { text: message.text ?? '', fixedText: false },
+        }));
     let processedSteps = 0;
+    let paused = false;
 
     while (work.length) {
       if ((processedSteps += 1) > 2_000)
@@ -339,6 +371,30 @@ export class MessageOrchestrator {
           nodeId: node.id,
           outputText: config.text,
         });
+      } else if (node.type === 'manual-review') {
+        const taskId = randomUUID();
+        const review: ManualReviewRecord = {
+          taskId,
+          traceId: message.traceId,
+          status: 'pending',
+          reason: state.text || '[无文本内容]',
+          blueprintId: blueprint.blueprintId,
+          blueprintVersion: blueprint.version,
+          reviewNodeId: node.id,
+          sourceSessionId: sourceSession.id,
+          message,
+          recentMessages,
+          state: { text: state.text, fixedText: state.fixedText },
+          createdAt: new Date().toISOString(),
+        };
+        await this.#store.set('moderation-review', taskId, review);
+        await this.#log(message.traceId, 'info', 'manual_review_created', {
+          taskId,
+          nodeId: node.id,
+          inputText: state.text,
+        });
+        paused = true;
+        continue;
       } else if (node.type === 'card-renderer') {
         const target = this.#findDownstreamTarget(node.id, nodes, outgoing, sessions);
         if (!target) throw new Error('Image renderer has no reachable verified target session.');
@@ -369,6 +425,7 @@ export class MessageOrchestrator {
         work.push({ nodeId: edge.targetNodeId, state });
       }
     }
+    return { paused };
   }
 
   #findDownstreamTarget(
@@ -478,14 +535,67 @@ export class MessageOrchestrator {
   }
 
   async handleReview(taskId: string, decision: 'approve' | 'reject'): Promise<void> {
-    const entry = await this.#store.get<Record<string, unknown>>('moderation-review', taskId);
+    const entry = await this.#store.get<ManualReviewRecord | Record<string, unknown>>(
+      'moderation-review',
+      taskId,
+    );
     if (!entry) throw new Error('Moderation review not found.');
-    await this.#store.set('moderation-review', taskId, {
-      ...entry.value,
-      status: decision === 'approve' ? 'approved' : 'rejected',
-      resolvedAt: new Date().toISOString(),
-      note: '该任务来自旧版全局审核流程；新版请使用蓝图审核节点。',
-    });
+    const value = entry.value;
+    if (!('reviewNodeId' in value) || !('blueprintId' in value)) {
+      await this.#store.set('moderation-review', taskId, {
+        ...value,
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        resolvedAt: new Date().toISOString(),
+        note: '旧版人工审核记录已处理，无法恢复旧版流水线。',
+      });
+      return;
+    }
+    const review = value as ManualReviewRecord;
+    if (review.status !== 'pending') throw new Error('Review has already been resolved.');
+    await this.#store.set('moderation-review', taskId, { ...review, status: 'processing' });
+    try {
+      const blueprintEntry = await this.#store.get<BlueprintVersion>(
+        'blueprint-version',
+        `${review.blueprintId}:${review.blueprintVersion}`,
+      );
+      if (!blueprintEntry) throw new Error('Blueprint version no longer exists.');
+      const sessions = (await this.#store.list<ChatSession>('chat-session'))
+        .map((item) => chatSessionSchema.parse(item.value))
+        .filter((session) => session.status === 'verified');
+      const sourceSession = sessions.find((session) => session.id === review.sourceSessionId);
+      if (!sourceSession) throw new Error('Source chat session is no longer verified.');
+      const chosenHandle = decision === 'approve' ? 'passed' : 'blocked';
+      const initialWork = blueprintEntry.value.edges
+        .filter(
+          (edge) => edge.sourceNodeId === review.reviewNodeId && edge.sourceHandle === chosenHandle,
+        )
+        .map((edge) => ({ nodeId: edge.targetNodeId, state: review.state }));
+      await this.#log(review.traceId, 'info', 'manual_review_resolved', {
+        taskId,
+        decision,
+        selectedOutput: chosenHandle,
+      });
+      await this.#executeBlueprint(
+        blueprintEntry.value,
+        sourceSession,
+        sessions,
+        review.message,
+        review.recentMessages,
+        initialWork,
+      );
+      await this.#store.set('moderation-review', taskId, {
+        ...review,
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        resolvedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      await this.#store.set('moderation-review', taskId, {
+        ...review,
+        status: 'pending',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   async #handleDelivered(payload: unknown): Promise<void> {

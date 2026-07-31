@@ -356,4 +356,61 @@ describe('blueprint message pipeline', () => {
       ]),
     );
   });
+
+  it('pauses at manual review and resumes from the selected output', async () => {
+    const input = randomUUID();
+    const review = randomUUID();
+    const output = randomUUID();
+    const blocked = randomUUID();
+    const render = vi.fn(async (_message, _target, text) => [Buffer.from(text)]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(review, 'manual-review'),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+        node(blocked, 'discard'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: review },
+        {
+          id: randomUUID(),
+          sourceNodeId: review,
+          sourceHandle: 'passed',
+          targetNodeId: output,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: review,
+          sourceHandle: 'blocked',
+          targetNodeId: blocked,
+        },
+      ],
+      { render },
+    );
+    const incoming = message(setup.sourceSession.nodeId, '等待审核的消息');
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    expect(setup.sendToNode).not.toHaveBeenCalled();
+    const reviews = await setup.store.list<Record<string, unknown>>('moderation-review');
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.value).toMatchObject({
+      status: 'pending',
+      reason: '等待审核的消息',
+      reviewNodeId: review,
+    });
+
+    await setup.orchestrator.handleReview(reviews[0]!.key, 'approve');
+
+    expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, '等待审核的消息', false);
+    expect(setup.sendToNode).toHaveBeenCalledOnce();
+    expect(
+      (await setup.store.get<Record<string, unknown>>('moderation-review', reviews[0]!.key))?.value,
+    ).toMatchObject({ status: 'approved' });
+  });
 });

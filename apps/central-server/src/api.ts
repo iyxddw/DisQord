@@ -35,8 +35,9 @@ const sessionCandidateSchema = z.object({
   platform: z.enum(['qq', 'discord']),
   externalId: z.string().min(1).max(256),
   spaceId: z.string().min(1).max(256),
-  displayName: z.string().min(1).max(256),
+  displayName: z.string().min(1).max(256).optional(),
 });
+const sessionUpdateSchema = z.object({ remark: z.string().trim().max(256).nullable() });
 const llmSettingsInputSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().min(1).max(10_000).optional(),
@@ -182,12 +183,11 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     const runtime = await options.store.list<Record<string, unknown>>('node-runtime');
     const sessions = await options.store.list<Record<string, unknown>>('node-session');
     const chatSessions = await options.store.list<ChatSession>('chat-session');
-    const verifiedByNode = new Map(
-      chatSessions
-        .map((entry) => entry.value)
-        .filter((session) => session.status === 'verified')
-        .map((session) => [session.nodeId, session]),
-    );
+    const verifiedByNode = new Map<string, ChatSession[]>();
+    for (const session of chatSessions.map((entry) => entry.value)) {
+      if (session.status !== 'verified') continue;
+      verifiedByNode.set(session.nodeId, [...(verifiedByNode.get(session.nodeId) ?? []), session]);
+    }
     const byId = new Map<string, Record<string, unknown>>();
     for (const entry of sessions) {
       byId.set(entry.key, {
@@ -204,7 +204,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       verificationStatus:
         typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId) ? 'verified' : 'pending',
       ...(typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId)
-        ? { configuredSession: verifiedByNode.get(node.nodeId) }
+        ? { configuredSessions: verifiedByNode.get(node.nodeId) }
         : {}),
       online:
         typeof node.nodeId === 'string' ? (gateway?.isNodeConnected(node.nodeId) ?? false) : false,
@@ -354,16 +354,63 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       if (!gateway?.isNodeConnected(candidate.nodeId)) {
         return await reply.code(409).send({ error: 'Client is offline.' });
       }
+      const discovered = await options.store.get<{
+        candidates?: Array<{ externalId: string; spaceId: string; displayName: string }>;
+      }>('session-candidates', candidate.nodeId);
+      const match = discovered?.value.candidates?.find(
+        (item) =>
+          item.externalId === candidate.externalId &&
+          (candidate.platform === 'qq' || item.spaceId === candidate.spaceId),
+      );
+      if (!match) {
+        return await reply.code(409).send({
+          error: '客户端尚未上报这个会话，请确认机器人已加入目标会话后刷新列表。',
+        });
+      }
+      const displayName =
+        candidate.platform === 'qq' ? `QQ ${match.displayName}` : `Discord ${match.displayName}`;
       const now = new Date().toISOString();
       const session = chatSessionSchema.parse({
         id: randomUUID(),
         ...candidate,
+        displayName,
         status: 'pending',
         createdAt: now,
         updatedAt: now,
       });
       await options.store.set('chat-session', session.id, session);
       return await reply.code(201).send(session);
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.patch('/api/chat-sessions/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const { remark } = sessionUpdateSchema.parse(request.body);
+      const entry = await options.store.get<ChatSession>('chat-session', id);
+      if (!entry) return await reply.code(404).send({ error: 'Chat session not found.' });
+      const updated = chatSessionSchema.parse({
+        ...entry.value,
+        ...(remark ? { remark } : { remark: undefined }),
+        updatedAt: new Date().toISOString(),
+      });
+      await options.store.set('chat-session', id, updated);
+      return updated;
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.delete('/api/chat-sessions/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      if (!(await options.store.delete('chat-session', id))) {
+        return await reply.code(404).send({ error: 'Chat session not found.' });
+      }
+      await options.store.delete('verification', id);
+      return { ok: true };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
     }
@@ -440,6 +487,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
           if (
             other.key !== id &&
             other.value.nodeId === sessionEntry.value.nodeId &&
+            other.value.externalId === sessionEntry.value.externalId &&
             (other.value.status === 'verified' || other.value.status === 'pending')
           ) {
             await options.store.set(
@@ -680,6 +728,11 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.get('/api/reviews', { preHandler: requireAdmin }, async () =>
     (await options.store.list('moderation-review')).map((entry) => entry.value),
   );
+  app.delete('/api/reviews', { preHandler: requireAdmin }, async () => {
+    const entries = await options.store.list('moderation-review');
+    await Promise.all(entries.map((entry) => options.store.delete('moderation-review', entry.key)));
+    return { ok: true, deleted: entries.length };
+  });
   app.post('/api/reviews/:id/decision', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
