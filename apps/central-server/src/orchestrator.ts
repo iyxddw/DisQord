@@ -132,6 +132,17 @@ export class MessageOrchestrator {
     if (message.source.nodeId !== frame.nodeId || message.source.platform !== frame.nodeType) {
       throw new Error('Uploaded message source does not match the authenticated node.');
     }
+    const sessions = (await this.#store.list<ChatSession>('chat-session'))
+      .map((entry) => chatSessionSchema.parse(entry.value))
+      .filter((session) => session.status === 'verified');
+    const sourceSession = sessions.find(
+      (session) =>
+        session.nodeId === frame.nodeId &&
+        session.platform === frame.nodeType &&
+        session.externalId === message.source.channelId,
+    );
+    if (!sourceSession) return;
+
     const dedupeKey = createMessageIdempotencyKey(message);
     if (await this.#store.get('message-dedupe', dedupeKey)) {
       await this.#log(message.traceId, 'debug', 'message_deduplicated', { dedupeKey });
@@ -145,20 +156,6 @@ export class MessageOrchestrator {
       authenticatedNode: { nodeId: frame.nodeId, nodeType: frame.nodeType },
       message,
     });
-
-    const sessions = (await this.#store.list<ChatSession>('chat-session'))
-      .map((entry) => chatSessionSchema.parse(entry.value))
-      .filter((session) => session.status === 'verified');
-    const sourceSession = sessions.find(
-      (session) =>
-        session.nodeId === frame.nodeId &&
-        session.platform === frame.nodeType &&
-        session.externalId === message.source.channelId,
-    );
-    if (!sourceSession) {
-      await this.#log(message.traceId, 'warn', 'unmatched_session', { nodeId: frame.nodeId });
-      return;
-    }
     await this.#log(message.traceId, 'debug', 'source_session_matched', { sourceSession });
 
     const recentMessages = await this.#recentMessages(sourceSession.id);

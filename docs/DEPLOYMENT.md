@@ -278,6 +278,15 @@ sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
   npx --yes pnpm@10.14.0 build
 ```
 
+若只构建中央端，必须保留筛选器末尾的 `...`，让共享协议和蓝图包一起更新：
+
+```bash
+pnpm --filter @disqord/central-server... build
+pnpm --filter @disqord/central-web build
+```
+
+只运行 `pnpm --filter @disqord/central-web build` 会造成新网页与旧后端协议不一致。
+
 然后只重启该服务器负责的服务：
 
 ```bash

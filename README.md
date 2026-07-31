@@ -274,6 +274,14 @@ pnpm build
 然后停止并重新启动该服务器上的程序。只修改中央端功能时通常只需更新 Central；修改 NapCat
 适配器时必须更新 QQ Node；修改 Discord 适配器时必须更新 Discord Node。
 
+如果为了节省时间采用筛选构建，中央端必须同时构建它依赖的共享包。命令中的 `...` 不能省略，
+否则可能出现网页已经支持新蓝图节点、运行中的后端却仍使用旧枚举的情况：
+
+```bash
+pnpm --filter @disqord/central-server... build
+pnpm --filter @disqord/central-web build
+```
+
 更新中央端前建议备份：
 
 ```bash

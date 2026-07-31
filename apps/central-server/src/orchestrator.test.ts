@@ -112,6 +112,29 @@ function node(
 }
 
 describe('blueprint message pipeline', () => {
+  it('silently ignores messages from sessions that were not verified', async () => {
+    const process = vi.fn(async () => ({
+      decision: 'allow' as const,
+      cards: [Buffer.from('card')],
+    }));
+    const setup = await fixture([], [], { process });
+    const incoming = message(setup.sourceSession.nodeId);
+    incoming.source.channelId = 'unconfigured-group';
+    incoming.source.spaceId = 'unconfigured-group';
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    expect(process).not.toHaveBeenCalled();
+    expect(await setup.store.list('trace-log')).toHaveLength(0);
+    expect(await setup.store.list('message-dedupe')).toHaveLength(0);
+  });
+
   it('does not execute a disabled blueprint and keeps legacy direct routes compatible', async () => {
     const input = randomUUID();
     const output = randomUUID();
