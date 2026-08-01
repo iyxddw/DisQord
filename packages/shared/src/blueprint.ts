@@ -5,6 +5,8 @@ import { internalIdSchema, isoDateTimeSchema, positionSchema } from './common.js
 export const blueprintNodeTypeSchema = z.enum([
   'chat-input',
   'chat-output',
+  'simulated-input',
+  'simulated-output',
   'message-type-filter',
   'text-condition',
   'llm-moderation',

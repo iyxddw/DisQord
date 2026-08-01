@@ -131,8 +131,12 @@ export function validateBlueprint(
     indegree.set(edge.targetNodeId, (indegree.get(edge.targetNodeId) ?? 0) + 1);
   }
 
-  const inputs = blueprint.nodes.filter((node) => node.type === 'chat-input');
-  const outputs = blueprint.nodes.filter((node) => node.type === 'chat-output');
+  const inputs = blueprint.nodes.filter(
+    (node) => node.type === 'chat-input' || node.type === 'simulated-input',
+  );
+  const outputs = blueprint.nodes.filter(
+    (node) => node.type === 'chat-output' || node.type === 'simulated-output',
+  );
   if (!inputs.length) errors.push({ code: 'NO_INPUT', message: 'Blueprint requires an input.' });
   if (!outputs.length) errors.push({ code: 'NO_OUTPUT', message: 'Blueprint requires an output.' });
 

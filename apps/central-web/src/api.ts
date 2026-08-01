@@ -90,6 +90,27 @@ export interface Blueprint {
   versions: BlueprintVersion[];
 }
 
+export interface BlueprintActivity {
+  id: string;
+  blueprintId: string;
+  version: number;
+  traceId: string;
+  nodeId: string;
+  nodeType: string;
+  message: string;
+  text?: string;
+  violationScore?: number;
+  route?: 'passed' | 'blocked';
+  step: number;
+  sequence: number;
+  createdAt: string;
+}
+
+export interface BlueprintActivityPage {
+  items: BlueprintActivity[];
+  cursor: string;
+}
+
 export interface PromptVersion {
   id: string;
   purpose: PromptPurpose;

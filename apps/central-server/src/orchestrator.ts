@@ -104,6 +104,22 @@ interface WorkItem {
   readonly state: PipelineState;
 }
 
+interface BlueprintFlowSimulationStep {
+  readonly nodeId: string;
+  readonly nodeType: string;
+  readonly message: string;
+  readonly text?: string;
+  readonly violationScore?: number;
+  readonly route?: 'passed' | 'blocked';
+}
+
+interface BlueprintFlowSimulationResult {
+  readonly inputText: string;
+  readonly outputText: string;
+  readonly outputSessionId?: string;
+  readonly steps: readonly BlueprintFlowSimulationStep[];
+}
+
 interface ManualReviewRecord {
   readonly taskId: string;
   readonly traceId: string;
@@ -113,6 +129,7 @@ interface ManualReviewRecord {
   readonly blueprintVersion: number;
   readonly reviewNodeId: string;
   readonly sourceSessionId: string;
+  readonly sourceSession?: ChatSession;
   readonly message: MessageEnvelope;
   readonly recentMessages: readonly MessageEnvelope[];
   readonly state: Pick<PipelineState, 'text' | 'fixedText'>;
@@ -121,10 +138,27 @@ interface ManualReviewRecord {
   readonly error?: string;
 }
 
+interface BlueprintActivityRecord {
+  readonly id: string;
+  readonly blueprintId: string;
+  readonly version: number;
+  readonly traceId: string;
+  readonly nodeId: string;
+  readonly nodeType: string;
+  readonly message: string;
+  readonly text?: string;
+  readonly violationScore?: number;
+  readonly route?: 'passed' | 'blocked';
+  readonly step: number;
+  readonly sequence: number;
+  readonly createdAt: string;
+}
+
 export class MessageOrchestrator {
   readonly #store: StateStore;
   readonly #commandBus: NodeCommandBus;
   readonly #processor: MessageProcessor;
+  #activitySequence = 0;
 
   constructor(store: StateStore, commandBus: NodeCommandBus, processor: MessageProcessor) {
     this.#store = store;
@@ -142,6 +176,310 @@ export class MessageOrchestrator {
     } else if (frame.kind === 'session.candidates') {
       await this.#store.set('session-candidates', frame.nodeId, frame.payload);
     }
+  }
+
+  async simulateBlueprint(
+    blueprint: BlueprintVersion,
+    inputSessionId: string,
+    outputSessionId: string,
+    text: string,
+  ): Promise<BlueprintFlowSimulationResult> {
+    const sessions = (await this.#store.list<ChatSession>('chat-session'))
+      .map((entry) => chatSessionSchema.parse(entry.value))
+      .filter((session) => session.status === 'verified');
+    const sourceSession = sessions.find((session) => session.id === inputSessionId);
+    const targetSession = sessions.find((session) => session.id === outputSessionId);
+    if (!sourceSession) throw new Error('模拟输入会话不存在或尚未验证。');
+    if (!targetSession) throw new Error('模拟输出会话不存在或尚未验证。');
+
+    const validation = validateBlueprint(blueprint, {
+      isVerifiedSession: (id) => sessions.some((session) => session.id === id),
+    });
+    if (!validation.valid) {
+      throw new Error(`蓝图无效：${validation.errors.map((error) => error.code).join(', ')}`);
+    }
+
+    const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
+    const outgoing = new Map<string, BlueprintEdge[]>();
+    for (const edge of blueprint.edges) {
+      const current = outgoing.get(edge.sourceNodeId) ?? [];
+      current.push(edge);
+      outgoing.set(edge.sourceNodeId, current);
+    }
+    const starts = blueprint.nodes.filter(
+      (node) =>
+        node.type === 'chat-input' &&
+        chatConfigSchema.parse(node.config).sessionId === inputSessionId,
+    );
+    if (!starts.length) throw new Error('蓝图中没有对应模拟输入会话的消息入口。');
+    const hasTarget = blueprint.nodes.some(
+      (node) =>
+        node.type === 'chat-output' &&
+        chatConfigSchema.parse(node.config).sessionId === outputSessionId,
+    );
+    if (!hasTarget) throw new Error('蓝图中没有对应模拟输出会话的发送目标。');
+
+    const canReachTarget = (startNodeId: string): boolean => {
+      const pending = [startNodeId];
+      const seen = new Set<string>();
+      while (pending.length) {
+        const nodeId = pending.shift()!;
+        if (seen.has(nodeId)) continue;
+        seen.add(nodeId);
+        const node = nodes.get(nodeId);
+        if (
+          node?.type === 'chat-output' &&
+          chatConfigSchema.parse(node.config).sessionId === outputSessionId
+        ) {
+          return true;
+        }
+        pending.push(...(outgoing.get(nodeId) ?? []).map((edge) => edge.targetNodeId));
+      }
+      return false;
+    };
+
+    const message = messageEnvelopeSchema.parse({
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      source: {
+        nodeId: sourceSession.nodeId,
+        platform: sourceSession.platform,
+        spaceId: sourceSession.spaceId,
+        channelId: sourceSession.externalId,
+        messageId: randomUUID(),
+      },
+      sender: { id: 'blueprint-simulator', displayName: '蓝图模拟器' },
+      sentAt: new Date().toISOString(),
+      kind: 'text',
+      text,
+      attachments: [],
+      traceId: randomUUID(),
+    });
+    const work: WorkItem[] = starts
+      .filter((node) => canReachTarget(node.id))
+      .map((node) => ({ nodeId: node.id, state: { text, fixedText: false } }));
+    const steps: BlueprintFlowSimulationStep[] = [];
+    let outputText = '';
+    let reachedOutputSessionId: string | undefined;
+    let processedSteps = 0;
+
+    while (work.length) {
+      if ((processedSteps += 1) > 2_000) throw new Error('蓝图模拟步骤超过安全限制。');
+      const item = work.shift()!;
+      const node = nodes.get(item.nodeId);
+      if (!node) continue;
+      let state = item.state;
+
+      if (node.type === 'chat-input') {
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: '收到测试消息',
+          text: state.text,
+        });
+      } else if (node.type === 'llm-translation' && state.text.trim()) {
+        const config = translationConfigSchema.parse(node.config);
+        if (!this.#processor.translate) throw new Error('翻译处理器不可用。');
+        const result = await this.#processor.translate(
+          message,
+          targetSession,
+          state.text,
+          config.prompt,
+          [],
+          config.memoryMode,
+        );
+        state = { ...state, text: result.translatedText, fixedText: false };
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: `翻译结果：${result.translatedText}`,
+          text: result.translatedText,
+        });
+      } else if (node.type === 'llm-moderation') {
+        const config = moderationConfigSchema.parse(node.config);
+        if (!this.#processor.moderate) throw new Error('审核处理器不可用。');
+        const assessment = state.text.trim()
+          ? await this.#processor.moderate(state.text, config.prompt)
+          : {
+              violationScore: 0,
+              categories: [],
+              reason: '没有可审核的文本。',
+              confidence: 1,
+              model: 'skipped-empty-text',
+            };
+        const route = assessment.violationScore <= config.threshold ? 'passed' : 'blocked';
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: `此消息违规程度为 ${Math.round(assessment.violationScore * 100)}%，走“${route === 'passed' ? '通过' : '拦截'}”出口`,
+          text: state.text,
+          violationScore: assessment.violationScore,
+          route,
+        });
+        for (const edge of outgoing.get(node.id) ?? []) {
+          if (edge.sourceHandle === route && canReachTarget(edge.targetNodeId)) {
+            work.push({ nodeId: edge.targetNodeId, state });
+          }
+        }
+        continue;
+      } else if (node.type === 'fixed-text') {
+        const config = fixedTextConfigSchema.parse(node.config);
+        state = { text: config.text, fixedText: true };
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: `固定文本：${config.text || '[空文本]'}`,
+          text: config.text,
+        });
+      } else if (node.type === 'manual-review') {
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: '模拟模式不创建审核任务，自动走“通过”出口',
+          text: state.text,
+          route: 'passed',
+        });
+        for (const edge of outgoing.get(node.id) ?? []) {
+          if (edge.sourceHandle === 'passed' && canReachTarget(edge.targetNodeId)) {
+            work.push({ nodeId: edge.targetNodeId, state });
+          }
+        }
+        continue;
+      } else if (node.type === 'card-renderer') {
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: '将使用原消息资料和当前文本合成图片',
+          text: state.text,
+        });
+      } else if (node.type === 'chat-output') {
+        const targetId = chatConfigSchema.parse(node.config).sessionId;
+        if (targetId !== outputSessionId) continue;
+        outputText = state.text;
+        reachedOutputSessionId = targetId;
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: `模拟输出到 ${targetSession.remark || targetSession.displayName}；不会真正发送`,
+          text: state.text,
+        });
+        continue;
+      } else if (node.type === 'discard') {
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: '消息在此处被丢弃',
+          text: state.text,
+        });
+        continue;
+      } else {
+        steps.push({
+          nodeId: node.id,
+          nodeType: node.type,
+          message: '已通过此模块',
+          text: state.text,
+        });
+      }
+
+      for (const edge of outgoing.get(node.id) ?? []) {
+        if (canReachTarget(edge.targetNodeId)) work.push({ nodeId: edge.targetNodeId, state });
+      }
+    }
+
+    return {
+      inputText: text,
+      outputText,
+      ...(reachedOutputSessionId ? { outputSessionId: reachedOutputSessionId } : {}),
+      steps,
+    };
+  }
+
+  async handleSimulatedInput(
+    blueprintId: string,
+    nodeId: string,
+    text: string,
+  ): Promise<{ traceId: string }> {
+    const blueprintEntry = await this.#store.get<Blueprint>('blueprint', blueprintId);
+    if (!blueprintEntry) throw new Error('蓝图不存在。');
+    const blueprint = blueprintSchema.parse(blueprintEntry.value);
+    if (!blueprint.enabled || blueprint.activeVersion === undefined) {
+      throw new Error('请先保存并发布蓝图，再使用模拟输入。');
+    }
+    const versionEntry = await this.#store.get<BlueprintVersion>(
+      'blueprint-version',
+      `${blueprintId}:${blueprint.activeVersion}`,
+    );
+    if (!versionEntry) throw new Error('找不到蓝图当前发布版本。');
+    const version = blueprintVersionSchema.parse(versionEntry.value);
+    const simulatedInput = version.nodes.find(
+      (node) => node.id === nodeId && node.type === 'simulated-input',
+    );
+    if (!simulatedInput) throw new Error('当前发布版本中没有这个模拟输入节点。');
+
+    const sessions = (await this.#store.list<ChatSession>('chat-session'))
+      .map((entry) => chatSessionSchema.parse(entry.value))
+      .filter((session) => session.status === 'verified');
+    const validation = validateBlueprint(version, {
+      isVerifiedSession: (id) => sessions.some((session) => session.id === id),
+    });
+    if (!validation.valid) {
+      throw new Error(`蓝图无效：${validation.errors.map((error) => error.code).join(', ')}`);
+    }
+
+    const nodes = new Map(version.nodes.map((node) => [node.id, node]));
+    const outgoing = new Map<string, BlueprintEdge[]>();
+    for (const edge of version.edges) {
+      const current = outgoing.get(edge.sourceNodeId) ?? [];
+      current.push(edge);
+      outgoing.set(edge.sourceNodeId, current);
+    }
+    const firstTarget = this.#findDownstreamTarget(nodeId, nodes, outgoing, sessions);
+    const now = new Date().toISOString();
+    const sourceSession: ChatSession = {
+      id: randomUUID(),
+      nodeId: randomUUID(),
+      platform: firstTarget?.platform === 'qq' ? 'discord' : 'qq',
+      externalId: 'simulated-input',
+      spaceId: 'simulated-input',
+      displayName: '模拟输入',
+      status: 'verified',
+      verifiedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const traceId = randomUUID();
+    const message = messageEnvelopeSchema.parse({
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      source: {
+        nodeId: sourceSession.nodeId,
+        platform: sourceSession.platform,
+        spaceId: sourceSession.spaceId,
+        channelId: sourceSession.externalId,
+        messageId: randomUUID(),
+      },
+      sender: { id: 'blueprint-simulator', displayName: '蓝图模拟器' },
+      sentAt: now,
+      kind: 'text',
+      text,
+      attachments: [],
+      traceId,
+    });
+
+    await this.#log(traceId, 'info', 'blueprint_started', {
+      blueprintId,
+      version: version.version,
+      simulatedInput: true,
+    });
+    const result = await this.#executeBlueprint(version, sourceSession, sessions, message, [], [
+      { nodeId, state: { text, fixedText: false } },
+    ]);
+    await this.#log(traceId, 'info', result.paused ? 'blueprint_paused' : 'blueprint_completed', {
+      blueprintId,
+      version: version.version,
+      simulatedInput: true,
+    });
+    return { traceId };
   }
 
   async #handleMessageUpload(frame: ReceivedNodeFrame): Promise<void> {
@@ -301,10 +639,18 @@ export class MessageOrchestrator {
         currentText: state.text,
       });
 
+      if (node.type === 'chat-input' || node.type === 'simulated-input') {
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: node.type === 'simulated-input' ? '模拟消息已进入流程' : '收到消息',
+          text: state.text,
+        });
+      }
+
       if (node.type === 'llm-translation' && state.text.trim()) {
         const config = translationConfigSchema.parse(node.config);
-        const target = this.#findDownstreamTarget(node.id, nodes, outgoing, sessions);
-        if (!target) throw new Error('Translation node has no reachable verified target session.');
+        const target =
+          this.#findDownstreamTarget(node.id, nodes, outgoing, sessions) ??
+          this.#simulatedTranslationTarget(sourceSession);
         if (!this.#processor.translate) throw new Error('Translation processor is unavailable.');
         await this.#log(message.traceId, 'debug', 'translation_requested', {
           nodeId: node.id,
@@ -328,6 +674,10 @@ export class MessageOrchestrator {
           rawResult: result,
         });
         state = { ...state, text: result.translatedText, fixedText: false };
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: `翻译结果：${result.translatedText}`,
+          text: result.translatedText,
+        });
       } else if (node.type === 'llm-moderation') {
         const config = moderationConfigSchema.parse(node.config);
         let assessment: ViolationAssessment;
@@ -357,6 +707,12 @@ export class MessageOrchestrator {
           selectedOutput: passed ? 'passed' : 'blocked',
           rawResult: assessment,
         });
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: `此消息违规程度为 ${Math.round(assessment.violationScore * 100)}%，走“${passed ? '过审' : '未过'}”出口`,
+          text: state.text,
+          violationScore: assessment.violationScore,
+          route: passed ? 'passed' : 'blocked',
+        });
         const selectedEdges = (outgoing.get(node.id) ?? []).filter(
           (edge) => edge.sourceHandle === (passed ? 'passed' : 'blocked'),
         );
@@ -371,6 +727,10 @@ export class MessageOrchestrator {
           nodeId: node.id,
           outputText: config.text,
         });
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: `固定文本：${config.text || '[空文本]'}`,
+          text: config.text,
+        });
       } else if (node.type === 'manual-review') {
         const taskId = randomUUID();
         const review: ManualReviewRecord = {
@@ -382,6 +742,7 @@ export class MessageOrchestrator {
           blueprintVersion: blueprint.version,
           reviewNodeId: node.id,
           sourceSessionId: sourceSession.id,
+          sourceSession,
           message,
           recentMessages,
           state: { text: state.text, fixedText: state.fixedText },
@@ -392,6 +753,10 @@ export class MessageOrchestrator {
           taskId,
           nodeId: node.id,
           inputText: state.text,
+        });
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: '等待人工审核',
+          text: state.text,
         });
         paused = true;
         continue;
@@ -406,6 +771,10 @@ export class MessageOrchestrator {
           cardCount: cards.length,
           byteSizes: cards.map((card) => card.byteLength),
         });
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: `已合成 ${cards.length} 张消息图片`,
+          text: state.text,
+        });
       } else if (node.type === 'chat-output') {
         const targetId = chatConfigSchema.parse(node.config).sessionId;
         const target = sessions.find((session) => session.id === targetId);
@@ -415,10 +784,29 @@ export class MessageOrchestrator {
             ? state.cards
             : await this.#render(message, target, state.text, state.fixedText);
         await this.#dispatchDelivery(blueprint, sourceSession, target, message, cards, state.text);
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: `已发送到 ${target.remark?.trim() || target.displayName}`,
+          text: state.text,
+        });
+        continue;
+      } else if (node.type === 'simulated-output') {
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: '模拟输出已收到结果',
+          text: state.text,
+        });
         continue;
       } else if (node.type === 'discard') {
         await this.#log(message.traceId, 'info', 'message_discarded', { nodeId: node.id });
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: '消息已丢弃',
+          text: state.text,
+        });
         continue;
+      } else if (node.type !== 'chat-input' && node.type !== 'simulated-input') {
+        await this.#recordActivity(blueprint, message, node, processedSteps, {
+          message: '消息已通过此模块',
+          text: state.text,
+        });
       }
 
       for (const edge of outgoing.get(node.id) ?? []) {
@@ -426,6 +814,54 @@ export class MessageOrchestrator {
       }
     }
     return { paused };
+  }
+
+  #simulatedTranslationTarget(sourceSession: ChatSession): ChatSession {
+    const now = new Date().toISOString();
+    return {
+      ...sourceSession,
+      id: randomUUID(),
+      nodeId: randomUUID(),
+      platform: sourceSession.platform === 'qq' ? 'discord' : 'qq',
+      externalId: 'simulated-output',
+      spaceId: 'simulated-output',
+      displayName: '模拟输出',
+      verifiedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async #recordActivity(
+    blueprint: BlueprintVersion,
+    message: MessageEnvelope,
+    node: BlueprintNode,
+    step: number,
+    detail: Pick<
+      BlueprintActivityRecord,
+      'message' | 'text' | 'violationScore' | 'route'
+    >,
+  ): Promise<void> {
+    const id = randomUUID();
+    this.#activitySequence = Math.max(Date.now() * 1_000, this.#activitySequence + 1);
+    const record: BlueprintActivityRecord = {
+      id,
+      blueprintId: blueprint.blueprintId,
+      version: blueprint.version,
+      traceId: message.traceId,
+      nodeId: node.id,
+      nodeType: node.type,
+      message: detail.message,
+      ...(detail.text === undefined ? {} : { text: detail.text }),
+      ...(detail.violationScore === undefined
+        ? {}
+        : { violationScore: detail.violationScore }),
+      ...(detail.route === undefined ? {} : { route: detail.route }),
+      step,
+      sequence: this.#activitySequence,
+      createdAt: new Date().toISOString(),
+    };
+    await this.#store.set('blueprint-activity', id, record);
   }
 
   #findDownstreamTarget(
@@ -562,7 +998,8 @@ export class MessageOrchestrator {
       const sessions = (await this.#store.list<ChatSession>('chat-session'))
         .map((item) => chatSessionSchema.parse(item.value))
         .filter((session) => session.status === 'verified');
-      const sourceSession = sessions.find((session) => session.id === review.sourceSessionId);
+      const sourceSession =
+        review.sourceSession ?? sessions.find((session) => session.id === review.sourceSessionId);
       if (!sourceSession) throw new Error('Source chat session is no longer verified.');
       const chosenHandle = decision === 'approve' ? 'passed' : 'blocked';
       const initialWork = blueprintEntry.value.edges

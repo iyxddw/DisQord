@@ -50,6 +50,10 @@ export async function startCentralServer(environment: NodeJS.ProcessEnv = proces
     onNodeFrame: async (frame) => await orchestratorRef.current?.handleNodeFrame(frame),
     onReviewAction: async (taskId, decision) =>
       await orchestratorRef.current?.handleReview(taskId, decision),
+    onSimulatedInput: async (blueprintId, nodeId, text) => {
+      if (!orchestratorRef.current) throw new Error('消息处理器尚未就绪。');
+      return await orchestratorRef.current.handleSimulatedInput(blueprintId, nodeId, text);
+    },
   });
   const gateway = central.getGateway();
   if (!gateway) throw new Error('Central node gateway failed to initialize.');

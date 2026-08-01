@@ -1,4 +1,12 @@
-import { StrictMode, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  StrictMode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Background,
@@ -15,6 +23,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import {
   Activity,
@@ -28,6 +37,7 @@ import {
   MessagesSquare,
   Network,
   Pencil,
+  Play,
   Plus,
   Power,
   RefreshCw,
@@ -44,6 +54,8 @@ import {
   api,
   type AuthStatus,
   type Blueprint,
+  type BlueprintActivity,
+  type BlueprintActivityPage,
   type BlueprintVersion,
   type ChatSession,
   type NodeRuntime,
@@ -61,6 +73,10 @@ const navigation: Array<{ id: Page; label: string; icon: typeof Activity }> = [
   { id: 'reviews', label: '人工审核', icon: ShieldCheck },
   { id: 'logs', label: '运行日志', icon: FileClock },
 ];
+
+function sessionLabel(session: ChatSession): string {
+  return session.remark?.trim() || session.displayName;
+}
 
 function useLoad<T>(path: string, fallback: T) {
   const [data, setData] = useState<T>(fallback);
@@ -308,7 +324,7 @@ function Sessions() {
     await reload();
   };
   const remove = async (session: ChatSession) => {
-    if (!window.confirm(`确定删除会话“${session.displayName}”吗？引用它的蓝图需要重新编辑。`))
+    if (!window.confirm(`确定删除会话“${sessionLabel(session)}”吗？引用它的蓝图需要重新编辑。`))
       return;
     await api(`/chat-sessions/${session.id}`, { method: 'DELETE' });
     await reload();
@@ -333,8 +349,8 @@ function Sessions() {
               <MessagesSquare size={18} />
             </div>
             <div className="grow">
-              <strong>{session.displayName}</strong>
-              {session.remark && <em className="session-remark">备注：{session.remark}</em>}
+              <strong>{sessionLabel(session)}</strong>
+              {session.remark && <em className="session-remark">原名：{session.displayName}</em>}
               <span>
                 {session.platform === 'discord'
                   ? `服务器 ${session.spaceId} · 频道 ${session.externalId}`
@@ -387,7 +403,16 @@ function Sessions() {
   );
 }
 
-type FlowKind = 'input' | 'output' | 'translation' | 'moderation' | 'review' | 'fixed' | 'renderer';
+type FlowKind =
+  | 'input'
+  | 'output'
+  | 'simulated-input'
+  | 'simulated-output'
+  | 'translation'
+  | 'moderation'
+  | 'review'
+  | 'fixed'
+  | 'renderer';
 type FlowData = {
   label: string;
   kind: FlowKind;
@@ -396,6 +421,15 @@ type FlowData = {
   memoryMode?: boolean;
   threshold?: number;
   text?: string;
+  outputText?: string;
+  busy?: boolean;
+  onSimulate?: (nodeId: string, text: string) => Promise<void>;
+  simulation?:
+    | {
+        state: 'active' | 'done' | 'error';
+        message: string;
+      }
+    | undefined;
 };
 
 const defaultTranslationPrompt =
@@ -405,10 +439,20 @@ const defaultModerationPrompt =
 
 function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
   const { deleteElements, updateNodeData } = useReactFlow();
-  const hasInput = data.kind !== 'input';
-  const hasOutput = data.kind !== 'output' && data.kind !== 'moderation' && data.kind !== 'review';
+  const [testText, setTestText] = useState('');
+  const hasInput = data.kind !== 'input' && data.kind !== 'simulated-input';
+  const hasOutput =
+    data.kind !== 'output' &&
+    data.kind !== 'simulated-output' &&
+    data.kind !== 'moderation' &&
+    data.kind !== 'review';
   return (
-    <div className={`flow-node ${data.kind}`}>
+    <div className={`flow-node ${data.kind} ${data.simulation?.state ?? ''}`}>
+      {data.simulation && (
+        <div className={`flow-simulation-note ${data.simulation.state}`} role="status">
+          {data.simulation.message}
+        </div>
+      )}
       {hasInput && <Handle type="target" position={Position.Left} />}
       {hasOutput && <Handle type="source" position={Position.Right} />}
       {data.kind === 'moderation' && (
@@ -430,8 +474,12 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
       <span className="flow-node-kind">
         {data.kind === 'input'
           ? '消息入口'
+          : data.kind === 'simulated-input'
+            ? '模拟输入'
           : data.kind === 'output'
             ? '发送目标'
+            : data.kind === 'simulated-output'
+              ? '模拟输出'
             : data.kind === 'translation'
               ? '文本翻译'
               : data.kind === 'moderation'
@@ -443,6 +491,27 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
                     : '旧版图片合成'}
       </span>
       <strong>{data.label}</strong>
+      {data.kind === 'simulated-input' && (
+        <div className="flow-node-config simulated-io nodrag nopan">
+          <textarea
+            value={testText}
+            onChange={(event) => setTestText(event.target.value)}
+            placeholder="输入测试消息"
+          />
+          <button
+            disabled={data.busy || !testText.trim()}
+            onClick={() => void data.onSimulate?.(id, testText.trim())}
+          >
+            {data.busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
+            {data.busy ? '运行中' : '发送'}
+          </button>
+        </div>
+      )}
+      {data.kind === 'simulated-output' && (
+        <div className="simulated-output-value nodrag nopan">
+          {data.outputText || '等待流程输出…'}
+        </div>
+      )}
       {data.kind === 'translation' && (
         <div className="flow-node-config nodrag nopan">
           <textarea
@@ -513,7 +582,118 @@ function BlueprintEditor() {
   const [loadedVersion, setLoadedVersion] = useState<number>();
   const [editorKey, setEditorKey] = useState(0);
   const [notice, setNotice] = useState('');
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<FlowData>, Edge>>();
+  const activityCursor = useRef('');
+  const activityQueue = useRef<BlueprintActivity[]>([]);
+  const activityPlaying = useRef(false);
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
+
+  useEffect(() => {
+    if (!flowInstance || !nodes.length) return;
+    const frame = window.requestAnimationFrame(() => {
+      void flowInstance.fitView({ padding: 0.18, duration: 220, maxZoom: 1 });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [flowInstance, nodes.length]);
+
+  useEffect(() => {
+    if (!currentBlueprintId) return;
+    let cancelled = false;
+    let initialized = false;
+    let polling = false;
+    activityCursor.current = '';
+    activityQueue.current = [];
+
+    const playQueued = async () => {
+      if (activityPlaying.current) return;
+      activityPlaying.current = true;
+      while (!cancelled && activityQueue.current.length) {
+        const activity = activityQueue.current.shift()!;
+        setNodes((current) =>
+          current.map((node) => ({
+            ...node,
+            data: {
+              ...node.data,
+              ...(node.id === activity.nodeId && activity.nodeType === 'simulated-output'
+                ? { outputText: activity.text ?? '' }
+                : {}),
+              simulation:
+                node.id === activity.nodeId
+                  ? { state: 'active' as const, message: activity.message }
+                  : node.data.simulation?.state === 'active'
+                    ? { ...node.data.simulation, state: 'done' as const }
+                    : node.data.simulation,
+            },
+          })),
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+        setNodes((current) =>
+          current.map((node) =>
+            node.id === activity.nodeId
+              ? {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    simulation: node.data.simulation
+                      ? { ...node.data.simulation, state: 'done' as const }
+                      : undefined,
+                  },
+                }
+              : node,
+          ),
+        );
+      }
+      activityPlaying.current = false;
+    };
+
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const page = await api<BlueprintActivityPage>(
+          `/blueprints/${currentBlueprintId}/activity?cursor=${encodeURIComponent(activityCursor.current)}`,
+        );
+        if (cancelled) return;
+        activityCursor.current = page.cursor;
+        if (!initialized) {
+          initialized = true;
+          const latestOutputs = new Map<string, string>();
+          for (const activity of page.items) {
+            if (activity.nodeType === 'simulated-output') {
+              latestOutputs.set(activity.nodeId, activity.text ?? '');
+            }
+          }
+          if (latestOutputs.size) {
+            setNodes((current) =>
+              current.map((node) =>
+                latestOutputs.has(node.id)
+                  ? {
+                      ...node,
+                      data: { ...node.data, outputText: latestOutputs.get(node.id) ?? '' },
+                    }
+                  : node,
+              ),
+            );
+          }
+          return;
+        }
+        activityQueue.current.push(...page.items);
+        void playQueued();
+      } catch {
+        // 页面会继续轮询；短暂断线无需打断蓝图编辑。
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      activityQueue.current = [];
+      activityPlaying.current = false;
+    };
+  }, [currentBlueprintId, setNodes]);
 
   if (sessions.loading || blueprints.loading) {
     return <LoadingState text="正在载入蓝图和会话" />;
@@ -543,6 +723,8 @@ function BlueprintEditor() {
         [
           'chat-input',
           'chat-output',
+          'simulated-input',
+          'simulated-output',
           'llm-translation',
           'llm-moderation',
           'manual-review',
@@ -556,8 +738,12 @@ function BlueprintEditor() {
         const kind: FlowKind =
           node.type === 'chat-input'
             ? 'input'
+            : node.type === 'simulated-input'
+              ? 'simulated-input'
             : node.type === 'chat-output'
               ? 'output'
+              : node.type === 'simulated-output'
+                ? 'simulated-output'
               : node.type === 'llm-translation'
                 ? 'translation'
                 : node.type === 'llm-moderation'
@@ -574,7 +760,13 @@ function BlueprintEditor() {
           data: {
             label:
               kind === 'input' || kind === 'output'
-                ? (session?.displayName ?? sessionId)
+                ? session
+                  ? sessionLabel(session)
+                  : sessionId
+                : kind === 'simulated-input'
+                  ? '手动发送测试消息'
+                  : kind === 'simulated-output'
+                    ? '查看流程输出'
                 : kind === 'translation'
                   ? '翻译当前文本'
                   : kind === 'moderation'
@@ -616,11 +808,34 @@ function BlueprintEditor() {
 
   const addNode = (kind: FlowKind) => {
     const session = usable.find((item) => item.id === selected);
-    if ((kind === 'input' || kind === 'output') && !session) {
+    const pseudoKind =
+      selected === '__simulated-input__'
+        ? 'simulated-input'
+        : selected === '__simulated-output__'
+          ? 'simulated-output'
+          : undefined;
+    if (kind === 'input' && pseudoKind === 'simulated-output') {
+      setNotice('“模拟输出”请使用“发送目标”按钮添加。');
+      return;
+    }
+    if (kind === 'output' && pseudoKind === 'simulated-input') {
+      setNotice('“模拟输入”请使用“消息入口”按钮添加。');
+      return;
+    }
+    const resolvedKind =
+      kind === 'input' && pseudoKind === 'simulated-input'
+        ? 'simulated-input'
+        : kind === 'output' && pseudoKind === 'simulated-output'
+          ? 'simulated-output'
+          : kind;
+    if ((resolvedKind === 'input' || resolvedKind === 'output') && !session) {
       setNotice('添加消息入口或发送目标前，请先选择一个已验证会话。');
       return;
     }
-    const moduleDefaults: Record<Exclude<FlowKind, 'input' | 'output'>, FlowData> = {
+    const moduleDefaults: Record<
+      Exclude<FlowKind, 'input' | 'output' | 'simulated-input' | 'simulated-output'>,
+      FlowData
+    > = {
       translation: {
         kind: 'translation',
         label: '翻译当前文本',
@@ -638,66 +853,117 @@ function BlueprintEditor() {
       renderer: { kind: 'renderer', label: '使用原消息资料生成 PNG' },
     };
     const data: FlowData =
-      kind === 'input' || kind === 'output'
+      resolvedKind === 'input' || resolvedKind === 'output'
         ? {
-            kind,
-            label: session!.displayName,
+            kind: resolvedKind,
+            label: sessionLabel(session!),
             sessionId: session!.id,
           }
-        : moduleDefaults[kind];
+        : resolvedKind === 'simulated-input'
+          ? { kind: 'simulated-input', label: '手动发送测试消息' }
+          : resolvedKind === 'simulated-output'
+            ? { kind: 'simulated-output', label: '查看流程输出' }
+            : moduleDefaults[resolvedKind];
+    const column =
+      resolvedKind === 'input' || resolvedKind === 'simulated-input'
+        ? 'input'
+        : resolvedKind === 'output' || resolvedKind === 'simulated-output'
+          ? 'output'
+          : 'processor';
+    const columnCount = nodes.filter((node) => {
+      const nodeColumn =
+        node.data.kind === 'input' || node.data.kind === 'simulated-input'
+          ? 'input'
+          : node.data.kind === 'output' || node.data.kind === 'simulated-output'
+            ? 'output'
+            : 'processor';
+      return nodeColumn === column;
+    }).length;
     setNodes((current) => [
       ...current,
       {
         id: createBrowserId(),
         type: 'session',
         position: {
-          x: kind === 'input' ? 60 : kind === 'output' ? 920 : 300,
-          y: 60 + current.length * 95,
+          x: column === 'input' ? 60 : column === 'output' ? 920 : 360,
+          y: 70 + columnCount * (column === 'processor' ? 230 : 165),
         },
         data,
       },
     ]);
   };
+  const buildGraph = () => ({
+    nodes: nodes.map((node) => ({
+      id: node.id,
+      type:
+        node.data.kind === 'input'
+          ? 'chat-input'
+          : node.data.kind === 'simulated-input'
+            ? 'simulated-input'
+          : node.data.kind === 'output'
+            ? 'chat-output'
+            : node.data.kind === 'simulated-output'
+              ? 'simulated-output'
+            : node.data.kind === 'translation'
+              ? 'llm-translation'
+              : node.data.kind === 'moderation'
+                ? 'llm-moderation'
+                : node.data.kind === 'review'
+                  ? 'manual-review'
+                  : node.data.kind === 'fixed'
+                    ? 'fixed-text'
+                    : 'card-renderer',
+      position: node.position,
+      config:
+        node.data.kind === 'input' || node.data.kind === 'output'
+          ? { sessionId: node.data.sessionId }
+          : node.data.kind === 'translation'
+            ? { prompt: node.data.prompt, memoryMode: Boolean(node.data.memoryMode) }
+            : node.data.kind === 'moderation'
+              ? { prompt: node.data.prompt, threshold: node.data.threshold ?? 0.5 }
+              : node.data.kind === 'fixed'
+                ? { text: node.data.text ?? '' }
+                : {},
+    })),
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      sourceNodeId: edge.source,
+      targetNodeId: edge.target,
+      ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
+      ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
+    })),
+  });
+
+  const runSimulatedInput = async (nodeId: string, text: string) => {
+    if (!currentBlueprintId || loadedVersion === undefined) {
+      setNotice('请先保存并发布蓝图，再从模拟输入节点发送消息。');
+      return;
+    }
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === nodeId ? { ...node, data: { ...node.data, busy: true } } : node,
+      ),
+    );
+    try {
+      await api(`/blueprints/${currentBlueprintId}/simulated-input/${nodeId}`, {
+        method: 'POST',
+        json: { text },
+      });
+      setNotice('模拟消息已运行；若流程连接到真实发送目标，消息也已实际发送。');
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : '模拟消息运行失败');
+    } finally {
+      setNodes((current) =>
+        current.map((node) =>
+          node.id === nodeId ? { ...node, data: { ...node.data, busy: false } } : node,
+        ),
+      );
+    }
+  };
+
   const save = async () => {
     try {
-      const graph = {
-        name,
-        nodes: nodes.map((node) => ({
-          id: node.id,
-          type:
-            node.data.kind === 'input'
-              ? 'chat-input'
-              : node.data.kind === 'output'
-                ? 'chat-output'
-                : node.data.kind === 'translation'
-                  ? 'llm-translation'
-                  : node.data.kind === 'moderation'
-                    ? 'llm-moderation'
-                    : node.data.kind === 'review'
-                      ? 'manual-review'
-                      : node.data.kind === 'fixed'
-                        ? 'fixed-text'
-                        : 'card-renderer',
-          position: node.position,
-          config:
-            node.data.kind === 'input' || node.data.kind === 'output'
-              ? { sessionId: node.data.sessionId }
-              : node.data.kind === 'translation'
-                ? { prompt: node.data.prompt, memoryMode: Boolean(node.data.memoryMode) }
-                : node.data.kind === 'moderation'
-                  ? { prompt: node.data.prompt, threshold: node.data.threshold ?? 0.5 }
-                  : node.data.kind === 'fixed'
-                    ? { text: node.data.text ?? '' }
-                    : {},
-        })),
-        edges: edges.map((edge) => ({
-          id: edge.id,
-          sourceNodeId: edge.source,
-          targetNodeId: edge.target,
-          ...(edge.sourceHandle ? { sourceHandle: edge.sourceHandle } : {}),
-          ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
-        })),
-      };
+      const graph = buildGraph();
       let version: Pick<BlueprintVersion, 'blueprintId' | 'version'>;
       if (currentBlueprintId) {
         await api(`/blueprints/${currentBlueprintId}`, {
@@ -711,7 +977,7 @@ function BlueprintEditor() {
       } else {
         version = await api<BlueprintVersion>('/blueprints', {
           method: 'POST',
-          json: graph,
+          json: { name, ...graph },
         });
       }
       await api(`/blueprints/${version.blueprintId}/versions/${version.version}/publish`, {
@@ -799,11 +1065,17 @@ function BlueprintEditor() {
           选择会话
           <select value={selected} onChange={(event) => setSelected(event.target.value)}>
             <option value="">请选择</option>
+            <optgroup label="模拟会话">
+              <option value="__simulated-input__">模拟输入</option>
+              <option value="__simulated-output__">模拟输出</option>
+            </optgroup>
+            <optgroup label="真实会话">
             {usable.map((session) => (
               <option key={session.id} value={session.id}>
-                {session.displayName}
+                {sessionLabel(session)}
               </option>
             ))}
+            </optgroup>
           </select>
         </label>
         <div className="module-palette">
@@ -845,14 +1117,17 @@ function BlueprintEditor() {
           <p>
             <strong>连线方法</strong>
             <br />
-            从左到右连接模块；发送目标会自动把最终消息合成为图片。点击已有连线即可删除。审核节点右侧上方为“通过”，下方为“拦截”。
+            从左到右连接模块；可在会话列表选择模拟输入或模拟输出。模拟输入连接真实目标时会实际发送，真实入口也可连接模拟输出。所有运行中的消息都会逐节点播放。
           </p>
         </div>
       </div>
       <div className="flow-canvas">
         <ReactFlow
           key={editorKey}
-          nodes={nodes}
+          nodes={nodes.map((node) => ({
+            ...node,
+            data: { ...node.data, onSimulate: runSimulatedInput },
+          }))}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
@@ -863,11 +1138,17 @@ function BlueprintEditor() {
             setEdges((items) => items.filter((item) => item.id !== edge.id))
           }
           nodeTypes={nodeTypes}
+          onInit={setFlowInstance}
           deleteKeyCode={['Backspace', 'Delete']}
           fitView
         >
-          <Background color="#263049" gap={24} />
-          <MiniMap pannable zoomable />
+          <Background color="#25282d" gap={24} />
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor="#656b72"
+            maskColor="rgb(13 15 17 / 76%)"
+          />
           <Controls />
         </ReactFlow>
       </div>
@@ -978,8 +1259,10 @@ function Nodes() {
                 {verified.map((session) => (
                   <div className="bound-session" key={session.id}>
                     <div>
-                      <strong>{session.displayName}</strong>
-                      <span>{session.remark || '已验证，可在蓝图中使用'}</span>
+                      <strong>{sessionLabel(session)}</strong>
+                      <span>
+                        {session.remark ? `原名：${session.displayName}` : '已验证，可在蓝图中使用'}
+                      </span>
                     </div>
                     <span className="badge success">
                       <Check size={13} />
@@ -992,7 +1275,7 @@ function Nodes() {
 
               {pending.map((session) => (
                 <div className="verify-box" key={session.id}>
-                  <strong>{session.displayName}</strong>
+                  <strong>{sessionLabel(session)}</strong>
                   <input
                     placeholder="回填频道或群内的验证码"
                     value={verificationCodes[session.id] ?? ''}

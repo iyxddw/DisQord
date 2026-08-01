@@ -100,7 +100,7 @@ async function fixture(
   await store.set('blueprint-version', `${blueprintId}:1`, version);
   const sendToNode = vi.fn(async () => undefined);
   const orchestrator = new MessageOrchestrator(store, { sendToNode }, processor);
-  return { store, orchestrator, sendToNode, sourceSession, targetSession, blueprint };
+  return { store, orchestrator, sendToNode, sourceSession, targetSession, blueprint, version };
 }
 
 function node(
@@ -112,6 +112,123 @@ function node(
 }
 
 describe('blueprint message pipeline', () => {
+  it('runs a simulated input through the real pipeline and sends to a real target', async () => {
+    const input = randomUUID();
+    const translation = randomUUID();
+    const moderation = randomUUID();
+    const fixed = randomUUID();
+    const output = randomUUID();
+    const setup = await fixture(
+      [
+        node(input, 'simulated-input'),
+        node(translation, 'llm-translation', { prompt: '翻译', memoryMode: false }),
+        node(moderation, 'llm-moderation', { prompt: '审核', threshold: 0.5 }),
+        node(fixed, 'fixed-text', { text: '内容未通过审核' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
+        { id: randomUUID(), sourceNodeId: translation, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: output,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'blocked',
+          targetNodeId: fixed,
+        },
+        { id: randomUUID(), sourceNodeId: fixed, targetNodeId: output },
+      ],
+      {
+        translate: vi.fn(async () => ({
+          detectedLanguage: 'zh',
+          translatedText: 'Hello',
+          confidence: 1,
+          model: 'translator',
+          promptVersion: 1,
+        })),
+        moderate: vi.fn(async () => ({
+          violationScore: 0.34,
+          categories: [],
+          reason: '正常',
+          confidence: 1,
+          model: 'moderator',
+        })),
+        render: vi.fn(async () => [Buffer.from('rendered-card')]),
+      },
+    );
+
+    const result = await setup.orchestrator.handleSimulatedInput(
+      setup.blueprint.id,
+      input,
+      '你好',
+    );
+
+    expect(result.traceId).toEqual(expect.any(String));
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver',
+      expect.objectContaining({
+        targetSessionId: setup.targetSession.id,
+        cards: [Buffer.from('rendered-card').toString('base64')],
+      }),
+    );
+    const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
+      (entry) => entry.value,
+    );
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: input, text: '你好' }),
+        expect.objectContaining({ nodeId: translation, text: 'Hello' }),
+        expect.objectContaining({ nodeId: moderation, violationScore: 0.34, route: 'passed' }),
+        expect.objectContaining({ nodeId: output, text: 'Hello' }),
+      ]),
+    );
+    expect(await setup.store.list('moderation-review')).toHaveLength(0);
+  });
+
+  it('lets a real input finish at a simulated output without sending externally', async () => {
+    const input = randomUUID();
+    const fixed = randomUUID();
+    const output = randomUUID();
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(fixed, 'fixed-text', { text: '模拟结果' }),
+        node(output, 'simulated-output'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: fixed },
+        { id: randomUUID(), sourceNodeId: fixed, targetNodeId: output },
+      ],
+      {},
+    );
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: message(setup.sourceSession.nodeId),
+      frameId: randomUUID(),
+    });
+
+    expect(setup.sendToNode).not.toHaveBeenCalled();
+    const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
+      (entry) => entry.value,
+    );
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: input }),
+        expect.objectContaining({ nodeId: fixed, text: '模拟结果' }),
+        expect.objectContaining({ nodeId: output, text: '模拟结果' }),
+      ]),
+    );
+  });
+
   it('silently ignores messages from sessions that were not verified', async () => {
     const process = vi.fn(async () => ({
       decision: 'allow' as const,

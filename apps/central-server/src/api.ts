@@ -82,6 +82,11 @@ export interface CentralApplicationOptions {
     taskId: string,
     decision: 'approve' | 'reject',
   ) => void | Promise<void>;
+  readonly onSimulatedInput?: (
+    blueprintId: string,
+    nodeId: string,
+    text: string,
+  ) => Promise<{ traceId: string }>;
 }
 
 export function createCentralApplication(options: CentralApplicationOptions) {
@@ -725,6 +730,54 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     }
   });
 
+  app.post(
+    '/api/blueprints/:id/simulated-input/:nodeId',
+    { preHandler: requireAdmin },
+    async (request, reply) => {
+      try {
+        if (!options.onSimulatedInput) {
+          return await reply.code(503).send({ error: '模拟输入处理器尚未就绪。' });
+        }
+        const params = z.object({ id: z.uuid(), nodeId: z.uuid() }).parse(request.params);
+        const body = z.object({ text: z.string().trim().min(1).max(20_000) }).parse(request.body);
+        return await options.onSimulatedInput(params.id, params.nodeId, body.text);
+      } catch (error) {
+        return await reply.code(400).send({ error: errorMessage(error) });
+      }
+    },
+  );
+
+  app.get(
+    '/api/blueprints/:id/activity',
+    { preHandler: requireAdmin },
+    async (request, reply) => {
+      try {
+        const { id } = z.object({ id: z.uuid() }).parse(request.params);
+        const { cursor } = z.object({ cursor: z.string().max(128).optional() }).parse(request.query);
+        const items = (await options.store.list<Record<string, unknown>>('blueprint-activity'))
+          .map((entry) => entry.value)
+          .filter((item) => item.blueprintId === id)
+          .sort((left, right) => activityCursor(left).localeCompare(activityCursor(right)))
+          .filter((item) => !cursor || activityCursor(item) > cursor)
+          .slice(-200);
+        const nextCursor = items.length
+          ? activityCursor(items.at(-1)!)
+          : cursor || `${String(Date.now() * 1_000).padStart(16, '0')}|`;
+        const orderedItems = [...items].sort((left, right) => {
+          const byTime = String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''));
+          if (byTime !== 0) return byTime;
+          if (left.traceId === right.traceId) {
+            return Number(left.step ?? 0) - Number(right.step ?? 0);
+          }
+          return String(left.id ?? '').localeCompare(String(right.id ?? ''));
+        });
+        return { items: orderedItems, cursor: nextCursor };
+      } catch (error) {
+        return await reply.code(400).send({ error: errorMessage(error) });
+      }
+    },
+  );
+
   app.get('/api/reviews', { preHandler: requireAdmin }, async () =>
     (await options.store.list('moderation-review')).map((entry) => entry.value),
   );
@@ -785,6 +838,14 @@ function setSessionCookie(reply: FastifyReply, token: string, secure: boolean): 
 
 function verificationDigest(code: string, secret: string): string {
   return createHmac('sha256', secret).update(code).digest('hex');
+}
+
+function activityCursor(activity: Record<string, unknown>): string {
+  const sequence =
+    typeof activity.sequence === 'number'
+      ? activity.sequence
+      : Date.parse(String(activity.createdAt ?? '')) * 1_000;
+  return `${String(Number.isFinite(sequence) ? sequence : 0).padStart(16, '0')}|${String(activity.id ?? '')}`;
 }
 
 function errorMessage(error: unknown): string {

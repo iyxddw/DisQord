@@ -130,4 +130,19 @@ describe('blueprint validation and simulation', () => {
       validateBlueprint(blueprint, { isVerifiedSession: () => true }).errors,
     ).not.toContainEqual(expect.objectContaining({ code: 'INVALID_MODERATION_EDGE' }));
   });
+
+  it('accepts simulated input and output without chat session configuration', () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const blueprint = createBlueprint();
+    blueprint.nodes = [
+      { id: input, type: 'simulated-input', position: { x: 0, y: 0 }, config: {} },
+      { id: output, type: 'simulated-output', position: { x: 300, y: 0 }, config: {} },
+    ];
+    blueprint.edges = [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }];
+
+    expect(validateBlueprint(blueprint, { isVerifiedSession: () => false })).toEqual(
+      expect.objectContaining({ valid: true, errors: [] }),
+    );
+  });
 });
