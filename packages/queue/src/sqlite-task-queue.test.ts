@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { SqliteTaskQueue } from './sqlite-task-queue.js';
+import { FileTaskQueue } from './sqlite-task-queue.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -18,14 +18,14 @@ afterEach(() => {
 function createQueuePath(): string {
   const directory = mkdtempSync(join(tmpdir(), 'disqord-queue-'));
   temporaryDirectories.push(directory);
-  return join(directory, 'queue.sqlite');
+  return join(directory, 'queue.json');
 }
 
-describe('SqliteTaskQueue', () => {
-  it('restores unfinished work after reopening the database', () => {
+describe('FileTaskQueue', () => {
+  it('restores unfinished work after reopening the JSON file', () => {
     const databasePath = createQueuePath();
     const itemId = randomUUID();
-    const firstProcess = new SqliteTaskQueue(databasePath);
+    const firstProcess = new FileTaskQueue(databasePath);
 
     expect(
       firstProcess.enqueue({
@@ -37,7 +37,7 @@ describe('SqliteTaskQueue', () => {
     firstProcess.markProcessing(itemId);
     firstProcess.close();
 
-    const restartedProcess = new SqliteTaskQueue(databasePath);
+    const restartedProcess = new FileTaskQueue(databasePath);
     expect(restartedProcess.listRecoverable()).toMatchObject([
       {
         id: itemId,
@@ -50,7 +50,7 @@ describe('SqliteTaskQueue', () => {
   });
 
   it('deduplicates queue items by ID', () => {
-    const queue = new SqliteTaskQueue(createQueuePath());
+    const queue = new FileTaskQueue(createQueuePath());
     const item = {
       id: randomUUID(),
       kind: 'message-upload',
@@ -64,7 +64,7 @@ describe('SqliteTaskQueue', () => {
   });
 
   it('enforces queue state transitions', () => {
-    const queue = new SqliteTaskQueue(createQueuePath());
+    const queue = new FileTaskQueue(createQueuePath());
     const itemId = randomUUID();
     queue.enqueue({ id: itemId, kind: 'delivery', payload: {} });
 
@@ -72,6 +72,19 @@ describe('SqliteTaskQueue', () => {
     queue.markProcessing(itemId);
     queue.markAcknowledged(itemId);
     expect(queue.get(itemId)?.status).toBe('acknowledged');
+    queue.close();
+  });
+
+  it('persists payload updates for acknowledgement metadata', () => {
+    const path = createQueuePath();
+    const queue = new FileTaskQueue(path);
+    const itemId = randomUUID();
+    queue.enqueue({ id: itemId, kind: 'delivery', payload: { attempt: 1 } });
+    queue.updatePayload(itemId, { attempt: 1, targetMessageId: 'platform-1' });
+    expect(new FileTaskQueue(path).get(itemId)?.payload).toEqual({
+      attempt: 1,
+      targetMessageId: 'platform-1',
+    });
     queue.close();
   });
 });

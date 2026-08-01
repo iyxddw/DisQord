@@ -96,7 +96,7 @@ export class CentralNodeGateway {
     nodeId: string,
     kind: string,
     payload: unknown,
-    acknowledgementTimeoutMs = 10_000,
+    acknowledgementTimeoutMs = 60_000,
   ): Promise<void> {
     const socket = this.#connections.get(nodeId);
     const context = this.#contexts.get(nodeId);

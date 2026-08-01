@@ -52,6 +52,7 @@ import '@xyflow/react/dist/style.css';
 import './styles.css';
 import {
   api,
+  apiRetry,
   type AuthStatus,
   type Blueprint,
   type BlueprintActivity,
@@ -60,6 +61,7 @@ import {
   type ChatSession,
   type NodeRuntime,
   type SessionCandidate,
+  type LogPage,
 } from './api';
 
 type Page = 'overview' | 'sessions' | 'blueprint' | 'nodes' | 'settings' | 'reviews' | 'logs';
@@ -82,8 +84,8 @@ function useLoad<T>(path: string, fallback: T) {
   const [data, setData] = useState<T>(fallback);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const reload = useCallback(async () => {
-    setLoading(true);
+  const reload = useCallback(async (options: { background?: boolean } = {}) => {
+    if (!options.background) setLoading(true);
     try {
       setData(await api<T>(path));
       setError('');
@@ -94,7 +96,7 @@ function useLoad<T>(path: string, fallback: T) {
     }
   }, [path]);
   useEffect(() => void reload(), [reload]);
-  return { data, error, loading, reload, setData };
+  return { data, error, loading, reload, setData, setError };
 }
 
 function App() {
@@ -312,22 +314,53 @@ function Overview() {
 }
 
 function Sessions() {
-  const { data, reload, error, loading } = useLoad<ChatSession[]>('/chat-sessions', []);
+  const { data, setData, reload, error, setError, loading } = useLoad<ChatSession[]>(
+    '/chat-sessions',
+    [],
+  );
   const [editingId, setEditingId] = useState('');
   const [remark, setRemark] = useState('');
   const saveRemark = async (session: ChatSession) => {
-    await api(`/chat-sessions/${session.id}`, {
-      method: 'PATCH',
-      json: { remark: remark.trim() || null },
-    });
+    const nextRemark = remark.trim();
+    const previous = data;
+    setData((current) =>
+      current.map((item) =>
+        item.id === session.id
+            ? nextRemark
+              ? { ...item, remark: nextRemark }
+              : (() => {
+                const withoutRemark = { ...item };
+                delete withoutRemark.remark;
+                return withoutRemark;
+              })()
+          : item,
+      ),
+    );
     setEditingId('');
-    await reload();
+    try {
+      await apiRetry(
+        `/chat-sessions/${session.id}`,
+        { method: 'PATCH', json: { remark: nextRemark || null } },
+        { attempts: 3 },
+      );
+      setError('');
+    } catch (cause) {
+      setData(previous);
+      setError(cause instanceof Error ? cause.message : '备注保存失败');
+    }
   };
   const remove = async (session: ChatSession) => {
     if (!window.confirm(`确定删除会话“${sessionLabel(session)}”吗？引用它的蓝图需要重新编辑。`))
       return;
-    await api(`/chat-sessions/${session.id}`, { method: 'DELETE' });
-    await reload();
+    const previous = data;
+    setData((current) => current.filter((item) => item.id !== session.id));
+    try {
+      await apiRetry(`/chat-sessions/${session.id}`, { method: 'DELETE' }, { attempts: 3 });
+      setError('');
+    } catch (cause) {
+      setData(previous);
+      setError(cause instanceof Error ? cause.message : '会话删除失败');
+    }
   };
   return (
     <div className="panel">
@@ -423,6 +456,11 @@ type FlowData = {
   text?: string;
   outputText?: string;
   busy?: boolean;
+  hasUnpublishedChanges?: boolean;
+  savePrompt?: boolean;
+  onDraftChange?: () => void;
+  onConfirmSaveSimulation?: () => void;
+  onCancelSaveSimulation?: () => void;
   onSimulate?: (nodeId: string, text: string) => Promise<void>;
   simulation?:
     | {
@@ -446,8 +484,22 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
     data.kind !== 'simulated-output' &&
     data.kind !== 'moderation' &&
     data.kind !== 'review';
+  const patchData = (patch: Partial<FlowData>) => {
+    updateNodeData(id, patch);
+    data.onDraftChange?.();
+  };
   return (
     <div className={`flow-node ${data.kind} ${data.simulation?.state ?? ''}`}>
+      {data.savePrompt && (
+        <div className="flow-save-prompt nodrag nopan" role="dialog">
+          <strong>当前蓝图有未发布修改</strong>
+          <span>先保存并发布，再运行这条模拟消息？</span>
+          <div>
+            <button onClick={() => data.onConfirmSaveSimulation?.()}>保存并运行</button>
+            <button onClick={() => data.onCancelSaveSimulation?.()}>取消</button>
+          </div>
+        </div>
+      )}
       {data.simulation && (
         <div className={`flow-simulation-note ${data.simulation.state}`} role="status">
           {data.simulation.message}
@@ -516,14 +568,14 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
         <div className="flow-node-config nodrag nopan">
           <textarea
             value={data.prompt ?? ''}
-            onChange={(event) => updateNodeData(id, { prompt: event.target.value })}
+            onChange={(event) => patchData({ prompt: event.target.value })}
             placeholder="翻译提示词"
           />
           <label className="memory-toggle">
             <input
               type="checkbox"
               checked={Boolean(data.memoryMode)}
-              onChange={(event) => updateNodeData(id, { memoryMode: event.target.checked })}
+              onChange={(event) => patchData({ memoryMode: event.target.checked })}
             />
             <span>记忆模式</span>
           </label>
@@ -539,12 +591,12 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
               max="1"
               step="0.01"
               value={data.threshold ?? 0.5}
-              onChange={(event) => updateNodeData(id, { threshold: Number(event.target.value) })}
+              onChange={(event) => patchData({ threshold: Number(event.target.value) })}
             />
           </label>
           <textarea
             value={data.prompt ?? ''}
-            onChange={(event) => updateNodeData(id, { prompt: event.target.value })}
+            onChange={(event) => patchData({ prompt: event.target.value })}
             placeholder="审核提示词"
           />
         </div>
@@ -553,7 +605,7 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
         <div className="flow-node-config nodrag nopan">
           <textarea
             value={data.text ?? ''}
-            onChange={(event) => updateNodeData(id, { text: event.target.value })}
+            onChange={(event) => patchData({ text: event.target.value })}
             placeholder="经过此模块后输出的固定文本"
           />
         </div>
@@ -562,7 +614,10 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
         className="flow-node-delete nodrag nopan"
         title="删除节点"
         aria-label={`删除${data.label}`}
-        onClick={() => void deleteElements({ nodes: [{ id }] })}
+        onClick={() => {
+          data.onDraftChange?.();
+          void deleteElements({ nodes: [{ id }] });
+        }}
       >
         <Trash2 size={13} />
       </button>
@@ -570,16 +625,318 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
   );
 }
 
+type MobileBlueprintFlowProps = {
+  nodes: Node<FlowData>[];
+  edges: Edge[];
+  onPatchNode: (nodeId: string, patch: Partial<FlowData>) => void;
+  onDeleteNode: (nodeId: string) => void;
+  onSimulate: (nodeId: string, text: string) => Promise<void>;
+  onDraftChange: () => void;
+  pendingSimulation?: { nodeId: string; text: string };
+  onConfirmSaveSimulation: () => void;
+  onCancelSaveSimulation: () => void;
+};
+
+function MobileBlueprintFlow({
+  nodes,
+  edges,
+  onPatchNode,
+  onDeleteNode,
+  onSimulate,
+  onDraftChange,
+  pendingSimulation,
+  onConfirmSaveSimulation,
+  onCancelSaveSimulation,
+}: MobileBlueprintFlowProps) {
+  const [rootId, setRootId] = useState('');
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const incoming = useMemo(() => {
+    const map = new Set(edges.map((edge) => edge.target));
+    return nodes.filter((node) => !map.has(node.id));
+  }, [edges, nodes]);
+  const outgoing = useMemo(() => {
+    const map = new Map<string, Edge[]>();
+    for (const edge of edges) {
+      const list = map.get(edge.source) ?? [];
+      list.push(edge);
+      map.set(edge.source, list);
+    }
+    return map;
+  }, [edges]);
+
+  useEffect(() => {
+    if (!rootId || !nodes.some((node) => node.id === rootId)) {
+      setRootId(incoming[0]?.id ?? nodes[0]?.id ?? '');
+    }
+  }, [incoming, nodes, rootId]);
+
+  const path = useMemo(() => {
+    const result: Node<FlowData>[] = [];
+    const visited = new Set<string>();
+    let currentId = rootId;
+    while (currentId && !visited.has(currentId)) {
+      visited.add(currentId);
+      const node = nodes.find((item) => item.id === currentId);
+      if (!node) break;
+      result.push(node);
+      const next = outgoing.get(currentId) ?? [];
+      if (!next.length) break;
+      const chosen = choices[currentId];
+      const selected = next.find((edge) => edge.id === chosen) ?? next[0];
+      if (!selected) break;
+      currentId = selected.target;
+    }
+    return result;
+  }, [choices, nodes, outgoing, rootId]);
+  const pathIds = new Set(path.map((node) => node.id));
+  const disconnected = nodes.filter((node) => !pathIds.has(node.id));
+
+  if (!nodes.length) {
+    return (
+      <div className="mobile-blueprint-flow empty">
+        <span>添加模块后，这里会显示纵向流程。</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mobile-blueprint-flow">
+      <div className="mobile-flow-heading">
+        <div>
+          <strong>流程预览</strong>
+          <span>点击分支按钮切换后续路径；卡片内可直接编辑模块。</span>
+        </div>
+        {incoming.length > 1 && (
+          <label>
+            起始入口
+            <select value={rootId} onChange={(event) => setRootId(event.target.value)}>
+              {incoming.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.data.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+      <div className="mobile-flow-path">
+        {path.map((node, index) => {
+          const branches = outgoing.get(node.id) ?? [];
+          return (
+            <div className="mobile-flow-step" key={node.id}>
+              <MobileFlowCard
+                node={node}
+                savePrompt={pendingSimulation?.nodeId === node.id}
+                onPatch={onPatchNode}
+                onDelete={onDeleteNode}
+                onSimulate={onSimulate}
+                onDraftChange={onDraftChange}
+                onConfirmSaveSimulation={onConfirmSaveSimulation}
+                onCancelSaveSimulation={onCancelSaveSimulation}
+              />
+              {branches.length > 1 && (
+                <div className="mobile-branch-picker">
+                  <span>选择下一条路径</span>
+                  <div>
+                    {branches.map((edge, branchIndex) => (
+                      <button
+                        className={choices[node.id] === edge.id ? 'active' : ''}
+                        key={edge.id}
+                        onClick={() =>
+                          setChoices((current) => ({ ...current, [node.id]: edge.id }))
+                        }
+                      >
+                        {mobileBranchLabel(edge, branchIndex)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {index < path.length - 1 && branches.length <= 1 && (
+                <div className="mobile-flow-connector" aria-hidden="true">
+                  ↓
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {disconnected.length > 0 && (
+        <details className="mobile-disconnected">
+          <summary>未连接模块（{disconnected.length}）</summary>
+          {disconnected.map((node) => (
+            <MobileFlowCard
+              key={node.id}
+              node={node}
+              savePrompt={pendingSimulation?.nodeId === node.id}
+              onPatch={onPatchNode}
+              onDelete={onDeleteNode}
+              onSimulate={onSimulate}
+              onDraftChange={onDraftChange}
+              onConfirmSaveSimulation={onConfirmSaveSimulation}
+              onCancelSaveSimulation={onCancelSaveSimulation}
+            />
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
+function MobileFlowCard({
+  node,
+  savePrompt,
+  onPatch,
+  onDelete,
+  onSimulate,
+  onDraftChange,
+  onConfirmSaveSimulation,
+  onCancelSaveSimulation,
+}: {
+  node: Node<FlowData>;
+  savePrompt: boolean;
+  onPatch: (nodeId: string, patch: Partial<FlowData>) => void;
+  onDelete: (nodeId: string) => void;
+  onSimulate: (nodeId: string, text: string) => Promise<void>;
+  onDraftChange: () => void;
+  onConfirmSaveSimulation: () => void;
+  onCancelSaveSimulation: () => void;
+}) {
+  const { data } = node;
+  const [testText, setTestText] = useState('');
+  const patch = (value: Partial<FlowData>) => {
+    onPatch(node.id, value);
+    onDraftChange();
+  };
+  return (
+    <article className={`mobile-flow-card ${data.kind} ${data.simulation?.state ?? ''}`}>
+      {savePrompt && (
+        <div className="mobile-flow-save-prompt" role="dialog">
+          <strong>当前蓝图有未发布修改</strong>
+          <span>先保存并发布，再运行这条模拟消息？</span>
+          <div>
+            <button onClick={onConfirmSaveSimulation}>保存并运行</button>
+            <button onClick={onCancelSaveSimulation}>取消</button>
+          </div>
+        </div>
+      )}
+      <div className="mobile-flow-card-head">
+        <span>{flowKindLabel(data.kind)}</span>
+        <button aria-label={`删除${data.label}`} title="删除模块" onClick={() => onDelete(node.id)}>
+          <Trash2 size={14} />
+        </button>
+      </div>
+      <strong>{data.label}</strong>
+      {data.simulation && <p className="mobile-flow-activity">{data.simulation.message}</p>}
+      {data.kind === 'simulated-input' && (
+        <div className="mobile-flow-config">
+          <textarea
+            value={testText}
+            onChange={(event) => setTestText(event.target.value)}
+            placeholder="输入测试消息"
+          />
+          <button
+            disabled={data.busy || !testText.trim()}
+            onClick={() => void onSimulate(node.id, testText.trim())}
+          >
+            {data.busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
+            {data.busy ? '运行中' : '发送'}
+          </button>
+        </div>
+      )}
+      {data.kind === 'simulated-output' && (
+        <div className="mobile-flow-output">{data.outputText || '等待流程输出…'}</div>
+      )}
+      {data.kind === 'translation' && (
+        <div className="mobile-flow-config">
+          <textarea
+            value={data.prompt ?? ''}
+            onChange={(event) => patch({ prompt: event.target.value })}
+            placeholder="翻译提示词"
+          />
+          <label className="memory-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(data.memoryMode)}
+              onChange={(event) => patch({ memoryMode: event.target.checked })}
+            />
+            <span>记忆模式</span>
+          </label>
+        </div>
+      )}
+      {data.kind === 'moderation' && (
+        <div className="mobile-flow-config">
+          <label>
+            允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={data.threshold ?? 0.5}
+              onChange={(event) => patch({ threshold: Number(event.target.value) })}
+            />
+          </label>
+          <textarea
+            value={data.prompt ?? ''}
+            onChange={(event) => patch({ prompt: event.target.value })}
+            placeholder="审核提示词"
+          />
+        </div>
+      )}
+      {data.kind === 'fixed' && (
+        <div className="mobile-flow-config">
+          <textarea
+            value={data.text ?? ''}
+            onChange={(event) => patch({ text: event.target.value })}
+            placeholder="经过此模块后输出的固定文本"
+          />
+        </div>
+      )}
+    </article>
+  );
+}
+
+function flowKindLabel(kind: FlowKind): string {
+  return kind === 'input'
+    ? '消息入口'
+    : kind === 'simulated-input'
+      ? '模拟输入'
+      : kind === 'output'
+        ? '发送目标'
+        : kind === 'simulated-output'
+          ? '模拟输出'
+          : kind === 'translation'
+            ? '文本翻译'
+            : kind === 'moderation'
+              ? '文本审核'
+              : kind === 'review'
+                ? '人工审核'
+                : kind === 'fixed'
+                  ? '固定文本'
+                  : '图片合成';
+}
+
+function mobileBranchLabel(edge: Edge, index: number): string {
+  if (edge.sourceHandle === 'passed') return '通过 / 过审';
+  if (edge.sourceHandle === 'blocked') return '拦截 / 未过';
+  return `分支 ${index + 1}`;
+}
+
 function BlueprintEditor() {
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
   const blueprints = useLoad<Blueprint[]>('/blueprints', []);
   const usable = sessions.data.filter((item) => item.status === 'verified');
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node<FlowData>>([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node<FlowData>>([]);
+  const [edges, setEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
   const [name, setName] = useState('双向翻译');
   const [selected, setSelected] = useState('');
   const [currentBlueprintId, setCurrentBlueprintId] = useState('');
   const [loadedVersion, setLoadedVersion] = useState<number>();
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [pendingSimulation, setPendingSimulation] = useState<
+    { nodeId: string; text: string } | undefined
+  >();
   const [editorKey, setEditorKey] = useState(0);
   const [notice, setNotice] = useState('');
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<FlowData>, Edge>>();
@@ -587,6 +944,15 @@ function BlueprintEditor() {
   const activityQueue = useRef<BlueprintActivity[]>([]);
   const activityPlaying = useRef(false);
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
+
+  const onNodesChange = (changes: Parameters<typeof onNodesChangeBase>[0]) => {
+    if (changes.length) setDraftDirty(true);
+    onNodesChangeBase(changes);
+  };
+  const onEdgesChange = (changes: Parameters<typeof onEdgesChangeBase>[0]) => {
+    if (changes.length) setDraftDirty(true);
+    onEdgesChangeBase(changes);
+  };
 
   useEffect(() => {
     if (!flowInstance || !nodes.length) return;
@@ -705,6 +1071,8 @@ function BlueprintEditor() {
     setName('双向翻译');
     setNodes([]);
     setEdges([]);
+    setDraftDirty(false);
+    setPendingSimulation(undefined);
     setNotice('正在创建新蓝图。');
     setEditorKey((value) => value + 1);
   };
@@ -802,6 +1170,8 @@ function BlueprintEditor() {
         ...(edge.targetHandle ? { targetHandle: edge.targetHandle } : {}),
       })),
     );
+    setDraftDirty(false);
+    setPendingSimulation(undefined);
     setNotice(`已载入 ${blueprint.name} · v${version.version}`);
     setEditorKey((value) => value + 1);
   };
@@ -891,6 +1261,7 @@ function BlueprintEditor() {
         data,
       },
     ]);
+    setDraftDirty(true);
   };
   const buildGraph = () => ({
     nodes: nodes.map((node) => ({
@@ -934,7 +1305,7 @@ function BlueprintEditor() {
     })),
   });
 
-  const runSimulatedInput = async (nodeId: string, text: string) => {
+  const executeSimulatedInput = async (nodeId: string, text: string) => {
     if (!currentBlueprintId || loadedVersion === undefined) {
       setNotice('请先保存并发布蓝图，再从模拟输入节点发送消息。');
       return;
@@ -961,7 +1332,15 @@ function BlueprintEditor() {
     }
   };
 
-  const save = async () => {
+  const runSimulatedInput = async (nodeId: string, text: string) => {
+    if (draftDirty) {
+      setPendingSimulation({ nodeId, text });
+      return;
+    }
+    await executeSimulatedInput(nodeId, text);
+  };
+
+  const save = async (): Promise<boolean> => {
     try {
       const graph = buildGraph();
       let version: Pick<BlueprintVersion, 'blueprintId' | 'version'>;
@@ -985,34 +1364,54 @@ function BlueprintEditor() {
       });
       setCurrentBlueprintId(version.blueprintId);
       setLoadedVersion(version.version);
-      await blueprints.reload();
+      setDraftDirty(false);
+      await blueprints.reload({ background: true });
       setNotice(`蓝图 v${version.version} 已发布；旧版本已归档。`);
+      return true;
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '发布失败');
+      return false;
     }
   };
 
+  const confirmSaveSimulation = async () => {
+    if (!pendingSimulation) return;
+    const pending = pendingSimulation;
+    if (!(await save())) return;
+    setPendingSimulation(undefined);
+    await executeSimulatedInput(pending.nodeId, pending.text);
+  };
+
   const toggleBlueprint = async (blueprint: Blueprint) => {
+    const previous = blueprints.data;
+    blueprints.setData((current) =>
+      current.map((item) =>
+        item.id === blueprint.id ? { ...item, enabled: !item.enabled } : item,
+      ),
+    );
     try {
-      await api(`/blueprints/${blueprint.id}`, {
-        method: 'PATCH',
-        json: { enabled: !blueprint.enabled },
-      });
-      await blueprints.reload();
+      await apiRetry(
+        `/blueprints/${blueprint.id}`,
+        { method: 'PATCH', json: { enabled: !blueprint.enabled } },
+        { attempts: 3 },
+      );
       setNotice(`${blueprint.name} 已${blueprint.enabled ? '停用' : '启用'}。`);
     } catch (cause) {
+      blueprints.setData(previous);
       setNotice(cause instanceof Error ? cause.message : '状态修改失败');
     }
   };
 
   const deleteBlueprint = async (blueprint: Blueprint) => {
     if (!window.confirm(`确定删除蓝图“${blueprint.name}”及其全部版本吗？`)) return;
+    const previous = blueprints.data;
+    blueprints.setData((current) => current.filter((item) => item.id !== blueprint.id));
     try {
-      await api(`/blueprints/${blueprint.id}`, { method: 'DELETE' });
+      await apiRetry(`/blueprints/${blueprint.id}`, { method: 'DELETE' }, { attempts: 3 });
       if (currentBlueprintId === blueprint.id) resetEditor();
-      await blueprints.reload();
       setNotice(`${blueprint.name} 已删除。`);
     } catch (cause) {
+      blueprints.setData(previous);
       setNotice(cause instanceof Error ? cause.message : '删除失败');
     }
   };
@@ -1059,7 +1458,13 @@ function BlueprintEditor() {
         <div className="toolbar-divider" />
         <label>
           蓝图名称
-          <input value={name} onChange={(event) => setName(event.target.value)} />
+          <input
+            value={name}
+            onChange={(event) => {
+              setName(event.target.value);
+              setDraftDirty(true);
+            }}
+          />
         </label>
         <label>
           选择会话
@@ -1126,17 +1531,29 @@ function BlueprintEditor() {
           key={editorKey}
           nodes={nodes.map((node) => ({
             ...node,
-            data: { ...node.data, onSimulate: runSimulatedInput },
+            data: {
+              ...node.data,
+              hasUnpublishedChanges: draftDirty,
+              savePrompt: pendingSimulation?.nodeId === node.id,
+              onDraftChange: () => setDraftDirty(true),
+              onConfirmSaveSimulation: () => void confirmSaveSimulation(),
+              onCancelSaveSimulation: () => setPendingSimulation(undefined),
+              onSimulate: runSimulatedInput,
+            },
           }))}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={(connection: Connection) =>
-            setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items))
+            {
+              setDraftDirty(true);
+              setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items));
+            }
           }
-          onEdgeClick={(_event, edge) =>
-            setEdges((items) => items.filter((item) => item.id !== edge.id))
-          }
+          onEdgeClick={(_event, edge) => {
+            setDraftDirty(true);
+            setEdges((items) => items.filter((item) => item.id !== edge.id));
+          }}
           nodeTypes={nodeTypes}
           onInit={setFlowInstance}
           deleteKeyCode={['Backspace', 'Delete']}
@@ -1152,6 +1569,30 @@ function BlueprintEditor() {
           <Controls />
         </ReactFlow>
       </div>
+      <MobileBlueprintFlow
+        nodes={nodes}
+        edges={edges}
+        onPatchNode={(nodeId, patch) => {
+          setDraftDirty(true);
+          setNodes((current) =>
+            current.map((node) =>
+              node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node,
+            ),
+          );
+        }}
+        onDeleteNode={(nodeId) => {
+          setDraftDirty(true);
+          setNodes((current) => current.filter((node) => node.id !== nodeId));
+          setEdges((current) =>
+            current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
+          );
+        }}
+        onSimulate={runSimulatedInput}
+        onDraftChange={() => setDraftDirty(true)}
+        {...(pendingSimulation ? { pendingSimulation } : {})}
+        onConfirmSaveSimulation={() => void confirmSaveSimulation()}
+        onCancelSaveSimulation={() => setPendingSimulation(undefined)}
+      />
     </div>
   );
 }
@@ -1178,6 +1619,7 @@ function Nodes() {
         method: 'POST',
         json: candidate,
       });
+      sessions.setData((current) => [...current.filter((item) => item.id !== session.id), session]);
       await api(`/chat-sessions/${session.id}/send-code`, { method: 'POST' });
       setAdding((current) => ({ ...current, [node.nodeId]: false }));
       setDrafts((current) => ({ ...current, [node.nodeId]: '' }));
@@ -1185,7 +1627,6 @@ function Nodes() {
         ...current,
         [node.nodeId]: '验证码已发送，请从目标群或频道读取后回填。',
       }));
-      await sessions.reload();
     } catch (cause) {
       setNotices((current) => ({
         ...current,
@@ -1195,14 +1636,22 @@ function Nodes() {
   };
 
   const verify = async (node: NodeRuntime, session: ChatSession) => {
+    const previous = sessions.data;
+    sessions.setData((current) =>
+      current.map((item) =>
+        item.id === session.id
+          ? { ...item, status: 'verified' }
+          : item,
+      ),
+    );
     try {
       await api(`/chat-sessions/${session.id}/verify`, {
         method: 'POST',
         json: { code: verificationCodes[session.id] ?? '' },
       });
       setNotices((current) => ({ ...current, [node.nodeId]: '客户端与会话验证成功。' }));
-      await Promise.all([sessions.reload(), nodes.reload()]);
     } catch (cause) {
+      sessions.setData(previous);
       setNotices((current) => ({
         ...current,
         [node.nodeId]: cause instanceof Error ? cause.message : '验证码错误',
@@ -1370,10 +1819,14 @@ function LlmSettings() {
   }, [settings.data]);
   const save = async () => {
     try {
-      await api('/settings/llm', {
-        method: 'PUT',
-        json: { ...form, ...(form.apiKey ? {} : { apiKey: undefined }) },
-      });
+      await apiRetry(
+        '/settings/llm',
+        {
+          method: 'PUT',
+          json: { ...form, ...(form.apiKey ? {} : { apiKey: undefined }) },
+        },
+        { attempts: 3 },
+      );
       setNotice('设置已保存，API 密钥不会回传到浏览器。');
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '保存失败');
@@ -1449,23 +1902,56 @@ function LlmSettings() {
 }
 
 function Records({ kind }: { kind: 'reviews' | 'logs' }) {
-  const records = useLoad<Array<Record<string, unknown>>>(`/${kind}`, []);
   const [logLevel, setLogLevel] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
+  const [logPage, setLogPage] = useState(1);
+  const reviewRecords = useLoad<Array<Record<string, unknown>>>('/reviews', []);
+  const logs = useLoad<LogPage>(
+    `/logs?page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel)}&search=${encodeURIComponent(logSearch)}`,
+    { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 },
+  );
+  const records = kind === 'reviews' ? reviewRecords : logs;
   const visibleRecords =
     kind === 'reviews'
-      ? records.data.filter((record) => record.status === 'pending')
-      : logLevel !== 'all'
-        ? records.data.filter((record) => String(record.level ?? 'info') === logLevel)
-        : records.data;
+      ? reviewRecords.data.filter((record) => record.status === 'pending')
+      : logs.data.items;
   const decide = async (taskId: string, decision: 'approve' | 'reject') => {
-    await api(`/reviews/${taskId}/decision`, { method: 'POST', json: { decision } });
-    await records.reload();
+    const previous = reviewRecords.data;
+    reviewRecords.setData((current) =>
+      current.map((record) =>
+        record.taskId === taskId
+          ? { ...record, status: decision === 'approve' ? 'approved' : 'rejected' }
+          : record,
+      ),
+    );
+    try {
+      await apiRetry(
+        `/reviews/${taskId}/decision`,
+        { method: 'POST', json: { decision } },
+        { attempts: 3 },
+      );
+      reviewRecords.setError('');
+    } catch (cause) {
+      reviewRecords.setData(previous);
+      reviewRecords.setError(cause instanceof Error ? cause.message : '审核操作失败');
+    }
   };
   const clearReviews = async () => {
     if (!window.confirm('确定清除全部人工审核记录吗？仍在等待的消息将不会继续转发。')) return;
-    await api('/reviews', { method: 'DELETE' });
-    await records.reload();
+    const previous = reviewRecords.data;
+    reviewRecords.setData([]);
+    try {
+      await apiRetry('/reviews', { method: 'DELETE' }, { attempts: 3 });
+      reviewRecords.setError('');
+    } catch (cause) {
+      reviewRecords.setData(previous);
+      reviewRecords.setError(cause instanceof Error ? cause.message : '清除审核记录失败');
+    }
   };
+  const refresh = () =>
+    void (kind === 'reviews'
+      ? reviewRecords.reload({ background: true })
+      : logs.reload({ background: true }));
   return (
     <div className="panel">
       <PanelTitle
@@ -1478,30 +1964,48 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
         action={
           <div className="log-actions">
             {kind === 'logs' && (
-              <select value={logLevel} onChange={(event) => setLogLevel(event.target.value)}>
-                <option value="all">全部级别</option>
-                <option value="debug">Debug</option>
-                <option value="info">Info</option>
-                <option value="warn">Warn</option>
-                <option value="error">Error</option>
-              </select>
+              <>
+                <input
+                  className="log-search"
+                  value={logSearch}
+                  placeholder="搜索日志"
+                  onChange={(event) => {
+                    setLogSearch(event.target.value);
+                    setLogPage(1);
+                  }}
+                />
+                <select
+                  value={logLevel}
+                  onChange={(event) => {
+                    setLogLevel(event.target.value);
+                    setLogPage(1);
+                  }}
+                >
+                  <option value="all">全部级别</option>
+                  <option value="debug">Debug</option>
+                  <option value="info">Info</option>
+                  <option value="warn">Warn</option>
+                  <option value="error">Error</option>
+                </select>
+              </>
             )}
             {kind === 'reviews' && (
               <button
                 className="clear-button"
-                disabled={!records.data.length}
+                disabled={!reviewRecords.data.length}
                 onClick={() => void clearReviews()}
               >
                 <Trash2 size={15} />
                 一键清除
               </button>
             )}
-            <button className="icon-button" onClick={() => void records.reload()}>
+            <button className="icon-button" onClick={refresh}>
               <RefreshCw size={16} />
             </button>
           </div>
         }
       />
+      {records.error && <div className="error">{records.error}</div>}
       {records.loading && (
         <LoadingState text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
       )}
@@ -1539,6 +2043,29 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
           <Empty text={kind === 'reviews' ? '目前没有待处理内容' : '暂无日志'} />
         )}
       </div>
+      {kind === 'logs' && logs.data.totalPages > 1 && (
+        <div className="log-pagination">
+          <span>
+            第 {logs.data.page} / {logs.data.totalPages} 页 · 共 {logs.data.total} 条
+          </span>
+          <div>
+            <button
+              disabled={logs.data.page <= 1}
+              onClick={() => setLogPage((current) => Math.max(1, current - 1))}
+            >
+              上一页
+            </button>
+            <button
+              disabled={logs.data.page >= logs.data.totalPages}
+              onClick={() =>
+                setLogPage((current) => Math.min(logs.data.totalPages, current + 1))
+              }
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

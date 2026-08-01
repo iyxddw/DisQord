@@ -200,4 +200,35 @@ describe('central control-plane API', () => {
     expect(await central.store.list('moderation-review')).toEqual([]);
     await central.app.close();
   });
+
+  it('filters and paginates trace logs', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    for (let index = 0; index < 12; index += 1) {
+      await central.store.set('trace-log', randomUUID(), {
+        traceId: `trace-${index}`,
+        level: index % 2 === 0 ? 'info' : 'debug',
+        event: index % 2 === 0 ? 'message_received' : 'node_debug',
+        details: { index },
+        createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+      });
+    }
+
+    const firstPage = await central.app.inject({
+      method: 'GET',
+      url: '/api/logs?page=1&pageSize=10&level=info&search=message_received',
+      cookies: { disqord_session: token },
+    });
+    expect(firstPage.statusCode).toBe(200);
+    expect(firstPage.json()).toMatchObject({
+      page: 1,
+      pageSize: 10,
+      total: 6,
+      totalPages: 1,
+      items: expect.arrayContaining([
+        expect.objectContaining({ event: 'message_received', level: 'info' }),
+      ]),
+    });
+    await central.app.close();
+  });
 });

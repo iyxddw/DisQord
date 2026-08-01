@@ -801,9 +801,44 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       return await reply.code(400).send({ error: errorMessage(error) });
     }
   });
-  app.get('/api/logs', { preHandler: requireAdmin }, async () =>
-    (await options.store.list('trace-log')).map((entry) => entry.value),
-  );
+  app.get('/api/logs', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const query = z
+        .object({
+          page: z.coerce.number().int().min(1).default(1),
+          pageSize: z.coerce.number().int().min(10).max(200).default(50),
+          level: z.enum(['all', 'debug', 'info', 'warn', 'error']).default('all'),
+          search: z.string().trim().max(200).default(''),
+        })
+        .parse(request.query);
+      let records = (await options.store.list<Record<string, unknown>>('trace-log'))
+        .map((entry) => entry.value)
+        .sort((left, right) =>
+          String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? '')),
+        );
+      if (query.level !== 'all') {
+        records = records.filter((record) => String(record.level ?? 'info') === query.level);
+      }
+      if (query.search) {
+        const needle = query.search.toLocaleLowerCase();
+        records = records.filter((record) =>
+          JSON.stringify(record).toLocaleLowerCase().includes(needle),
+        );
+      }
+      const total = records.length;
+      const totalPages = Math.max(1, Math.ceil(total / query.pageSize));
+      const page = Math.min(query.page, totalPages);
+      return {
+        items: records.slice((page - 1) * query.pageSize, page * query.pageSize),
+        page,
+        pageSize: query.pageSize,
+        total,
+        totalPages,
+      };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
 
   const staticRoot = options.staticRoot ?? resolve(process.cwd(), 'apps', 'central-web', 'dist');
   if (existsSync(staticRoot)) {

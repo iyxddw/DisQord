@@ -1,4 +1,11 @@
-import { DatabaseSync } from 'node:sqlite';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname } from 'node:path';
 
 import { z } from 'zod';
 
@@ -28,97 +35,78 @@ export interface QueueItem<T = unknown> {
   readonly updatedAt: string;
 }
 
-interface QueueRow {
-  id: string;
-  kind: string;
-  payload_json: string;
-  status: string;
-  attempts: number;
-  created_at: string;
-  updated_at: string;
-}
+const storedItemSchema = z.object({
+  id: z.string().min(1),
+  kind: z.string().min(1),
+  payload: z.unknown(),
+  status: queueItemStatusSchema,
+  attempts: z.number().int().nonnegative(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+});
 
-export class SqliteTaskQueue {
-  readonly #database: DatabaseSync;
+const queueFileSchema = z.object({
+  version: z.literal(1),
+  items: z.array(storedItemSchema),
+});
 
-  constructor(databasePath: string) {
-    this.#database = new DatabaseSync(databasePath);
-    this.#database.exec('PRAGMA journal_mode = WAL;');
-    this.#database.exec('PRAGMA foreign_keys = ON;');
-    this.#migrate();
-  }
+type StoredItem = z.infer<typeof storedItemSchema>;
 
-  #migrate(): void {
-    this.#database.exec(`
-      CREATE TABLE IF NOT EXISTS queue_schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TEXT NOT NULL
-      );
+/**
+ * Small JSON-backed queue for the node processes.
+ *
+ * The project intentionally keeps runtime state as readable files. The old
+ * class name is exported below as a compatibility alias for existing imports.
+ */
+export class FileTaskQueue {
+  readonly #path: string;
+  readonly #items = new Map<string, StoredItem>();
 
-      CREATE TABLE IF NOT EXISTS queue_items (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (
-          status IN ('queued', 'processing', 'acknowledged', 'retrying', 'dead_letter')
-        ),
-        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE INDEX IF NOT EXISTS queue_items_status_created_idx
-      ON queue_items (status, created_at);
-
-      INSERT OR IGNORE INTO queue_schema_migrations (version, applied_at)
-      VALUES (1, datetime('now'));
-    `);
+  constructor(path: string) {
+    this.#path = path;
+    mkdirSync(dirname(path), { recursive: true });
+    this.#load();
   }
 
   enqueue(item: EnqueueItem): boolean {
+    if (this.#items.has(item.id)) return false;
     const now = new Date().toISOString();
-    const result = this.#database
-      .prepare(
-        `
-          INSERT OR IGNORE INTO queue_items (
-            id, kind, payload_json, status, attempts, created_at, updated_at
-          ) VALUES (?, ?, ?, 'queued', 0, ?, ?)
-        `,
-      )
-      .run(item.id, item.kind, JSON.stringify(item.payload), now, now);
-
-    return result.changes === 1;
+    this.#items.set(item.id, {
+      id: item.id,
+      kind: item.kind,
+      payload: item.payload,
+      status: 'queued',
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.#flush();
+    return true;
   }
 
   get<T = unknown>(id: string): QueueItem<T> | undefined {
-    const row = this.#database
-      .prepare(
-        `
-          SELECT id, kind, payload_json, status, attempts, created_at, updated_at
-          FROM queue_items
-          WHERE id = ?
-        `,
-      )
-      .get(id) as unknown as QueueRow | undefined;
+    const item = this.#items.get(id);
+    return item ? this.#mapItem<T>(item) : undefined;
+  }
 
-    return row ? this.#mapRow<T>(row) : undefined;
+  updatePayload<T>(id: string, payload: T): void {
+    const current = this.#items.get(id);
+    if (!current) throw new Error(`Queue item ${id} does not exist.`);
+    this.#items.set(id, {
+      ...current,
+      payload,
+      updatedAt: new Date().toISOString(),
+    });
+    this.#flush();
   }
 
   listRecoverable<T = unknown>(limit = 100): QueueItem<T>[] {
     const safeLimit = z.number().int().positive().max(10_000).parse(limit);
-    const rows = this.#database
-      .prepare(
-        `
-          SELECT id, kind, payload_json, status, attempts, created_at, updated_at
-          FROM queue_items
-          WHERE status IN ('queued', 'processing', 'retrying')
-          ORDER BY created_at ASC
-          LIMIT ?
-        `,
-      )
-      .all(safeLimit) as unknown as QueueRow[];
-
-    return rows.map((row) => this.#mapRow<T>(row));
+    return [...this.#items.values()]
+      .filter((item) => ['queued', 'processing', 'retrying'].includes(item.status))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .slice(0, safeLimit)
+      .map((item) => this.#mapItem<T>(item));
   }
 
   markProcessing(id: string): void {
@@ -138,7 +126,30 @@ export class SqliteTaskQueue {
   }
 
   close(): void {
-    this.#database.close();
+    this.#flush();
+  }
+
+  #load(): void {
+    if (!existsSync(this.#path)) return;
+    try {
+      const parsed = queueFileSchema.parse(JSON.parse(readFileSync(this.#path, 'utf8')));
+      for (const item of parsed.items) this.#items.set(item.id, item);
+    } catch (error) {
+      throw new Error(
+        `Queue file ${this.#path} is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
+  #flush(): void {
+    const temporaryPath = `${this.#path}.tmp`;
+    writeFileSync(
+      temporaryPath,
+      JSON.stringify({ version: 1, items: [...this.#items.values()] }, null, 2),
+      'utf8',
+    );
+    renameSync(temporaryPath, this.#path);
   }
 
   #transition(
@@ -147,32 +158,31 @@ export class SqliteTaskQueue {
     to: QueueItemStatus,
     incrementAttempts: boolean,
   ): void {
-    const placeholders = from.map(() => '?').join(', ');
-    const attemptSql = incrementAttempts ? 'attempts = attempts + 1,' : '';
-    const result = this.#database
-      .prepare(
-        `
-          UPDATE queue_items
-          SET status = ?, ${attemptSql} updated_at = ?
-          WHERE id = ? AND status IN (${placeholders})
-        `,
-      )
-      .run(to, new Date().toISOString(), id, ...from);
-
-    if (result.changes !== 1) {
+    const current = this.#items.get(id);
+    if (!current || !from.includes(current.status)) {
       throw new Error(`Queue item ${id} cannot transition to ${to}.`);
     }
+    this.#items.set(id, {
+      ...current,
+      status: to,
+      attempts: incrementAttempts ? current.attempts + 1 : current.attempts,
+      updatedAt: new Date().toISOString(),
+    });
+    this.#flush();
   }
 
-  #mapRow<T>(row: QueueRow): QueueItem<T> {
+  #mapItem<T>(item: StoredItem): QueueItem<T> {
     return {
-      id: row.id,
-      kind: row.kind,
-      payload: JSON.parse(row.payload_json) as T,
-      status: queueItemStatusSchema.parse(row.status),
-      attempts: row.attempts,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      id: item.id,
+      kind: item.kind,
+      payload: item.payload as T,
+      status: item.status,
+      attempts: item.attempts,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
     };
   }
 }
+
+/** @deprecated Use FileTaskQueue. Kept for source compatibility. */
+export class SqliteTaskQueue extends FileTaskQueue {}

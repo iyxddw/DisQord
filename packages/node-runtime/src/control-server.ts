@@ -3,6 +3,8 @@ import { stat } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 
+import type { NodeLogPage, NodeLogQuery } from './logger.js';
+
 export interface NodeControlStatus {
   readonly program: 'qq-node' | 'discord-node';
   readonly state: 'starting' | 'connected' | 'retrying' | 'stopped';
@@ -10,6 +12,7 @@ export interface NodeControlStatus {
   readonly centralUrl: string;
   readonly platformConnected: boolean;
   readonly startedAt: string;
+  readonly logPath?: string;
 }
 
 export interface NodeControlServerOptions {
@@ -19,6 +22,7 @@ export interface NodeControlServerOptions {
   readonly adminToken?: string;
   readonly getStatus: () => NodeControlStatus;
   readonly refreshSessions: () => Promise<void>;
+  readonly getLogs?: (query: NodeLogQuery) => NodeLogPage;
 }
 
 export class NodeControlServer {
@@ -72,6 +76,10 @@ export class NodeControlServer {
           await this.#options.refreshSessions();
           return json(response, 200, { ok: true });
         }
+        if (method === 'GET' && parsed.pathname === '/api/node/logs') {
+          if (!this.#options.getLogs) return json(response, 404, { error: 'Logs unavailable.' });
+          return json(response, 200, this.#options.getLogs(parseLogQuery(parsed.searchParams)));
+        }
         return json(response, 404, { error: 'API route not found.' });
       }
       await this.#serveStatic(parsed.pathname, response);
@@ -103,6 +111,20 @@ export class NodeControlServer {
     );
     createReadStream(selected).pipe(response);
   }
+}
+
+function parseLogQuery(params: URLSearchParams): NodeLogQuery {
+  const page = Number(params.get('page') ?? '1');
+  const pageSize = Number(params.get('pageSize') ?? '50');
+  const level = params.get('level') ?? 'all';
+  return {
+    ...(Number.isFinite(page) ? { page } : {}),
+    ...(Number.isFinite(pageSize) ? { pageSize } : {}),
+    ...(level === 'debug' || level === 'info' || level === 'warn' || level === 'error'
+      ? { level }
+      : { level: 'all' }),
+    ...(params.get('search') ? { search: params.get('search') ?? '' } : {}),
+  };
 }
 
 function json(response: ServerResponse, status: number, body: unknown): void {

@@ -16,7 +16,8 @@ export const program = createProgramDescriptor('discord-node');
 const envSchema = z.object({
   CENTRAL_WSS_URL: z.url(),
   NODE_CONFIG_PATH: z.string().min(1).default('./data/discord-node.json'),
-  NODE_QUEUE_PATH: z.string().min(1).default('./data/discord-queue.sqlite'),
+  NODE_QUEUE_PATH: z.string().min(1).default('./data/discord-queue.json'),
+  NODE_LOG_PATH: z.string().min(1).default('./logs/discord-node.jsonl'),
   ALLOW_INSECURE_CENTRAL: z.enum(['true', 'false']).default('false'),
   DISCORD_BOT_TOKEN: z.string().min(1),
   NODE_WEB_HOST: z.string().default('127.0.0.1'),
@@ -78,6 +79,7 @@ export async function startDiscordNode(
     centralUrl: env.CENTRAL_WSS_URL,
     configPath: resolve(env.NODE_CONFIG_PATH),
     queuePath: resolve(env.NODE_QUEUE_PATH),
+    logPath: resolve(env.NODE_LOG_PATH),
     allowInsecureCentral: env.ALLOW_INSECURE_CENTRAL === 'true',
     createAdapter: (identity) => new DiscordPlatformAdapter(identity.nodeId, env.DISCORD_BOT_TOKEN),
     onStatus: ({ state, detail }) => {
@@ -98,8 +100,10 @@ export async function startDiscordNode(
       centralUrl: env.CENTRAL_WSS_URL,
       platformConnected,
       startedAt,
+      logPath: resolve(env.NODE_LOG_PATH),
     }),
     refreshSessions: async () => await runtime.refreshSessions(),
+    getLogs: (query) => runtime.listLogs(query),
   });
   await control.listen();
   try {

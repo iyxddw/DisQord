@@ -16,7 +16,8 @@ export const program = createProgramDescriptor('qq-node');
 const envSchema = z.object({
   CENTRAL_WSS_URL: z.url(),
   NODE_CONFIG_PATH: z.string().min(1).default('./data/qq-node.json'),
-  NODE_QUEUE_PATH: z.string().min(1).default('./data/qq-queue.sqlite'),
+  NODE_QUEUE_PATH: z.string().min(1).default('./data/qq-queue.json'),
+  NODE_LOG_PATH: z.string().min(1).default('./logs/qq-node.jsonl'),
   ALLOW_INSECURE_CENTRAL: z.enum(['true', 'false']).default('false'),
   NAPCAT_ONEBOT_WS_URL: z.url(),
   NAPCAT_ACCESS_TOKEN: z.string().optional(),
@@ -80,6 +81,7 @@ export async function startQqNode(environment: NodeJS.ProcessEnv = process.env):
     centralUrl: env.CENTRAL_WSS_URL,
     configPath: resolve(env.NODE_CONFIG_PATH),
     queuePath: resolve(env.NODE_QUEUE_PATH),
+    logPath: resolve(env.NODE_LOG_PATH),
     allowInsecureCentral: env.ALLOW_INSECURE_CENTRAL === 'true',
     createAdapter: (identity) => {
       return new QqPlatformAdapter(
@@ -106,8 +108,10 @@ export async function startQqNode(environment: NodeJS.ProcessEnv = process.env):
       centralUrl: env.CENTRAL_WSS_URL,
       platformConnected,
       startedAt,
+      logPath: resolve(env.NODE_LOG_PATH),
     }),
     refreshSessions: async () => await runtime.refreshSessions(),
+    getLogs: (query) => runtime.listLogs(query),
   });
   await control.listen();
   try {

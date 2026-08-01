@@ -82,7 +82,7 @@ corepack prepare pnpm@10.14.0 --activate
 
 ```bash
 cd ~/DisQord
-mkdir -p data
+mkdir -p data logs
 
 export CENTRAL_HOST=0.0.0.0
 export CENTRAL_PORT=18080
@@ -132,13 +132,14 @@ http://中央服务器地址:18080
 
 ```bash
 cd ~/DisQord
-mkdir -p data
+mkdir -p data logs
 
 export CENTRAL_WSS_URL=ws://127.0.0.1:18080/node
 export ALLOW_INSECURE_CENTRAL=true
 export DISCORD_BOT_TOKEN='你的 Bot Token'
 export NODE_CONFIG_PATH=./data/discord-node.json
-export NODE_QUEUE_PATH=./data/discord-queue.sqlite
+export NODE_QUEUE_PATH=./data/discord-queue.json
+export NODE_LOG_PATH=./logs/discord-node.jsonl
 export NODE_WEB_HOST=127.0.0.1
 export NODE_WEB_PORT=8091
 export NODE_WEB_TOKEN='至少16位的管理口令'
@@ -169,7 +170,8 @@ export ALLOW_INSECURE_CENTRAL=true
 export NAPCAT_ONEBOT_WS_URL=ws://127.0.0.1:3001
 export NAPCAT_ACCESS_TOKEN='NapCat 中设置的 Token'
 export NODE_CONFIG_PATH=./data/qq-node.json
-export NODE_QUEUE_PATH=./data/qq-queue.sqlite
+export NODE_QUEUE_PATH=./data/qq-queue.json
+export NODE_LOG_PATH=./logs/qq-node.jsonl
 export NODE_WEB_HOST=127.0.0.1
 export NODE_WEB_PORT=8090
 export NODE_WEB_TOKEN='至少16位的管理口令'
@@ -179,6 +181,10 @@ pnpm --filter @disqord/qq-node start
 ```
 
 不要把 NapCat 的 OneBot 端口开放到公网。中央服务器只需要访问 QQ Node 主动建立的连接。
+
+节点队列现在以可读的 JSON 文件保存，客户端日志以 JSONL 写入 `~/DisQord/logs/`，也可以在节点控制
+面板按等级和关键词查看。升级旧版本时，请把仍指向 `*.sqlite` 的 `NODE_QUEUE_PATH` 改成上面的
+`*.json` 路径；旧队列文件不会自动迁移，建议先停掉节点并备份后再切换。
 
 ## 控制面板配置顺序
 

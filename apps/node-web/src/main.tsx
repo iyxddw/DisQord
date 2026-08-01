@@ -21,12 +21,39 @@ interface Status {
   centralUrl: string;
   platformConnected: boolean;
   startedAt: string;
+  logPath?: string;
+}
+
+interface NodeLogRecord {
+  createdAt: string;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  event: string;
+  details?: Record<string, unknown>;
+}
+
+interface NodeLogPage {
+  items: NodeLogRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
 function App() {
   const [status, setStatus] = useState<Status>();
   const [error, setError] = useState('');
   const [token, setToken] = useState(sessionStorage.getItem('node-token') ?? '');
+  const [logs, setLogs] = useState<NodeLogPage>({
+    items: [],
+    page: 1,
+    pageSize: 50,
+    total: 0,
+    totalPages: 1,
+  });
+  const [logLevel, setLogLevel] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
+  const [logPage, setLogPage] = useState(1);
+  const [logError, setLogError] = useState('');
   const load = async () => {
     try {
       const response = await fetch('/api/node/status', {
@@ -45,6 +72,29 @@ function App() {
     const timer = setInterval(() => void load(), 5000);
     return () => clearInterval(timer);
   }, [token]);
+  useEffect(() => {
+    const loadLogs = async () => {
+      try {
+        const query = new URLSearchParams({
+          page: String(logPage),
+          pageSize: '50',
+          level: logLevel,
+          search: logSearch,
+        });
+        const response = await fetch(`/api/node/logs?${query.toString()}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!response.ok) throw new Error(response.status === 401 ? '需要节点面板令牌' : '读取日志失败');
+        setLogs((await response.json()) as NodeLogPage);
+        setLogError('');
+      } catch (cause) {
+        setLogError(cause instanceof Error ? cause.message : '读取日志失败');
+      }
+    };
+    void loadLogs();
+    const timer = setInterval(() => void loadLogs(), 5000);
+    return () => clearInterval(timer);
+  }, [logLevel, logPage, logSearch, token]);
   const saveToken = (value: string) => {
     setToken(value);
     sessionStorage.setItem('node-token', value);
@@ -134,6 +184,72 @@ function App() {
           <Check label="中央安全通道已认证" ok={status?.state === 'connected'} />
         </div>
         {status?.detail && <pre>{status.detail}</pre>}
+      </section>
+      <section className="panel node-logs">
+        <div className="panel-head">
+          <div>
+            <h2>客户端日志</h2>
+            <p>按等级和关键词搜索本机 JSONL 日志；文件：{status?.logPath ?? '等待启动'}</p>
+          </div>
+          <div className="log-controls">
+            <input
+              placeholder="搜索事件或内容"
+              value={logSearch}
+              onChange={(event) => {
+                setLogSearch(event.target.value);
+                setLogPage(1);
+              }}
+            />
+            <select
+              value={logLevel}
+              onChange={(event) => {
+                setLogLevel(event.target.value);
+                setLogPage(1);
+              }}
+            >
+              <option value="all">全部级别</option>
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+        </div>
+        {logError && <div className="alert">{logError}</div>}
+        <div className="node-log-list">
+          {logs.items.map((record, index) => (
+            <article className={`node-log ${record.level}`} key={`${record.createdAt}-${index}`}>
+              <div>
+                <strong>{record.event}</strong>
+                <span>{record.level.toUpperCase()}</span>
+                <time>{new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}</time>
+              </div>
+              {record.details && <pre>{JSON.stringify(record.details, null, 2)}</pre>}
+            </article>
+          ))}
+          {!logs.items.length && !logError && <p className="muted">暂无匹配日志</p>}
+        </div>
+        {logs.totalPages > 1 && (
+          <div className="node-log-pagination">
+            <span>第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条</span>
+            <div>
+              <button
+                disabled={logs.page <= 1}
+                onClick={() => setLogPage((current) => Math.max(1, current - 1))}
+              >
+                上一页
+              </button>
+              <button
+                disabled={logs.page >= logs.totalPages}
+                onClick={() =>
+                  setLogPage((current) => Math.min(logs.totalPages, current + 1))
+                }
+              >
+                下一页
+              </button>
+            </div>
+          </div>
+        )}
       </section>
       <section className="panel token-panel">
         <div>
