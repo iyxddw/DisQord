@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
@@ -560,8 +561,14 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
     updateNodeData(id, patch);
     data.onDraftChange?.();
   };
+  const progressStyle =
+    data.simulation?.state === 'active'
+      ? ({
+          '--simulation-progress': `${Math.max(0, Math.min(100, data.simulation.progress ?? 0))}%`,
+        } as CSSProperties)
+      : undefined;
   return (
-    <div className={`flow-node ${data.kind} ${data.simulation?.state ?? ''}`}>
+    <div className={`flow-node ${data.kind} ${data.simulation?.state ?? ''}`} style={progressStyle}>
       {data.savePrompt && (
         <div className="flow-save-prompt nodrag nopan" role="dialog">
           <strong>当前蓝图有未发布修改</strong>
@@ -587,20 +594,6 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
       )}
       {data.simulation && (
         <div className={`flow-simulation-note ${data.simulation.state}`} role="status">
-          <div className="flow-simulation-progress" aria-label="节点运行进度">
-            <span
-              style={{
-                width: `${Math.max(0, Math.min(100, data.simulation.progress ?? (data.simulation.state === 'done' ? 100 : 0)))}%`,
-              }}
-            />
-          </div>
-          <div className="flow-simulation-progress-label">
-            {data.simulation.state === 'active'
-              ? `${Math.round(data.simulation.progress ?? 0)}%`
-              : data.simulation.state === 'done'
-                ? '完成'
-                : '失败'}
-          </div>
           {data.simulation.message}
         </div>
       )}
@@ -731,7 +724,7 @@ type MobileBlueprintFlowProps = {
   onDeleteNode: (nodeId: string) => void;
   onConnect: (sourceId: string, targetId: string, sourceHandle?: string) => void;
   onMoveNode: (nodeId: string, direction: 'up' | 'down') => void;
-  onMoveNodePosition: (nodeId: string, y: number) => void;
+  onReorderNodes: (nodeIds: string[]) => void;
   onSimulate: (nodeId: string, text: string) => Promise<void>;
   onDraftChange: () => void;
   pendingSimulation?: { nodeId: string; text: string };
@@ -748,7 +741,7 @@ function MobileBlueprintFlow({
   onDeleteNode,
   onConnect,
   onMoveNode,
-  onMoveNodePosition,
+  onReorderNodes,
   onSimulate,
   onDraftChange,
   pendingSimulation,
@@ -760,7 +753,12 @@ function MobileBlueprintFlow({
   const [rootId, setRootId] = useState('');
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [draggingId, setDraggingId] = useState('');
-  const [dragOffset, setDragOffset] = useState(0);
+  const [dragVisual, setDragVisual] = useState<
+    { top: number; left: number; width: number; height: number } | undefined
+  >();
+  const [manualOrder, setManualOrder] = useState<string[]>([]);
+  const manualOrderRef = useRef<string[]>([]);
+  const flowRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<
     | {
         nodeId: string;
@@ -768,7 +766,11 @@ function MobileBlueprintFlow({
         startY: number;
         lastX: number;
         lastY: number;
-        baseY: number;
+        grabOffsetY: number;
+        left: number;
+        width: number;
+        height: number;
+        order: string[];
         targetId?: string;
         active: boolean;
         timer: number;
@@ -789,60 +791,80 @@ function MobileBlueprintFlow({
     return map;
   }, [edges]);
 
-  const [manualOrder, setManualOrder] = useState<string[]>([]);
+  const updateDragVisual = useCallback((drag: NonNullable<typeof dragRef.current>) => {
+    const container = flowRef.current?.getBoundingClientRect();
+    if (!container) return;
+    const minimumTop = Math.max(8, container.top);
+    const maximumTop = Math.max(
+      minimumTop,
+      Math.min(window.innerHeight - drag.height - 8, container.bottom - drag.height),
+    );
+    setDragVisual({
+      top: Math.max(minimumTop, Math.min(maximumTop, drag.lastY - drag.grabOffsetY)),
+      left: drag.left,
+      width: drag.width,
+      height: drag.height,
+    });
+  }, []);
+
+  const reorderDraggedNode = useCallback((sourceId: string, targetId: string) => {
+    const current = manualOrderRef.current;
+    const from = current.indexOf(sourceId);
+    const to = current.indexOf(targetId);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = [...current];
+    next.splice(from, 1);
+    next.splice(to, 0, sourceId);
+    manualOrderRef.current = next;
+    const drag = dragRef.current;
+    if (drag?.nodeId === sourceId) drag.order = next;
+    setManualOrder(next);
+  }, []);
 
   const stopMobileDrag = useCallback(() => {
     const drag = dragRef.current;
     if (!drag) return;
     window.clearTimeout(drag.timer);
-    if (drag.active) {
-      onMoveNodePosition(drag.nodeId, Math.max(20, drag.baseY + (drag.lastY - drag.startY)));
-      const targetId = drag.targetId;
-      if (targetId && targetId !== drag.nodeId) {
-        setManualOrder((current) => {
-          const order = [...current];
-          const from = order.indexOf(drag.nodeId);
-          const to = order.indexOf(targetId);
-          if (from < 0 || to < 0 || from === to) return current;
-          order.splice(from, 1);
-          order.splice(to, 0, drag.nodeId);
-          return order;
-        });
-      }
-    }
+    if (drag.active) onReorderNodes(drag.order);
     dragRef.current = undefined;
     setDraggingId('');
-    setDragOffset(0);
+    setDragVisual(undefined);
     document.body.classList.remove('mobile-blueprint-dragging');
-  }, [onMoveNodePosition]);
+  }, [onReorderNodes]);
 
   const startMobileDrag = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>, nodeId: string) => {
       if (event.pointerType === 'mouse' && event.button !== 0) return;
-      const node = nodes.find((item) => item.id === nodeId);
-      if (!node) return;
+      const card = event.currentTarget.closest<HTMLElement>('[data-mobile-flow-card]');
+      if (!card) return;
+      const rect = card.getBoundingClientRect();
       const previous = dragRef.current;
       if (previous) window.clearTimeout(previous.timer);
+      const pointerId = event.pointerId;
       const timer = window.setTimeout(() => {
         const drag = dragRef.current;
-        if (!drag || drag.pointerId !== event.pointerId) return;
+        if (!drag || drag.pointerId !== pointerId) return;
         drag.active = true;
         setDraggingId(nodeId);
-        setDragOffset(0);
+        updateDragVisual(drag);
         document.body.classList.add('mobile-blueprint-dragging');
       }, 320);
       dragRef.current = {
         nodeId,
-        pointerId: event.pointerId,
+        pointerId,
         startY: event.clientY,
         lastX: event.clientX,
         lastY: event.clientY,
-        baseY: node.position.y,
+        grabOffsetY: event.clientY - rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+        order: [...manualOrderRef.current],
         active: false,
         timer,
       };
     },
-    [nodes],
+    [updateDragVisual],
   );
 
   useEffect(() => {
@@ -859,12 +881,19 @@ function MobileBlueprintFlow({
         return;
       }
       event.preventDefault();
+      updateDragVisual(drag);
       const target = document
-        .elementFromPoint(event.clientX, event.clientY)
-        ?.closest<HTMLElement>('[data-mobile-flow-card]')
-        ?.getAttribute('data-mobile-flow-card');
-      if (target) drag.targetId = target;
-      setDragOffset(event.clientY - drag.startY);
+        .elementsFromPoint(event.clientX, event.clientY)
+        .map((element) =>
+          element
+            .closest<HTMLElement>('[data-mobile-flow-card]')
+            ?.getAttribute('data-mobile-flow-card'),
+        )
+        .find((id) => id && id !== drag.nodeId);
+      if (target && target !== drag.targetId) {
+        drag.targetId = target;
+        reorderDraggedNode(drag.nodeId, target);
+      }
     };
     const onEnd = (event: PointerEvent) => {
       const drag = dragRef.current;
@@ -880,18 +909,28 @@ function MobileBlueprintFlow({
       document.removeEventListener('pointercancel', onEnd);
       stopMobileDrag();
     };
-  }, [stopMobileDrag]);
+  }, [reorderDraggedNode, stopMobileDrag, updateDragVisual]);
 
   useEffect(() => {
     if (!draggingId) return;
     const timer = window.setInterval(() => {
       const y = dragRef.current?.lastY ?? 0;
+      const drag = dragRef.current;
+      const container = flowRef.current?.getBoundingClientRect();
+      if (!drag || !container) return;
       const edge = 90;
-      if (y > 0 && y < edge) window.scrollBy({ top: -12, behavior: 'auto' });
-      else if (y > window.innerHeight - edge) window.scrollBy({ top: 12, behavior: 'auto' });
+      if (y > 0 && y < edge && container.top < 8) {
+        window.scrollBy({ top: -Math.max(4, Math.round((edge - y) / 5)), behavior: 'auto' });
+      } else if (y > window.innerHeight - edge && container.bottom > window.innerHeight - 8) {
+        window.scrollBy({
+          top: Math.max(4, Math.round((y - (window.innerHeight - edge)) / 5)),
+          behavior: 'auto',
+        });
+      }
+      updateDragVisual(drag);
     }, 16);
     return () => window.clearInterval(timer);
-  }, [draggingId]);
+  }, [draggingId, updateDragVisual]);
 
   useEffect(() => {
     if (!rootId || !nodes.some((node) => node.id === rootId)) {
@@ -929,9 +968,12 @@ function MobileBlueprintFlow({
         ...current.filter((id) => ids.includes(id)),
         ...ids.filter((id) => !current.includes(id)),
       ];
-      return next.length === current.length && next.every((id, index) => id === current[index])
-        ? current
-        : next;
+      if (next.length === current.length && next.every((id, index) => id === current[index])) {
+        manualOrderRef.current = current;
+        return current;
+      }
+      manualOrderRef.current = next;
+      return next;
     });
   }, [path]);
   const orderedPath = useMemo(() => {
@@ -952,7 +994,7 @@ function MobileBlueprintFlow({
   }
 
   return (
-    <div className="mobile-blueprint-flow">
+    <div className="mobile-blueprint-flow" ref={flowRef}>
       <div className="mobile-flow-heading">
         <div>
           <strong>流程预览</strong>
@@ -977,11 +1019,19 @@ function MobileBlueprintFlow({
         {orderedPath.map((node, index) => {
           const branches = outgoing.get(node.id) ?? [];
           return (
-            <div className="mobile-flow-step" key={node.id}>
+            <div
+              className={`mobile-flow-step ${draggingId === node.id ? 'is-dragging-placeholder' : ''}`}
+              key={node.id}
+              style={
+                draggingId === node.id && dragVisual
+                  ? { minHeight: `${dragVisual.height}px` }
+                  : undefined
+              }
+            >
               <MobileFlowCard
                 node={node}
                 dragging={draggingId === node.id}
-                dragOffset={draggingId === node.id ? dragOffset : 0}
+                dragVisual={draggingId === node.id ? dragVisual : undefined}
                 savePrompt={pendingSimulation?.nodeId === node.id}
                 onPatch={onPatchNode}
                 onDelete={onDeleteNode}
@@ -1032,7 +1082,7 @@ function MobileBlueprintFlow({
               key={node.id}
               node={node}
               dragging={draggingId === node.id}
-              dragOffset={draggingId === node.id ? dragOffset : 0}
+              dragVisual={draggingId === node.id ? dragVisual : undefined}
               savePrompt={pendingSimulation?.nodeId === node.id}
               onPatch={onPatchNode}
               onDelete={onDeleteNode}
@@ -1058,7 +1108,7 @@ function MobileBlueprintFlow({
 function MobileFlowCard({
   node,
   dragging,
-  dragOffset,
+  dragVisual,
   savePrompt,
   onPatch,
   onDelete,
@@ -1076,7 +1126,7 @@ function MobileFlowCard({
 }: {
   node: Node<FlowData>;
   dragging: boolean;
-  dragOffset: number;
+  dragVisual: { top: number; left: number; width: number; height: number } | undefined;
   savePrompt: boolean;
   onPatch: (nodeId: string, patch: Partial<FlowData>) => void;
   onDelete: (nodeId: string) => void;
@@ -1098,10 +1148,21 @@ function MobileFlowCard({
     onPatch(node.id, value);
     onDraftChange();
   };
+  const cardStyle = {
+    '--simulation-progress': `${Math.max(0, Math.min(100, data.simulation?.state === 'active' ? (data.simulation.progress ?? 0) : 0))}%`,
+    ...(dragging && dragVisual
+      ? {
+          position: 'fixed',
+          top: dragVisual.top,
+          left: dragVisual.left,
+          width: dragVisual.width,
+        }
+      : {}),
+  } as CSSProperties;
   return (
     <article
       className={`mobile-flow-card ${data.kind} ${data.simulation?.state ?? ''} ${dragging ? 'is-dragging' : ''}`}
-      style={dragging ? { transform: `translateY(${dragOffset}px)` } : undefined}
+      style={cardStyle}
       data-mobile-flow-card={node.id}
     >
       {savePrompt && (
@@ -1151,23 +1212,6 @@ function MobileFlowCard({
       <strong>{data.label}</strong>
       {data.simulation && (
         <div className="mobile-flow-activity">
-          <div className="mobile-flow-progress-head">
-            <span>节点运行中</span>
-            <b>
-              {data.simulation.state === 'active'
-                ? `${Math.round(data.simulation.progress ?? 0)}%`
-                : data.simulation.state === 'done'
-                  ? '完成'
-                  : '失败'}
-            </b>
-          </div>
-          <div className="mobile-flow-progress" aria-label="节点运行进度">
-            <span
-              style={{
-                width: `${Math.max(0, Math.min(100, data.simulation.progress ?? (data.simulation.state === 'done' ? 100 : 0)))}%`,
-              }}
-            />
-          </div>
           <p>{data.simulation.message}</p>
         </div>
       )}
@@ -1329,11 +1373,19 @@ function BlueprintEditor() {
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
 
   const onNodesChange = (changes: Parameters<typeof onNodesChangeBase>[0]) => {
-    if (changes.length) setDraftDirty(true);
+    if (
+      changes.some(
+        (change) =>
+          ['add', 'remove', 'replace'].includes(change.type) ||
+          (change.type === 'position' && change.dragging !== undefined),
+      )
+    )
+      setDraftDirty(true);
     onNodesChangeBase(changes);
   };
   const onEdgesChange = (changes: Parameters<typeof onEdgesChangeBase>[0]) => {
-    if (changes.length) setDraftDirty(true);
+    if (changes.some((change) => ['add', 'remove', 'replace'].includes(change.type)))
+      setDraftDirty(true);
     onEdgesChangeBase(changes);
   };
 
@@ -1349,20 +1401,29 @@ function BlueprintEditor() {
     if (!currentBlueprintId) return;
     let cancelled = false;
     let initialized = false;
-    let polling = false;
+    const controller = new AbortController();
     activityCursor.current = '';
     activityQueue.current = [];
 
     const progressTimers = new Set<number>();
-    const waitWithProgress = (nodeId: string, delayMs: number) =>
+    const waitWithProgress = (
+      nodeId: string,
+      startProgress: number,
+      endProgress: number,
+      delayMs: number,
+    ) =>
       new Promise<void>((resolve) => {
         const duration = Math.max(0, delayMs);
         const startedAt = performance.now();
         const update = () => {
           const progress =
             duration === 0
-              ? 100
-              : Math.min(100, ((performance.now() - startedAt) / duration) * 100);
+              ? endProgress
+              : Math.min(
+                  endProgress,
+                  startProgress +
+                    ((performance.now() - startedAt) / duration) * (endProgress - startProgress),
+                );
           if (!cancelled) {
             setNodes((current) =>
               current.map((node) =>
@@ -1375,7 +1436,7 @@ function BlueprintEditor() {
               ),
             );
           }
-          if (progress >= 100 || cancelled) {
+          if (progress >= endProgress || cancelled) {
             if (timer !== undefined) {
               window.clearInterval(timer);
               progressTimers.delete(timer);
@@ -1393,27 +1454,46 @@ function BlueprintEditor() {
       activityPlaying.current = true;
       while (!cancelled && activityQueue.current.length) {
         const activity = activityQueue.current.shift()!;
-        setNodes((current) =>
-          current.map((node) => ({
-            ...node,
-            data: {
-              ...node.data,
-              ...(node.id === activity.nodeId && activity.nodeType === 'simulated-output'
-                ? { outputText: activity.text ?? '' }
-                : {}),
-              simulation:
-                node.id === activity.nodeId
-                  ? { state: 'active' as const, message: activity.message, progress: 0 }
-                  : node.data.simulation?.state === 'active'
-                    ? { ...node.data.simulation, state: 'done' as const, progress: 100 }
-                    : node.data.simulation,
-            },
-          })),
-        );
-        await waitWithProgress(
-          activity.nodeId,
-          Math.max(0, simulationSettings.data.delayMs ?? 1_000),
-        );
+        const phase = activity.phase ?? 'completed';
+        const delay = Math.max(0, simulationSettings.data.delayMs ?? 1_000);
+        if (phase === 'entered') {
+          setNodes((current) =>
+            current.map((node) => ({
+              ...node,
+              data: {
+                ...node.data,
+                simulation:
+                  node.id === activity.nodeId
+                    ? { state: 'active' as const, message: activity.message, progress: 0 }
+                    : node.data.simulation?.state === 'active'
+                      ? { ...node.data.simulation, state: 'done' as const, progress: 100 }
+                      : node.data.simulation,
+              },
+            })),
+          );
+          await waitWithProgress(activity.nodeId, 0, 92, delay);
+          continue;
+        }
+        if (phase === 'failed') {
+          setNodes((current) =>
+            current.map((node) =>
+              node.id === activity.nodeId
+                ? {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      simulation: {
+                        state: 'error' as const,
+                        message: activity.message,
+                        progress: 100,
+                      },
+                    },
+                  }
+                : node,
+            ),
+          );
+          continue;
+        }
         setNodes((current) =>
           current.map((node) =>
             node.id === activity.nodeId
@@ -1421,9 +1501,35 @@ function BlueprintEditor() {
                   ...node,
                   data: {
                     ...node.data,
-                    simulation: node.data.simulation
-                      ? { ...node.data.simulation, state: 'done' as const, progress: 100 }
-                      : undefined,
+                    ...(activity.nodeType === 'simulated-output'
+                      ? { outputText: activity.text ?? '' }
+                      : {}),
+                    simulation: {
+                      state: 'active' as const,
+                      message: activity.message,
+                      progress:
+                        node.data.simulation?.state === 'active'
+                          ? Math.max(92, node.data.simulation.progress ?? 0)
+                          : 0,
+                    },
+                  },
+                }
+              : node,
+          ),
+        );
+        await waitWithProgress(activity.nodeId, 92, 100, Math.min(280, delay));
+        setNodes((current) =>
+          current.map((node) =>
+            node.id === activity.nodeId
+              ? {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    simulation: {
+                      state: 'done' as const,
+                      message: activity.message,
+                      progress: 100,
+                    },
                   },
                 }
               : node,
@@ -1434,49 +1540,50 @@ function BlueprintEditor() {
     };
 
     const poll = async () => {
-      if (polling) return;
-      polling = true;
-      try {
-        const page = await api<BlueprintActivityPage>(
-          `/blueprints/${currentBlueprintId}/activity?cursor=${encodeURIComponent(activityCursor.current)}`,
-        );
-        if (cancelled) return;
-        activityCursor.current = page.cursor;
-        if (!initialized) {
-          initialized = true;
-          const latestOutputs = new Map<string, string>();
-          for (const activity of page.items) {
-            if (activity.nodeType === 'simulated-output') {
-              latestOutputs.set(activity.nodeId, activity.text ?? '');
+      while (!cancelled) {
+        try {
+          const page = await api<BlueprintActivityPage>(
+            `/blueprints/${currentBlueprintId}/activity?cursor=${encodeURIComponent(activityCursor.current)}&waitMs=${initialized ? 25_000 : 0}`,
+            { signal: controller.signal, retry: { attempts: 1 } },
+          );
+          if (cancelled) return;
+          activityCursor.current = page.cursor;
+          if (!initialized) {
+            initialized = true;
+            const latestOutputs = new Map<string, string>();
+            for (const activity of page.items) {
+              if (activity.nodeType === 'simulated-output' && activity.phase !== 'entered') {
+                latestOutputs.set(activity.nodeId, activity.text ?? '');
+              }
             }
+            if (latestOutputs.size) {
+              setNodes((current) =>
+                current.map((node) =>
+                  latestOutputs.has(node.id)
+                    ? {
+                        ...node,
+                        data: { ...node.data, outputText: latestOutputs.get(node.id) ?? '' },
+                      }
+                    : node,
+                ),
+              );
+            }
+            continue;
           }
-          if (latestOutputs.size) {
-            setNodes((current) =>
-              current.map((node) =>
-                latestOutputs.has(node.id)
-                  ? {
-                      ...node,
-                      data: { ...node.data, outputText: latestOutputs.get(node.id) ?? '' },
-                    }
-                  : node,
-              ),
-            );
+          if (page.items.length) {
+            activityQueue.current.push(...page.items);
+            void playQueued();
           }
-          return;
+        } catch (cause) {
+          if (cancelled || (cause instanceof DOMException && cause.name === 'AbortError')) return;
+          await new Promise((resolve) => window.setTimeout(resolve, 1_500));
         }
-        activityQueue.current.push(...page.items);
-        void playQueued();
-      } catch {
-        // 页面会继续轮询；短暂断线无需打断蓝图编辑。
-      } finally {
-        polling = false;
       }
     };
     void poll();
-    const timer = window.setInterval(() => void poll(), 700);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller.abort();
       activityQueue.current = [];
       activityPlaying.current = false;
       for (const timer of progressTimers) window.clearInterval(timer);
@@ -1825,13 +1932,15 @@ function BlueprintEditor() {
     );
   };
 
-  const moveMobileNodePosition = useCallback(
-    (nodeId: string, y: number) => {
+  const reorderMobileNodes = useCallback(
+    (nodeIds: string[]) => {
       setDraftDirty(true);
+      const positions = new Map(nodeIds.map((nodeId, index) => [nodeId, 70 + index * 180]));
       setNodes((current) =>
-        current.map((node) =>
-          node.id === nodeId ? { ...node, position: { ...node.position, y } } : node,
-        ),
+        current.map((node) => {
+          const y = positions.get(node.id);
+          return y === undefined ? node : { ...node, position: { ...node.position, y } };
+        }),
       );
     },
     [setNodes],
@@ -2106,7 +2215,7 @@ function BlueprintEditor() {
         }}
         onConnect={reconnectMobile}
         onMoveNode={moveMobileNode}
-        onMoveNodePosition={moveMobileNodePosition}
+        onReorderNodes={reorderMobileNodes}
         onSimulate={runSimulatedInput}
         onDraftChange={() => setDraftDirty(true)}
         {...(pendingSimulation ? { pendingSimulation } : {})}

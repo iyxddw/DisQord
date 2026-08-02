@@ -135,6 +135,7 @@ export interface BlueprintActivity {
   traceId: string;
   nodeId: string;
   nodeType: string;
+  phase?: 'entered' | 'completed' | 'failed';
   message: string;
   text?: string;
   violationScore?: number;

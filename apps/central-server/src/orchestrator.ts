@@ -145,6 +145,7 @@ interface BlueprintActivityRecord {
   readonly traceId: string;
   readonly nodeId: string;
   readonly nodeType: string;
+  readonly phase: 'entered' | 'completed' | 'failed';
   readonly message: string;
   readonly text?: string;
   readonly violationScore?: number;
@@ -471,9 +472,14 @@ export class MessageOrchestrator {
       version: version.version,
       simulatedInput: true,
     });
-    const result = await this.#executeBlueprint(version, sourceSession, sessions, message, [], [
-      { nodeId, state: { text, fixedText: false } },
-    ]);
+    const result = await this.#executeBlueprint(
+      version,
+      sourceSession,
+      sessions,
+      message,
+      [],
+      [{ nodeId, state: { text, fixedText: false } }],
+    );
     await this.#log(traceId, 'info', result.paused ? 'blueprint_paused' : 'blueprint_completed', {
       blueprintId,
       version: version.version,
@@ -637,6 +643,11 @@ export class MessageOrchestrator {
         nodeId: node.id,
         nodeType: node.type,
         currentText: state.text,
+      });
+      await this.#recordActivity(blueprint, message, node, processedSteps, {
+        phase: 'entered',
+        message: '消息已到达，准备运行此节点',
+        text: state.text,
       });
 
       if (node.type === 'chat-input' || node.type === 'simulated-input') {
@@ -837,10 +848,8 @@ export class MessageOrchestrator {
     message: MessageEnvelope,
     node: BlueprintNode,
     step: number,
-    detail: Pick<
-      BlueprintActivityRecord,
-      'message' | 'text' | 'violationScore' | 'route'
-    >,
+    detail: Pick<BlueprintActivityRecord, 'message' | 'text' | 'violationScore' | 'route'> &
+      Partial<Pick<BlueprintActivityRecord, 'phase'>>,
   ): Promise<void> {
     const id = randomUUID();
     this.#activitySequence = Math.max(Date.now() * 1_000, this.#activitySequence + 1);
@@ -851,11 +860,10 @@ export class MessageOrchestrator {
       traceId: message.traceId,
       nodeId: node.id,
       nodeType: node.type,
+      phase: detail.phase ?? 'completed',
       message: detail.message,
       ...(detail.text === undefined ? {} : { text: detail.text }),
-      ...(detail.violationScore === undefined
-        ? {}
-        : { violationScore: detail.violationScore }),
+      ...(detail.violationScore === undefined ? {} : { violationScore: detail.violationScore }),
       ...(detail.route === undefined ? {} : { route: detail.route }),
       step,
       sequence: this.#activitySequence,

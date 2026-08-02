@@ -817,24 +817,31 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.get('/api/blueprints/:id/activity', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
-      const { cursor } = z.object({ cursor: z.string().max(128).optional() }).parse(request.query);
-      const items = (await options.store.list<Record<string, unknown>>('blueprint-activity'))
-        .map((entry) => entry.value)
-        .filter((item) => item.blueprintId === id)
-        .sort((left, right) => activityCursor(left).localeCompare(activityCursor(right)))
-        .filter((item) => !cursor || activityCursor(item) > cursor)
-        .slice(-200);
+      const { cursor, waitMs } = z
+        .object({
+          cursor: z.string().max(128).optional(),
+          waitMs: z.coerce.number().int().min(0).max(30_000).default(0),
+        })
+        .parse(request.query);
+      const readItems = async () =>
+        (await options.store.list<Record<string, unknown>>('blueprint-activity'))
+          .map((entry) => entry.value)
+          .filter((item) => item.blueprintId === id)
+          .sort((left, right) => activityCursor(left).localeCompare(activityCursor(right)))
+          .filter((item) => !cursor || activityCursor(item) > cursor)
+          .slice(-200);
+      const deadline = Date.now() + (cursor ? waitMs : 0);
+      let items = await readItems();
+      while (!items.length && cursor && waitMs > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        items = await readItems();
+      }
       const nextCursor = items.length
         ? activityCursor(items.at(-1)!)
         : cursor || `${String(Date.now() * 1_000).padStart(16, '0')}|`;
-      const orderedItems = [...items].sort((left, right) => {
-        const byTime = String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''));
-        if (byTime !== 0) return byTime;
-        if (left.traceId === right.traceId) {
-          return Number(left.step ?? 0) - Number(right.step ?? 0);
-        }
-        return String(left.id ?? '').localeCompare(String(right.id ?? ''));
-      });
+      const orderedItems = [...items].sort(
+        (left, right) => Number(left.sequence ?? 0) - Number(right.sequence ?? 0),
+      );
       return { items: orderedItems, cursor: nextCursor };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
