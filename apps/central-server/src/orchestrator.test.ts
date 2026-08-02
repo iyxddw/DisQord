@@ -162,11 +162,7 @@ describe('blueprint message pipeline', () => {
       },
     );
 
-    const result = await setup.orchestrator.handleSimulatedInput(
-      setup.blueprint.id,
-      input,
-      '你好',
-    );
+    const result = await setup.orchestrator.handleSimulatedInput(setup.blueprint.id, input, '你好');
 
     expect(result.traceId).toEqual(expect.any(String));
     expect(setup.sendToNode).toHaveBeenCalledWith(
@@ -189,6 +185,64 @@ describe('blueprint message pipeline', () => {
       ]),
     );
     expect(await setup.store.list('moderation-review')).toHaveLength(0);
+  });
+
+  it('records the full LLM failure for a simulated run', async () => {
+    const input = randomUUID();
+    const translation = randomUUID();
+    const output = randomUUID();
+    const failure = Object.assign(new Error('LLM returned invalid JSON: trailing content'), {
+      name: 'LlmRequestError',
+      details: {
+        stage: 'json',
+        providerUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+        model: 'gemini-3.5-flash',
+        schemaName: 'disqord_translation',
+        attempt: 0,
+        maxRetries: 0,
+        retryable: true,
+        contentPreview: '{"detectedLanguage":"zh"}\\n额外说明',
+        parserError: 'Unexpected non-whitespace character after JSON',
+      },
+    });
+    const setup = await fixture(
+      [
+        node(input, 'simulated-input'),
+        node(translation, 'llm-translation', { prompt: '翻译', memoryMode: false }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
+        { id: randomUUID(), sourceNodeId: translation, targetNodeId: output },
+      ],
+      { translate: vi.fn(async () => { throw failure; }) },
+    );
+
+    await expect(
+      setup.orchestrator.handleSimulatedInput(setup.blueprint.id, input, '你好'),
+    ).rejects.toThrow('trailing content');
+
+    const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
+      (entry) => entry.value,
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: 'translation_failed', level: 'error' }),
+        expect.objectContaining({
+          event: 'llm_request_failed',
+          details: expect.objectContaining({
+            failure: expect.objectContaining({
+              stage: 'json',
+              contentPreview: expect.stringContaining('额外说明'),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          event: 'blueprint_failed',
+          details: expect.objectContaining({ simulatedInput: true }),
+        }),
+      ]),
+    );
   });
 
   it('lets a real input finish at a simulated output without sending externally', async () => {
@@ -392,6 +446,83 @@ describe('blueprint message pipeline', () => {
         expect.objectContaining({ level: 'info', event: 'moderation_response' }),
         expect.objectContaining({ level: 'info', event: 'delivery_queued' }),
         expect.objectContaining({ level: 'info', event: 'delivery_succeeded' }),
+      ]),
+    );
+  });
+
+  it('routes an unavailable image review to the blocked output even at a 100% threshold', async () => {
+    const input = randomUUID();
+    const moderation = randomUUID();
+    const output = randomUUID();
+    const blocked = randomUUID();
+    const moderate = vi.fn(async () => ({
+      violationScore: 1,
+      categories: ['image-review-unavailable'],
+      reason: '未配置图片审核模型',
+      confidence: 1,
+      model: 'image-review-unavailable',
+    }));
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(moderation, 'llm-moderation', { prompt: '审核图片', threshold: 1 }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+        node(blocked, 'discard'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: output,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'blocked',
+          targetNodeId: blocked,
+        },
+      ],
+      { moderate },
+    );
+    const incoming = {
+      ...message(setup.sourceSession.nodeId),
+      kind: 'image' as const,
+      text: undefined,
+      attachments: [
+        {
+          id: randomUUID(),
+          mimeType: 'image/png',
+          byteSize: 4,
+          sha256: 'a'.repeat(64),
+          sourceUrl: 'https://images.example.test/image.png',
+        },
+      ],
+    };
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    expect(moderate).toHaveBeenCalledWith(
+      '',
+      '审核图片',
+      expect.objectContaining({ imageReviewRequested: true, imageCount: 1 }),
+    );
+    expect(setup.sendToNode).not.toHaveBeenCalled();
+    expect(await setup.store.list('moderation-review')).toHaveLength(0);
+    const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
+      (entry) => entry.value,
+    );
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: moderation, route: 'blocked', violationScore: 1 }),
+        expect.objectContaining({ nodeId: blocked }),
       ]),
     );
   });

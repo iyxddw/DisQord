@@ -64,6 +64,15 @@ const llmSettingsInputSchema = z.object({
   apiKey: z.string().min(1).max(10_000).optional(),
   translationModel: z.string().min(1).max(256),
   moderationModel: z.string().min(1).max(256),
+  imageModerationModel: z.string().trim().max(256).default(''),
+  imageModerationDetail: z.enum(['auto', 'low', 'high']).default('auto'),
+  maxImageCount: z.number().int().min(1).max(10).default(10),
+  maxImageBytes: z
+    .number()
+    .int()
+    .min(256 * 1024)
+    .max(20 * 1024 * 1024)
+    .default(10 * 1024 * 1024),
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),

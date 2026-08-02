@@ -12,6 +12,56 @@ const chatCompletionResponseSchema = z.object({
     .min(1),
 });
 
+const MAX_FAILURE_PREVIEW = 8_000;
+
+export type LlmFailureStage = 'network' | 'http' | 'response' | 'empty' | 'json' | 'schema';
+
+/**
+ * Safe-to-log diagnostics for a failed provider request. It deliberately never
+ * contains the authorization header or the complete request body.
+ */
+export interface LlmFailureDetails {
+  readonly stage: LlmFailureStage;
+  readonly providerUrl: string;
+  readonly model: string;
+  readonly schemaName: string;
+  readonly attempt: number;
+  readonly maxRetries: number;
+  readonly retryable?: boolean;
+  readonly status?: number;
+  readonly statusText?: string;
+  readonly responseBodyPreview?: string;
+  readonly contentPreview?: string;
+  readonly trailingContentPreview?: string;
+  readonly parserError?: string;
+}
+
+/** An LLM failure with structured, loggable provider diagnostics. */
+export class LlmRequestError extends Error {
+  readonly details: LlmFailureDetails;
+
+  constructor(message: string, details: LlmFailureDetails) {
+    super(message);
+    this.name = 'LlmRequestError';
+    this.details = details;
+  }
+}
+
+/** Returns structured diagnostics without exposing secrets from arbitrary errors. */
+export function getLlmFailureDetails(error: unknown): LlmFailureDetails | undefined {
+  if (error instanceof LlmRequestError) return error.details;
+  if (
+    error &&
+    typeof error === 'object' &&
+    'details' in error &&
+    error.details &&
+    typeof error.details === 'object'
+  ) {
+    return error.details as LlmFailureDetails;
+  }
+  return undefined;
+}
+
 export interface OpenAICompatibleClientOptions {
   readonly baseUrl: string;
   readonly apiKey: string;
@@ -29,6 +79,7 @@ export interface JsonCompletionRequest<TSchema extends z.ZodType> {
   readonly editableSystemPrompt: string;
   readonly userData: Record<string, unknown>;
   readonly images?: readonly string[];
+  readonly imageDetail?: 'auto' | 'low' | 'high';
   readonly temperature?: number;
 }
 
@@ -66,7 +117,10 @@ export class OpenAICompatibleClient {
           },
           ...request.images.map((url) => ({
             type: 'image_url',
-            image_url: { url },
+            image_url: {
+              url,
+              ...(request.imageDetail ? { detail: request.imageDetail } : {}),
+            },
           })),
         ]
       : userText;
@@ -81,12 +135,10 @@ export class OpenAICompatibleClient {
         { role: 'system', content: request.editableSystemPrompt },
         { role: 'user', content: userContent },
       ],
-      // json_object is supported by DeepSeek and by OpenAI-compatible providers
-      // that do not implement OpenAI's newer Structured Outputs protocol.
-      response_format: { type: 'json_object' },
+      response_format: this.#responseFormat(request),
     };
 
-    let lastError: Error | undefined;
+    let lastError: LlmRequestError | undefined;
     for (let attempt = 0; attempt <= this.#maxRetries; attempt += 1) {
       try {
         const response = await this.#fetch(`${this.#baseUrl}/chat/completions`, {
@@ -98,27 +150,193 @@ export class OpenAICompatibleClient {
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(this.#timeoutMs),
         });
+        const responseBody = await response.text();
         if (!response.ok) {
-          const retryable = response.status === 429 || response.status >= 500;
-          const detail = extractApiError(await response.text());
-          const error = new Error(
+          const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+          const detail = extractApiError(responseBody);
+          const error = new LlmRequestError(
             `LLM API request failed with status ${response.status}${detail ? `: ${detail}` : ''}.`,
+            {
+              stage: 'http',
+              providerUrl: this.#baseUrl,
+              model: request.model,
+              schemaName: request.schemaName,
+              attempt,
+              maxRetries: this.#maxRetries,
+              retryable,
+              status: response.status,
+              ...(response.statusText ? { statusText: response.statusText } : {}),
+              responseBodyPreview: preview(responseBody),
+            },
           );
           if (!retryable || attempt === this.#maxRetries) throw error;
           lastError = error;
           continue;
         }
-        const completion = chatCompletionResponseSchema.parse(await response.json());
+
+        let completion: z.infer<typeof chatCompletionResponseSchema>;
+        try {
+          completion = chatCompletionResponseSchema.parse(JSON.parse(responseBody) as unknown);
+        } catch (error) {
+          throw this.#failure(
+            request,
+            attempt,
+            'response',
+            `LLM API returned an invalid chat-completion response: ${errorMessage(error)}`,
+            { responseBodyPreview: preview(responseBody), parserError: errorMessage(error) },
+          );
+        }
+
         const content = completion.choices[0]?.message.content;
-        if (!content) throw new Error('LLM API returned an empty completion.');
-        return request.schema.parse(JSON.parse(content) as unknown);
+        if (!content) {
+          throw this.#failure(request, attempt, 'empty', 'LLM API returned an empty completion.', {
+            responseBodyPreview: preview(responseBody),
+          });
+        }
+
+        let parsed: ReturnType<typeof parseJsonContent>;
+        try {
+          parsed = parseJsonContent(content);
+        } catch (error) {
+          throw this.#failure(
+            request,
+            attempt,
+            'json',
+            `LLM returned invalid JSON: ${errorMessage(error)}`,
+            { contentPreview: preview(content), parserError: errorMessage(error) },
+          );
+        }
+
+        try {
+          return request.schema.parse(parsed.value) as z.infer<TSchema>;
+        } catch (error) {
+          throw this.#failure(
+            request,
+            attempt,
+            'schema',
+            `LLM JSON did not match ${request.schemaName}: ${errorMessage(error)}`,
+            {
+              contentPreview: preview(content),
+              ...(parsed.trailing ? { trailingContentPreview: preview(parsed.trailing) } : {}),
+              parserError: errorMessage(error),
+            },
+          );
+        }
       } catch (error) {
-        lastError = error instanceof Error ? error : new Error('LLM request failed.');
-        if (attempt === this.#maxRetries) break;
+        const normalized =
+          error instanceof LlmRequestError
+            ? error
+            : this.#failure(
+                request,
+                attempt,
+                'network',
+                `LLM request failed: ${errorMessage(error)}`,
+                { parserError: errorMessage(error) },
+              );
+        lastError = normalized;
+        if (attempt === this.#maxRetries || normalized.details.retryable === false) break;
       }
     }
     throw lastError ?? new Error('LLM request failed.');
   }
+
+  #responseFormat(request: JsonCompletionRequest<z.ZodType>): Record<string, unknown> {
+    // Google's OpenAI-compatible endpoint supports the structured-output form.
+    // Using it prevents Gemini from appending prose after the JSON object.
+    if (this.#baseUrl.includes('generativelanguage.googleapis.com')) {
+      return {
+        type: 'json_schema',
+        json_schema: {
+          name: request.schemaName,
+          strict: true,
+          schema: request.jsonSchema,
+        },
+      };
+    }
+    return { type: 'json_object' };
+  }
+
+  #failure<TSchema extends z.ZodType>(
+    request: JsonCompletionRequest<TSchema>,
+    attempt: number,
+    stage: LlmFailureStage,
+    message: string,
+    fields: Pick<
+      LlmFailureDetails,
+      'responseBodyPreview' | 'contentPreview' | 'trailingContentPreview' | 'parserError'
+    >,
+  ): LlmRequestError {
+    return new LlmRequestError(message, {
+      stage,
+      providerUrl: this.#baseUrl,
+      model: request.model,
+      schemaName: request.schemaName,
+      attempt,
+      maxRetries: this.#maxRetries,
+      retryable: true,
+      ...fields,
+    });
+  }
+}
+
+interface ParsedJsonContent {
+  readonly value: unknown;
+  readonly trailing?: string;
+}
+
+/**
+ * Parses the first complete JSON object/array in a provider response. Gemini
+ * occasionally wraps valid structured output in a code fence or adds a short
+ * explanation after it; both are harmless for our schema-validated pipeline.
+ */
+function parseJsonContent(content: string): ParsedJsonContent {
+  let normalized = content.trim();
+  const fenced = normalized.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+  if (fenced?.[1]) normalized = fenced[1].trim();
+
+  const objectStart = normalized.indexOf('{');
+  const arrayStart = normalized.indexOf('[');
+  const start = [objectStart, arrayStart].filter((value) => value >= 0).sort((left, right) => left - right)[0] ?? -1;
+  if (start < 0) throw new SyntaxError('no JSON object or array found');
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let end = -1;
+  for (let index = start; index < normalized.length; index += 1) {
+    const character = normalized[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === '{' || character === '[') depth += 1;
+    else if (character === '}' || character === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        end = index + 1;
+        break;
+      }
+    }
+  }
+  if (end < 0) throw new SyntaxError('incomplete JSON object or array');
+  const value = JSON.parse(normalized.slice(start, end)) as unknown;
+  const trailing = normalized.slice(end).replace(/^\s*```\s*$/u, '').trim();
+  return trailing ? { value, trailing } : { value };
+}
+
+function preview(value: string): string {
+  return value.length > MAX_FAILURE_PREVIEW
+    ? `${value.slice(0, MAX_FAILURE_PREVIEW)}…[已截断]`
+    : value;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function extractApiError(body: string): string {

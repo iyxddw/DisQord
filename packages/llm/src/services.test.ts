@@ -18,6 +18,13 @@ function jsonCompletion(content: unknown): Response {
   );
 }
 
+function rawJsonCompletion(content: string): Response {
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content } }] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
 describe('LLM translation and moderation', () => {
   it('returns a schema-validated translation with model and prompt version', async () => {
     const fetchImplementation = vi.fn(async () =>
@@ -86,6 +93,62 @@ describe('LLM translation and moderation', () => {
     ).rejects.toThrow('400: Unsupported response format');
   });
 
+  it('uses Gemini structured output and tolerates a trailing explanation', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      rawJsonCompletion(
+        '{"detectedLanguage":"zh","translatedText":"Hello","confidence":0.99}\n\n补充：已完成翻译。',
+      ),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+
+    await expect(
+      new LlmTranslationService(client).translate({
+        text: '你好',
+        targetLanguage: 'en',
+        model: 'gemini-3.5-flash',
+        prompt: { content: '准确翻译。', version: 1 },
+      }),
+    ).resolves.toMatchObject({ translatedText: 'Hello' });
+
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      response_format: { type: string; json_schema?: { name: string; strict: boolean } };
+    };
+    expect(body.response_format.type).toBe('json_schema');
+    expect(body.response_format.json_schema).toMatchObject({
+      name: 'disqord_translation',
+      strict: true,
+    });
+  });
+
+  it('preserves provider content and parse position in a structured failure', async () => {
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      apiKey: 'test-key',
+      maxRetries: 0,
+      fetchImplementation: vi.fn(async () => rawJsonCompletion('{"broken": true}\nnot-json')),
+    });
+
+    await expect(
+      new LlmTranslationService(client).translate({
+        text: '你好',
+        targetLanguage: 'en',
+        model: 'gemini-3.5-flash',
+        prompt: { content: '准确翻译。', version: 1 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'LlmRequestError',
+      details: {
+        stage: 'schema',
+        contentPreview: expect.stringContaining('not-json'),
+        parserError: expect.stringContaining('detectedLanguage'),
+      },
+    });
+  });
+
   it('fails closed when moderation output violates the schema', async () => {
     const client = new OpenAICompatibleClient({
       baseUrl: 'https://llm.example.test/v1',
@@ -139,6 +202,41 @@ describe('LLM translation and moderation', () => {
       confidence: 0.94,
       model: 'moderation-model',
     });
+  });
+
+  it('sends image data to the moderation model with the selected detail level', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        violationScore: 0.91,
+        categories: ['graphic-content'],
+        reason: '图片包含明显违规内容',
+        confidence: 0.98,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+
+    await new LlmModerationService(client).moderate({
+      text: '请审核这张图',
+      model: 'vision-moderation-model',
+      prompt: { content: '审核图片中的违规内容。', version: 1 },
+      images: ['data:image/png;base64,aGVsbG8='],
+      imageDetail: 'high',
+    });
+
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ content: unknown }>;
+    };
+    expect(body.messages[2]?.content).toEqual([
+      { type: 'text', text: expect.stringContaining('请审核这张图') },
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,aGVsbG8=', detail: 'high' },
+      },
+    ]);
   });
 });
 

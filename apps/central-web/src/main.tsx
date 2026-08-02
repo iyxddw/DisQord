@@ -2148,6 +2148,10 @@ function LlmSettings() {
     apiKey: '',
     translationModel: '',
     moderationModel: '',
+    imageModerationModel: '',
+    imageModerationDetail: 'auto' as 'auto' | 'low' | 'high',
+    maxImageCount: 10,
+    maxImageBytes: 10 * 1024 * 1024,
     timeoutMs: 30000,
     maxRetries: 2,
     concurrency: 4,
@@ -2225,12 +2229,74 @@ function LlmSettings() {
           />
         </label>
         <label>
+          图片审核模型
+          <input
+            value={form.imageModerationModel}
+            placeholder="留空则图片自动判定为未过审"
+            onChange={(event) => setForm({ ...form, imageModerationModel: event.target.value })}
+          />
+          <small className="field-hint">需要支持视觉输入；模型不支持或请求失败时统一拦截。</small>
+        </label>
+        <label>
+          图片细节级别
+          <select
+            value={form.imageModerationDetail}
+            onChange={(event) =>
+              setForm({
+                ...form,
+                imageModerationDetail: event.target.value as 'auto' | 'low' | 'high',
+              })
+            }
+          >
+            <option value="auto">自动</option>
+            <option value="low">低（省 token）</option>
+            <option value="high">高（更细致）</option>
+          </select>
+        </label>
+        <label>
+          单条最多审核图片数
+          <input
+            type="number"
+            min="1"
+            max="10"
+            value={form.maxImageCount}
+            onChange={(event) => setForm({ ...form, maxImageCount: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          单张图片上限（MB）
+          <input
+            type="number"
+            min="0.25"
+            max="20"
+            step="0.25"
+            value={Math.round((form.maxImageBytes / 1024 / 1024) * 100) / 100}
+            onChange={(event) =>
+              setForm({
+                ...form,
+                maxImageBytes: Math.round(Number(event.target.value) * 1024 * 1024),
+              })
+            }
+          />
+        </label>
+        <label>
           超时（毫秒）
           <input
             type="number"
             value={form.timeoutMs}
             onChange={(event) => setForm({ ...form, timeoutMs: Number(event.target.value) })}
           />
+        </label>
+        <label>
+          失败重试次数
+          <input
+            type="number"
+            min="0"
+            max="5"
+            value={form.maxRetries}
+            onChange={(event) => setForm({ ...form, maxRetries: Number(event.target.value) })}
+          />
+          <small className="field-hint">仅对限流和服务器错误自动重试。</small>
         </label>
         <label>
           并发数
@@ -2546,8 +2612,11 @@ const logEventLabels: Record<string, string> = {
   unmatched_session: '没有匹配的会话',
   translation_requested: '请求翻译',
   translation_response: '收到翻译结果',
+  translation_failed: '翻译失败',
+  llm_request_failed: '大模型请求失败',
   moderation_requested: '请求审核',
   moderation_response: '收到审核结果',
+  moderation_failed: '审核失败',
   manual_review_created: '已创建人工审核任务',
   manual_review_resolved: '人工审核任务已处理',
   render_succeeded: '图片合成成功',

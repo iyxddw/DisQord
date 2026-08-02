@@ -10,6 +10,7 @@ import {
   LlmModerationService,
   LlmTranslationService,
   OpenAICompatibleClient,
+  getLlmFailureDetails,
   llmSettingsSchema,
   type ViolationAssessment,
 } from '@disqord/llm';
@@ -61,6 +62,17 @@ const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+function describeError(error: unknown): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    name: error instanceof Error ? error.name : 'UnknownError',
+    message: error instanceof Error ? error.message : String(error),
+  };
+  if (error instanceof Error && error.stack) base.stack = error.stack.slice(0, 12_000);
+  const llm = getLlmFailureDetails(error);
+  if (llm) base.llm = llm;
+  return base;
+}
+
 export interface NodeCommandBus {
   sendToNode(nodeId: string, kind: string, payload: unknown): Promise<void>;
 }
@@ -83,7 +95,15 @@ export interface MessageProcessor {
     recentMessages: readonly MessageEnvelope[],
     memoryMode: boolean,
   ): Promise<TranslationResult>;
-  moderate?(text: string, prompt: string): Promise<ViolationAssessment>;
+  moderate?(
+    text: string,
+    prompt: string,
+    options?: {
+      readonly imageReviewRequested?: boolean;
+      readonly imageCount?: number;
+      readonly imageUrls?: readonly string[];
+    },
+  ): Promise<ViolationAssessment>;
   render?(
     message: MessageEnvelope,
     target: ChatSession,
@@ -472,19 +492,30 @@ export class MessageOrchestrator {
       version: version.version,
       simulatedInput: true,
     });
-    const result = await this.#executeBlueprint(
-      version,
-      sourceSession,
-      sessions,
-      message,
-      [],
-      [{ nodeId, state: { text, fixedText: false } }],
-    );
-    await this.#log(traceId, 'info', result.paused ? 'blueprint_paused' : 'blueprint_completed', {
-      blueprintId,
-      version: version.version,
-      simulatedInput: true,
-    });
+    try {
+      const result = await this.#executeBlueprint(
+        version,
+        sourceSession,
+        sessions,
+        message,
+        [],
+        [{ nodeId, state: { text, fixedText: false } }],
+      );
+      await this.#log(traceId, 'info', result.paused ? 'blueprint_paused' : 'blueprint_completed', {
+        blueprintId,
+        version: version.version,
+        simulatedInput: true,
+      });
+    } catch (error) {
+      await this.#log(traceId, 'error', 'blueprint_failed', {
+        blueprintId,
+        version: version.version,
+        simulatedInput: true,
+        error: error instanceof Error ? error.message : String(error),
+        errorDetails: describeError(error),
+      });
+      throw error;
+    }
     return { traceId };
   }
 
@@ -596,6 +627,7 @@ export class MessageOrchestrator {
           blueprintId: blueprint.blueprintId,
           version: blueprint.version,
           error: error instanceof Error ? error.message : String(error),
+          errorDetails: describeError(error),
         });
       }
     }
@@ -629,6 +661,19 @@ export class MessageOrchestrator {
         }));
     let processedSteps = 0;
     let paused = false;
+    const moderationImageRefs = [
+      ...message.attachments,
+      ...(message.replyTo?.imagePreview ? [message.replyTo.imagePreview] : []),
+    ];
+    const moderationOptions = moderationImageRefs.length
+      ? {
+          imageReviewRequested: true,
+          imageCount: moderationImageRefs.length,
+          imageUrls: moderationImageRefs.flatMap((image) =>
+            image.sourceUrl ? [image.sourceUrl] : [],
+          ),
+        }
+      : undefined;
 
     while (work.length) {
       if ((processedSteps += 1) > 2_000)
@@ -672,14 +717,35 @@ export class MessageOrchestrator {
           recentMessages: config.memoryMode ? recentMessages : [],
           repliedMessage: config.memoryMode ? message.replyTo : undefined,
         });
-        const result = await this.#processor.translate(
-          message,
-          target,
-          state.text,
-          config.prompt,
-          recentMessages,
-          config.memoryMode,
-        );
+        let result: TranslationResult;
+        try {
+          result = await this.#processor.translate(
+            message,
+            target,
+            state.text,
+            config.prompt,
+            recentMessages,
+            config.memoryMode,
+          );
+        } catch (error) {
+          const errorDetails = describeError(error);
+          await this.#log(message.traceId, 'error', 'translation_failed', {
+            nodeId: node.id,
+            modelTarget: target.platform === 'discord' ? 'en' : 'zh',
+            inputText: state.text,
+            error: errorDetails,
+          });
+          const llm = getLlmFailureDetails(error);
+          if (llm) {
+            await this.#log(message.traceId, 'error', 'llm_request_failed', {
+              nodeId: node.id,
+              nodeType: node.type,
+              operation: 'translation',
+              failure: llm,
+            });
+          }
+          throw error;
+        }
         await this.#log(message.traceId, 'info', 'translation_response', {
           nodeId: node.id,
           rawResult: result,
@@ -692,7 +758,7 @@ export class MessageOrchestrator {
       } else if (node.type === 'llm-moderation') {
         const config = moderationConfigSchema.parse(node.config);
         let assessment: ViolationAssessment;
-        if (!state.text.trim()) {
+        if (!state.text.trim() && !moderationOptions?.imageReviewRequested) {
           assessment = {
             violationScore: 0,
             categories: [],
@@ -707,10 +773,39 @@ export class MessageOrchestrator {
             threshold: config.threshold,
             prompt: config.prompt,
             inputText: state.text,
+            ...(moderationOptions?.imageReviewRequested
+              ? { imageCount: moderationOptions.imageCount }
+              : {}),
           });
-          assessment = await this.#processor.moderate(state.text, config.prompt);
+          try {
+            assessment = moderationOptions
+              ? await this.#processor.moderate(state.text, config.prompt, moderationOptions)
+              : await this.#processor.moderate(state.text, config.prompt);
+          } catch (error) {
+            const errorDetails = describeError(error);
+            await this.#log(message.traceId, 'error', 'moderation_failed', {
+              nodeId: node.id,
+              threshold: config.threshold,
+              inputText: state.text,
+              ...(moderationOptions?.imageReviewRequested
+                ? { imageCount: moderationOptions.imageCount }
+                : {}),
+              error: errorDetails,
+            });
+            const llm = getLlmFailureDetails(error);
+            if (llm) {
+              await this.#log(message.traceId, 'error', 'llm_request_failed', {
+                nodeId: node.id,
+                nodeType: node.type,
+                operation: 'moderation',
+                failure: llm,
+              });
+            }
+            throw error;
+          }
         }
-        const passed = assessment.violationScore <= config.threshold;
+        const imageReviewUnavailable = assessment.model === 'image-review-unavailable';
+        const passed = !imageReviewUnavailable && assessment.violationScore <= config.threshold;
         await this.#log(message.traceId, 'info', 'moderation_response', {
           nodeId: node.id,
           threshold: config.threshold,
@@ -1154,13 +1249,89 @@ export class CentralMessageProcessor implements MessageProcessor {
     });
   }
 
-  async moderate(text: string, prompt: string): Promise<ViolationAssessment> {
-    const { settings, client } = await this.#client();
-    return await new LlmModerationService(client).moderate({
-      text,
-      model: settings.moderationModel,
-      prompt: { content: prompt, version: 1 },
+  async moderate(
+    text: string,
+    prompt: string,
+    options?: {
+      readonly imageReviewRequested?: boolean;
+      readonly imageCount?: number;
+      readonly imageUrls?: readonly string[];
+    },
+  ): Promise<ViolationAssessment> {
+    const unavailable = (
+      reason: string,
+      diagnostics?: Record<string, unknown>,
+    ): ViolationAssessment => ({
+      violationScore: 1,
+      categories: ['image-review-unavailable'],
+      reason,
+      confidence: 1,
+      model: 'image-review-unavailable',
+      ...(diagnostics ? { diagnostics } : {}),
     });
+    if (!options?.imageReviewRequested) {
+      const { settings, client } = await this.#client();
+      return await new LlmModerationService(client).moderate({
+        text,
+        model: settings.moderationModel,
+        prompt: { content: prompt, version: 1 },
+      });
+    }
+
+    let settings: z.infer<typeof llmSettingsSchema>;
+    let client: OpenAICompatibleClient;
+    try {
+      const connection = await this.#client();
+      settings = connection.settings;
+      client = connection.client;
+    } catch (error) {
+      return unavailable('图片审核配置或模型客户端不可用。', {
+        error: describeError(error),
+      });
+    }
+    if (!settings.imageModerationModel.trim()) {
+      return unavailable('未配置图片审核模型，无法审核图片。');
+    }
+    const imageUrls = options.imageUrls ?? [];
+    if (
+      !imageUrls.length ||
+      imageUrls.length !== options.imageCount ||
+      imageUrls.length > settings.maxImageCount
+    ) {
+      return unavailable('图片地址缺失或图片数量超过审核限制，无法审核图片。');
+    }
+
+    let images: string[];
+    try {
+      images = await Promise.all(
+        imageUrls.map(
+          async (url) =>
+            (
+              await downloadExternalImage(url, {
+                maxBytes: settings.maxImageBytes,
+              })
+            ).dataUri,
+        ),
+      );
+    } catch (error) {
+      return unavailable('图片下载或解码失败，无法审核图片。', {
+        error: describeError(error),
+      });
+    }
+
+    try {
+      return await new LlmModerationService(client).moderate({
+        text,
+        model: settings.imageModerationModel,
+        prompt: { content: prompt, version: 1 },
+        images,
+        imageDetail: settings.imageModerationDetail,
+      });
+    } catch (error) {
+      return unavailable('图片审核模型不支持视觉输入或请求失败。', {
+        error: describeError(error),
+      });
+    }
   }
 
   async render(
