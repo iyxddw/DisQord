@@ -832,10 +832,6 @@ button.fit {
 .mobile-blueprint-flow {
   display: none;
 }
-body.mobile-blueprint-dragging {
-  cursor: grabbing;
-  user-select: none;
-}
 .flow-save-prompt {
   position: absolute;
   z-index: 10;
@@ -1416,10 +1412,6 @@ code {
   display: grid;
   justify-items: stretch;
 }
-.mobile-flow-step.is-dragging-placeholder {
-  border: 1px dashed #4b5550;
-  background: rgb(55 78 63 / 12%);
-}
 .mobile-flow-card {
   --simulation-progress: 0%;
   position: relative;
@@ -1435,14 +1427,6 @@ code {
     border-color 140ms ease,
     background 140ms ease,
     box-shadow 140ms ease;
-}
-.mobile-flow-card.is-dragging {
-  z-index: 1000;
-  pointer-events: none;
-  border-color: #c0c5ca;
-  background: #202429;
-  box-shadow: 0 16px 28px rgb(0 0 0 / 32%);
-  transition: none;
 }
 .mobile-flow-card.active {
   border-color: #5f8b6c;
@@ -1475,23 +1459,6 @@ code {
   align-items: center;
   gap: 5px;
 }
-.mobile-drag-handle {
-  width: 22px !important;
-  height: 22px !important;
-  padding: 0 !important;
-  cursor: grab !important;
-  color: #7d858d !important;
-  border-color: transparent !important;
-  background: transparent !important;
-  touch-action: none;
-  user-select: none;
-}
-.mobile-drag-handle:active {
-  cursor: grabbing !important;
-}
-.mobile-flow-kind svg {
-  color: #6f777e;
-}
 .mobile-flow-card-actions {
   display: flex;
   align-items: center;
@@ -1512,6 +1479,26 @@ code {
   color: #ff9bad;
   border-color: #b95f70;
   background: #26191e;
+}
+.mobile-flow-card-head button:disabled {
+  color: #555c63;
+  border-color: #30353a;
+  background: #15181b;
+  cursor: not-allowed;
+}
+.mobile-flow-card-head .mobile-enqueue {
+  width: auto;
+  padding: 0 8px;
+  grid-auto-flow: column;
+  gap: 4px;
+  color: #a9cdb3;
+  border-color: #466550;
+  background: #18231c;
+}
+.mobile-flow-card-head .mobile-enqueue:hover {
+  color: #c3e4cb;
+  border-color: #5d8067;
+  background: #1d2d22;
 }
 .mobile-flow-card-actions button {
   flex: 0 0 auto;
