@@ -811,6 +811,14 @@ button.fit {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.simulated-output-values {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.simulated-output-values .simulated-output-value {
+  margin-top: 0;
+}
 .tip {
   margin-top: auto;
   display: flex;
@@ -929,6 +937,21 @@ button.fit {
   line-height: 1.45;
   overflow-wrap: anywhere;
   box-shadow: none;
+}
+.flow-simulation-stack {
+  position: absolute;
+  z-index: 6;
+  left: 0;
+  bottom: calc(100% + 9px);
+  width: max-content;
+  max-width: 330px;
+  display: grid;
+  gap: 5px;
+}
+.flow-simulation-stack .flow-simulation-note {
+  position: static;
+  width: auto;
+  max-width: 330px;
 }
 .flow-simulation-note.active {
   color: #c2dec9;
@@ -1501,6 +1524,15 @@ code {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.mobile-flow-activity-stack,
+.mobile-flow-output-stack {
+  display: grid;
+  gap: 6px;
+}
+.mobile-flow-activity-stack .mobile-flow-activity,
+.mobile-flow-output-stack .mobile-flow-output {
+  margin: 0;
 }
 .mobile-flow-readonly-config {
   display: grid;

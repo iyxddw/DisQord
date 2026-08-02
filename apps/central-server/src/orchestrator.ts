@@ -27,6 +27,7 @@ import {
   type BlueprintVersion,
   type ChatSession,
   type MessageEnvelope,
+  type MessageUploadBatch,
   type TranslationResult,
 } from '@disqord/shared';
 import { type ReceivedNodeFrame } from '@disqord/transport';
@@ -61,6 +62,8 @@ const moderationConfigSchema = z.object({
 });
 const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
+const MESSAGE_UPLOAD_BATCH_NAMESPACE = 'message-upload-batch';
+const MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS = 3;
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -150,6 +153,19 @@ interface PreparedDelivery {
   readonly command: OutboundDeliveryCommand;
 }
 
+interface MessageUploadBatchRecord {
+  readonly batchId: string;
+  readonly frameId: string;
+  readonly nodeId: string;
+  readonly nodeType: ReceivedNodeFrame['nodeType'];
+  readonly messages: MessageUploadBatch['messages'];
+  readonly status: 'queued' | 'processing' | 'completed' | 'failed';
+  readonly attempts: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly lastError?: Record<string, unknown>;
+}
+
 interface BlueprintFlowSimulationStep {
   readonly nodeId: string;
   readonly nodeType: string;
@@ -205,19 +221,27 @@ export class MessageOrchestrator {
   readonly #store: StateStore;
   readonly #commandBus: NodeCommandBus;
   readonly #processor: MessageProcessor;
+  readonly #messageBatchWorkers = new Map<string, Promise<void>>();
+  readonly #messageBatchRetryTimers = new Map<string, NodeJS.Timeout>();
   #activitySequence = 0;
 
   constructor(store: StateStore, commandBus: NodeCommandBus, processor: MessageProcessor) {
     this.#store = store;
     this.#commandBus = commandBus;
     this.#processor = processor;
+    // Batch uploads are acknowledged only after this durable record is written,
+    // so a slow LLM call cannot make the node retransmit the same batch.  Any
+    // record left behind by a central restart is resumed in the background.
+    void this.#recoverMessageUploadBatches().catch((error: unknown) => {
+      console.error('[DisQord/Central] failed to recover message upload batches', error);
+    });
   }
 
   async handleNodeFrame(frame: ReceivedNodeFrame): Promise<void> {
     if (frame.kind === 'message.upload') {
       await this.#handleMessageUpload(frame);
     } else if (frame.kind === 'message.upload.batch') {
-      await this.#handleMessageUploadBatch(frame);
+      await this.#acceptMessageUploadBatch(frame);
     } else if (frame.kind === 'message.delivered') {
       await this.#handleDelivered(frame.payload);
     } else if (frame.kind === 'message.delivery_failed') {
@@ -669,6 +693,198 @@ export class MessageOrchestrator {
           throw error;
         }
       }
+    }
+  }
+
+  /**
+   * Accept a coalesced upload quickly enough for the node's frame
+   * acknowledgement window.  The central server stores the complete batch
+   * before returning; processing and delivery happen in a worker afterwards.
+   * This is deliberately one durable command, not one command per message.
+   */
+  async #acceptMessageUploadBatch(frame: ReceivedNodeFrame): Promise<void> {
+    const batch = messageUploadBatchSchema.parse(frame.payload);
+    const batchId = batch.batchId ?? frame.frameId;
+    const existing = await this.#store.get<MessageUploadBatchRecord>(
+      MESSAGE_UPLOAD_BATCH_NAMESPACE,
+      batchId,
+    );
+    if (existing?.value.status === 'completed') {
+      await this.#log(batch.messages[0]!.traceId, 'debug', 'message_upload_batch_deduplicated', {
+        batchId,
+        frameId: frame.frameId,
+        batchSize: batch.messages.length,
+      });
+      return;
+    }
+    if (existing?.value.status === 'processing' || existing?.value.status === 'queued') {
+      // A retry can arrive after the socket was interrupted.  The original
+      // record is authoritative; never replace its message order with a
+      // potentially different payload carrying the same batch id.
+      this.#queueMessageUploadBatch(batchId);
+      await this.#log(batch.messages[0]!.traceId, 'debug', 'message_upload_batch_deduplicated', {
+        batchId,
+        frameId: frame.frameId,
+        batchSize: existing.value.messages.length,
+        status: existing.value.status,
+      });
+      return;
+    }
+    if (existing && existing.value.attempts >= MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS) {
+      await this.#log(batch.messages[0]!.traceId, 'warn', 'message_upload_batch_retry_exhausted', {
+        batchId,
+        attempts: existing.value.attempts,
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const record: MessageUploadBatchRecord = {
+      batchId,
+      frameId: existing?.value.frameId ?? frame.frameId,
+      nodeId: existing?.value.nodeId ?? frame.nodeId,
+      nodeType: existing?.value.nodeType ?? frame.nodeType,
+      messages: existing?.value.messages ?? batch.messages,
+      status: 'queued',
+      attempts: existing?.value.attempts ?? 0,
+      createdAt: existing?.value.createdAt ?? now,
+      updatedAt: now,
+      ...(existing?.value.lastError ? { lastError: existing.value.lastError } : {}),
+    };
+    await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, batchId, record);
+    await this.#log(record.messages[0]!.traceId, 'info', 'message_upload_batch_accepted', {
+      batchId,
+      frameId: record.frameId,
+      nodeId: record.nodeId,
+      nodeType: record.nodeType,
+      batchSize: record.messages.length,
+      eventIds: record.messages.map((message) => message.eventId),
+    });
+    this.#queueMessageUploadBatch(batchId);
+  }
+
+  #queueMessageUploadBatch(batchId: string): void {
+    if (this.#messageBatchWorkers.has(batchId)) return;
+    const worker = this.#processMessageUploadBatch(batchId).finally(() => {
+      this.#messageBatchWorkers.delete(batchId);
+    });
+    this.#messageBatchWorkers.set(batchId, worker);
+    void worker.catch((error: unknown) => {
+      // The worker persists its failure state.  Keep this guard so a storage
+      // error cannot become an unhandled rejection and kill the node process.
+      console.error(`[DisQord/Central] message upload batch ${batchId} failed`, error);
+    });
+  }
+
+  async #processMessageUploadBatch(batchId: string): Promise<void> {
+    const entry = await this.#store.get<MessageUploadBatchRecord>(
+      MESSAGE_UPLOAD_BATCH_NAMESPACE,
+      batchId,
+    );
+    if (!entry || entry.value.status === 'completed') return;
+    if (entry.value.attempts >= MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS) {
+      if (entry.value.status !== 'failed') {
+        await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, batchId, {
+          ...entry.value,
+          status: 'failed',
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    const processing: MessageUploadBatchRecord = {
+      ...entry.value,
+      status: 'processing',
+      attempts: entry.value.attempts + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, batchId, processing);
+    await this.#log(processing.messages[0]!.traceId, 'debug', 'message_upload_batch_processing', {
+      batchId,
+      attempt: processing.attempts,
+      batchSize: processing.messages.length,
+    });
+
+    const frame: ReceivedNodeFrame = {
+      nodeId: processing.nodeId,
+      nodeType: processing.nodeType,
+      kind: 'message.upload.batch',
+      frameId: processing.frameId,
+      payload: { batchId: processing.batchId, messages: processing.messages },
+    };
+    try {
+      await this.#handleMessageUploadBatch(frame);
+      await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, batchId, {
+        ...processing,
+        status: 'completed',
+        updatedAt: new Date().toISOString(),
+      } satisfies MessageUploadBatchRecord);
+      await this.#log(processing.messages[0]!.traceId, 'info', 'message_upload_batch_completed', {
+        batchId,
+        attempt: processing.attempts,
+        batchSize: processing.messages.length,
+      });
+    } catch (error) {
+      const lastError = describeError(error);
+      const failed = {
+        ...processing,
+        status:
+          processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS ? ('queued' as const) : ('failed' as const),
+        updatedAt: new Date().toISOString(),
+        lastError,
+      } satisfies MessageUploadBatchRecord;
+      await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, batchId, failed);
+      await this.#log(
+        processing.messages[0]!.traceId,
+        processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS ? 'warn' : 'error',
+        processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS
+          ? 'message_upload_batch_retry_scheduled'
+          : 'message_upload_batch_failed',
+        {
+          batchId,
+          attempt: processing.attempts,
+          nextAttempt:
+            processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS
+              ? processing.attempts + 1
+              : undefined,
+          error: lastError,
+        },
+      );
+      if (processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS) {
+        this.#scheduleMessageUploadBatchRetry(batchId, processing.attempts);
+      }
+    }
+  }
+
+  #scheduleMessageUploadBatchRetry(batchId: string, attempt: number): void {
+    if (this.#messageBatchRetryTimers.has(batchId)) return;
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempt - 1));
+    const timer = setTimeout(() => {
+      this.#messageBatchRetryTimers.delete(batchId);
+      this.#queueMessageUploadBatch(batchId);
+    }, delay);
+    timer.unref();
+    this.#messageBatchRetryTimers.set(batchId, timer);
+  }
+
+  async #recoverMessageUploadBatches(): Promise<void> {
+    const entries = await this.#store.list<MessageUploadBatchRecord>(
+      MESSAGE_UPLOAD_BATCH_NAMESPACE,
+    );
+    for (const entry of entries) {
+      const record = entry.value;
+      if (record.status === 'completed' || record.attempts >= MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS) {
+        continue;
+      }
+      if (record.status === 'processing') {
+        await this.#store.set(MESSAGE_UPLOAD_BATCH_NAMESPACE, record.batchId, {
+          ...record,
+          status: 'queued',
+          updatedAt: new Date().toISOString(),
+        } satisfies MessageUploadBatchRecord);
+      }
+      this.#queueMessageUploadBatch(record.batchId);
     }
   }
 

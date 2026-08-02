@@ -531,11 +531,14 @@ type FlowData = {
   onCancelSaveSimulation?: () => void;
   onSimulate?: (nodeId: string, text: string) => Promise<void>;
   simulation?:
-    | {
-        state: 'active' | 'done' | 'error';
-        message?: string;
-        progress?: number;
-      }
+      | {
+          state: 'active' | 'done' | 'error';
+          message?: string;
+          progress?: number;
+          /** Completed messages are kept as a small stack for coalesced runs. */
+          messages?: string[];
+          outputs?: string[];
+        }
     | undefined;
 };
 
@@ -588,9 +591,19 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           </div>
         </div>
       )}
-      {data.simulation?.message && (
-        <div className={`flow-simulation-note ${data.simulation.state}`} role="status">
-          {data.simulation.message}
+      {(data.simulation?.message || data.simulation?.messages?.length) && (
+        <div className="flow-simulation-stack" role="status">
+          {(data.simulation?.messages ?? []).map((message, index) => (
+            <div className="flow-simulation-note done" key={`${index}-${message}`}>
+              {message}
+            </div>
+          ))}
+          {data.simulation.message &&
+            data.simulation.messages?.at(-1) !== data.simulation.message && (
+              <div className={`flow-simulation-note ${data.simulation.state}`}>
+                {data.simulation.message}
+              </div>
+            )}
         </div>
       )}
       {hasInput && <Handle type="target" position={Position.Left} />}
@@ -647,9 +660,16 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           </button>
         </div>
       )}
-      {data.kind === 'simulated-output' && data.outputText && (
-        <div className="simulated-output-value nodrag nopan">{data.outputText}</div>
-      )}
+      {data.kind === 'simulated-output' &&
+        ((data.simulation?.outputs?.length ?? 0) > 0 || data.outputText) && (
+          <div className="simulated-output-values nodrag nopan">
+            {(data.simulation?.outputs ?? [data.outputText]).filter(Boolean).map((output, index) => (
+              <div className="simulated-output-value" key={`${index}-${output}`}>
+                {output}
+              </div>
+            ))}
+          </div>
+        )}
       {data.kind === 'translation' && (
         <div className="flow-node-config nodrag nopan">
           <textarea
@@ -868,15 +888,32 @@ function MobileFlowCard({
         <span className="mobile-flow-kind">{flowKindLabel(data.kind)}</span>
       </div>
       <strong>{data.label}</strong>
-      {data.simulation?.message && (
-        <div className="mobile-flow-activity">
-          <p>{data.simulation.message}</p>
+      {(data.simulation?.message || data.simulation?.messages?.length) && (
+        <div className="mobile-flow-activity-stack">
+          {(data.simulation?.messages ?? []).map((message, index) => (
+            <div className="mobile-flow-activity" key={`${index}-${message}`}>
+              <p>{message}</p>
+            </div>
+          ))}
+          {data.simulation.message &&
+            data.simulation.messages?.at(-1) !== data.simulation.message && (
+              <div className="mobile-flow-activity">
+                <p>{data.simulation.message}</p>
+              </div>
+            )}
         </div>
       )}
       {data.kind === 'simulated-input' && <div className="mobile-flow-output">模拟输入</div>}
-      {data.kind === 'simulated-output' && data.outputText && (
-        <div className="mobile-flow-output">{data.outputText}</div>
-      )}
+      {data.kind === 'simulated-output' &&
+        ((data.simulation?.outputs?.length ?? 0) > 0 || data.outputText) && (
+          <div className="mobile-flow-output-stack">
+            {(data.simulation?.outputs ?? [data.outputText]).filter(Boolean).map((output, index) => (
+              <div className="mobile-flow-output" key={`${index}-${output}`}>
+                {output}
+              </div>
+            ))}
+          </div>
+        )}
       {data.kind === 'translation' && (
         <div className="mobile-flow-readonly-config">
           <span>{data.memoryMode ? '已开启记忆模式' : '未开启记忆模式'}</span>
@@ -1117,6 +1154,8 @@ function BlueprintEditor() {
                             : node.data.simulation?.state === 'active'
                               ? (node.data.simulation.progress ?? 0)
                               : 0,
+                          messages: node.data.simulation?.messages ?? [],
+                          outputs: node.data.simulation?.outputs ?? [],
                         }
                       : node.data.simulation,
                 },
@@ -1147,6 +1186,11 @@ function BlueprintEditor() {
                           state: 'error' as const,
                           message: activity.message,
                           progress: 100,
+                          messages: [
+                            ...(node.data.simulation?.messages ?? []),
+                            activity.message,
+                          ],
+                          outputs: node.data.simulation?.outputs ?? [],
                         },
                       },
                     }
@@ -1156,27 +1200,33 @@ function BlueprintEditor() {
             continue;
           }
           setNodes((current) =>
-            current.map((node) =>
-              node.id === activity.nodeId
-                ? {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      ...(activity.nodeType === 'simulated-output'
-                        ? { outputText: activity.text ?? '' }
-                        : {}),
-                      simulation: {
-                        state: 'active' as const,
-                        message: activity.message,
-                        progress:
-                          node.data.simulation?.state === 'active'
-                            ? Math.max(95, node.data.simulation.progress ?? 0)
-                            : 95,
-                      },
-                    },
-                  }
-                : node,
-            ),
+            current.map((node) => {
+              if (node.id !== activity.nodeId) return node;
+              const messages = [...(node.data.simulation?.messages ?? []), activity.message].slice(-8);
+              const outputs =
+                activity.nodeType === 'simulated-output' && activity.text
+                  ? [...(node.data.simulation?.outputs ?? []), activity.text].slice(-8)
+                  : (node.data.simulation?.outputs ?? []);
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  ...(activity.nodeType === 'simulated-output'
+                    ? { outputText: activity.text ?? '' }
+                    : {}),
+                  simulation: {
+                    state: 'active' as const,
+                    message: activity.message,
+                    messages,
+                    outputs,
+                    progress:
+                      node.data.simulation?.state === 'active'
+                        ? Math.max(95, node.data.simulation.progress ?? 0)
+                        : 95,
+                  },
+                },
+              };
+            }),
           );
           await waitWithProgress(activity.nodeId, 95, 100, Math.min(220, delay), 'ease-out');
           const nextNodeIds =
@@ -1202,6 +1252,8 @@ function BlueprintEditor() {
                         state: 'done' as const,
                         message: activity.message,
                         progress: 100,
+                        messages: node.data.simulation?.messages ?? [],
+                        outputs: node.data.simulation?.outputs ?? [],
                       },
                     },
                   }
@@ -1213,6 +1265,8 @@ function BlueprintEditor() {
                         simulation: {
                           state: 'active' as const,
                           progress: 50,
+                          messages: node.data.simulation?.messages ?? [],
+                          outputs: node.data.simulation?.outputs ?? [],
                         },
                       },
                     }
@@ -2586,6 +2640,12 @@ const logEventLabels: Record<string, string> = {
   message_upload_attempt_started: '开始上传消息',
   message_upload_acknowledged: '消息上传已确认',
   message_upload_batch_acknowledged: '批量消息上传已确认',
+  message_upload_batch_accepted: '批量消息已持久化，后台处理中',
+  message_upload_batch_processing: '批量消息后台处理中',
+  message_upload_batch_completed: '批量消息后台处理完成',
+  message_upload_batch_retry_scheduled: '批量消息将自动重试',
+  message_upload_batch_retry_exhausted: '批量消息重试次数已用尽',
+  message_upload_batch_deduplicated: '批量消息已去重',
   message_upload_batch_processed: '批量消息处理完成',
   message_upload_batch_deliveries_queued: '批量发送任务已加入队列',
   message_upload_batch_failed: '批量消息处理失败',

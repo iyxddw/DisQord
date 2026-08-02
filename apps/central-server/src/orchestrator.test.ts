@@ -111,6 +111,14 @@ function node(
   return { id, type, position: { x: 0, y: 0 }, config };
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for the batch worker.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe('blueprint message pipeline', () => {
   it('runs a simulated input through the real pipeline and sends to a real target', async () => {
     const input = randomUUID();
@@ -223,14 +231,21 @@ describe('blueprint message pipeline', () => {
 
     const first = message(setup.sourceSession.nodeId, 'one');
     const second = message(setup.sourceSession.nodeId, 'two');
+    const batchId = randomUUID();
     await setup.orchestrator.handleNodeFrame({
       nodeId: setup.sourceSession.nodeId,
       nodeType: 'qq',
       kind: 'message.upload.batch',
       frameId: randomUUID(),
-      payload: { batchId: randomUUID(), messages: [first, second] },
+      payload: { batchId, messages: [first, second] },
     });
 
+    // Upload acknowledgement is intentionally fast.  The LLM work and the
+    // single grouped delivery command continue in the background.
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    expect((await setup.store.get<{ status: string }>('message-upload-batch', batchId))?.value.status).toBe(
+      'completed',
+    );
     expect(peakTranslations).toBe(2);
     expect(setup.sendToNode).toHaveBeenCalledTimes(1);
     expect(setup.sendToNode).toHaveBeenCalledWith(
