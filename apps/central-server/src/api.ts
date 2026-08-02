@@ -38,6 +38,27 @@ const sessionCandidateSchema = z.object({
   displayName: z.string().min(1).max(256).optional(),
 });
 const sessionUpdateSchema = z.object({ remark: z.string().trim().max(256).nullable() });
+const simulationSettingsSchema = z.object({
+  delayMs: z.number().int().min(0).max(10_000).default(1_000),
+});
+const nodeLogPageSchema = z.object({
+  items: z.array(
+    z.object({
+      createdAt: z.string(),
+      level: z.enum(['debug', 'info', 'warn', 'error']),
+      event: z.string(),
+      details: z.record(z.string(), z.unknown()).optional(),
+    }),
+  ),
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
+  totalPages: z.number().int().positive(),
+});
+const nodeLogResponseSchema = z.object({
+  requestId: z.uuid(),
+  page: nodeLogPageSchema,
+});
 const llmSettingsInputSchema = z.object({
   baseUrl: z.url(),
   apiKey: z.string().min(1).max(10_000).optional(),
@@ -67,6 +88,12 @@ interface VerificationRecord {
   readonly expiresAt: string;
   readonly sentAt: string;
   readonly attemptCount: number;
+}
+
+interface PendingNodeLogRequest {
+  readonly resolve: (page: z.infer<typeof nodeLogPageSchema>) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: NodeJS.Timeout;
 }
 
 export interface CentralApplicationOptions {
@@ -104,6 +131,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   });
   const auth = new CentralAuthService(options.store);
   let gateway: CentralNodeGateway | undefined;
+  const pendingNodeLogRequests = new Map<string, PendingNodeLogRequest>();
 
   void app.register(cookie);
 
@@ -121,6 +149,18 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         });
       },
       onFrame: async (frame) => {
+        if (frame.kind === 'node.logs.response') {
+          const parsed = nodeLogResponseSchema.safeParse(frame.payload);
+          if (parsed.success) {
+            const pending = pendingNodeLogRequests.get(parsed.data.requestId);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingNodeLogRequests.delete(parsed.data.requestId);
+              pending.resolve(parsed.data.page);
+              return;
+            }
+          }
+        }
         await options.store.set('node-runtime', frame.nodeId, {
           nodeId: frame.nodeId,
           nodeType: frame.nodeType,
@@ -249,6 +289,21 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     }
   });
 
+  app.get('/api/settings/simulation', { preHandler: requireAdmin }, async () => {
+    const entry = await options.store.get('settings', 'simulation');
+    return simulationSettingsSchema.parse(entry?.value ?? { delayMs: 1_000 });
+  });
+
+  app.put('/api/settings/simulation', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const settings = simulationSettingsSchema.parse(request.body);
+      await options.store.set('settings', 'simulation', settings);
+      return settings;
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
   app.get('/api/prompts/:purpose', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const purpose = promptPurposeSchema.parse((request.params as { purpose: string }).purpose);
@@ -320,9 +375,21 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     },
   );
 
-  app.get('/api/chat-sessions', { preHandler: requireAdmin }, async () =>
-    (await options.store.list<ChatSession>('chat-session')).map((entry) => entry.value),
-  );
+  app.get('/api/chat-sessions', { preHandler: requireAdmin }, async () => {
+    const entries = await options.store.list<ChatSession>('chat-session');
+    return await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.value.status !== 'pending') return entry.value;
+        const verification = await options.store.get<VerificationRecord>('verification', entry.key);
+        return {
+          ...entry.value,
+          ...(verification?.value.expiresAt
+            ? { verificationExpiresAt: verification.value.expiresAt }
+            : {}),
+        };
+      }),
+    );
+  });
 
   app.get('/api/chat-sessions/candidates', { preHandler: requireAdmin }, async () => {
     const entries = await options.store.list<{
@@ -747,36 +814,32 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     },
   );
 
-  app.get(
-    '/api/blueprints/:id/activity',
-    { preHandler: requireAdmin },
-    async (request, reply) => {
-      try {
-        const { id } = z.object({ id: z.uuid() }).parse(request.params);
-        const { cursor } = z.object({ cursor: z.string().max(128).optional() }).parse(request.query);
-        const items = (await options.store.list<Record<string, unknown>>('blueprint-activity'))
-          .map((entry) => entry.value)
-          .filter((item) => item.blueprintId === id)
-          .sort((left, right) => activityCursor(left).localeCompare(activityCursor(right)))
-          .filter((item) => !cursor || activityCursor(item) > cursor)
-          .slice(-200);
-        const nextCursor = items.length
-          ? activityCursor(items.at(-1)!)
-          : cursor || `${String(Date.now() * 1_000).padStart(16, '0')}|`;
-        const orderedItems = [...items].sort((left, right) => {
-          const byTime = String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''));
-          if (byTime !== 0) return byTime;
-          if (left.traceId === right.traceId) {
-            return Number(left.step ?? 0) - Number(right.step ?? 0);
-          }
-          return String(left.id ?? '').localeCompare(String(right.id ?? ''));
-        });
-        return { items: orderedItems, cursor: nextCursor };
-      } catch (error) {
-        return await reply.code(400).send({ error: errorMessage(error) });
-      }
-    },
-  );
+  app.get('/api/blueprints/:id/activity', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const { cursor } = z.object({ cursor: z.string().max(128).optional() }).parse(request.query);
+      const items = (await options.store.list<Record<string, unknown>>('blueprint-activity'))
+        .map((entry) => entry.value)
+        .filter((item) => item.blueprintId === id)
+        .sort((left, right) => activityCursor(left).localeCompare(activityCursor(right)))
+        .filter((item) => !cursor || activityCursor(item) > cursor)
+        .slice(-200);
+      const nextCursor = items.length
+        ? activityCursor(items.at(-1)!)
+        : cursor || `${String(Date.now() * 1_000).padStart(16, '0')}|`;
+      const orderedItems = [...items].sort((left, right) => {
+        const byTime = String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? ''));
+        if (byTime !== 0) return byTime;
+        if (left.traceId === right.traceId) {
+          return Number(left.step ?? 0) - Number(right.step ?? 0);
+        }
+        return String(left.id ?? '').localeCompare(String(right.id ?? ''));
+      });
+      return { items: orderedItems, cursor: nextCursor };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
 
   app.get('/api/reviews', { preHandler: requireAdmin }, async () =>
     (await options.store.list('moderation-review')).map((entry) => entry.value),
@@ -797,6 +860,57 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       }
       await options.onReviewAction(id, decision);
       return { ok: true };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+  app.get('/api/node-logs', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const query = z
+        .object({
+          nodeId: z.uuid(),
+          page: z.coerce.number().int().min(1).default(1),
+          pageSize: z.coerce.number().int().min(10).max(200).default(50),
+          level: z.enum(['all', 'warn', 'error']).default('all'),
+          search: z.string().trim().max(200).default(''),
+        })
+        .parse(request.query);
+      const node = await options.store.get<NodeSession>('node-session', query.nodeId);
+      if (!node || node.value.revoked) {
+        return await reply.code(404).send({ error: '客户端不存在或已撤销。' });
+      }
+      if (!gateway?.isNodeConnected(query.nodeId)) {
+        return await reply.code(409).send({ error: '客户端当前离线，无法拉取日志。' });
+      }
+      const requestId = randomUUID();
+      const pagePromise = new Promise<z.infer<typeof nodeLogPageSchema>>((resolvePage, reject) => {
+        const timer = setTimeout(() => {
+          pendingNodeLogRequests.delete(requestId);
+          reject(new Error('客户端日志响应超时。'));
+        }, 15_000);
+        timer.unref();
+        pendingNodeLogRequests.set(requestId, {
+          resolve: resolvePage,
+          reject,
+          timer,
+        });
+      });
+      try {
+        await gateway.sendToNode(query.nodeId, 'node.logs.request', {
+          requestId,
+          page: query.page,
+          pageSize: query.pageSize,
+          level: query.level,
+          search: query.search,
+        });
+        return await pagePromise;
+      } finally {
+        const pending = pendingNodeLogRequests.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingNodeLogRequests.delete(requestId);
+        }
+      }
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
     }
@@ -855,6 +969,11 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   }
 
   app.addHook('onClose', async () => {
+    for (const [requestId, pending] of pendingNodeLogRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('中央服务正在关闭。'));
+      pendingNodeLogRequests.delete(requestId);
+    }
     if (gateway) await gateway.close();
   });
 

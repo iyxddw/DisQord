@@ -30,8 +30,11 @@ import {
   Bot,
   Check,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   CircleAlert,
   FileClock,
+  GripVertical,
   LogOut,
   LoaderCircle,
   MessagesSquare,
@@ -80,23 +83,73 @@ function sessionLabel(session: ChatSession): string {
   return session.remark?.trim() || session.displayName;
 }
 
+const pageCache = new Map<string, unknown>();
+const pageRequests = new Map<string, Promise<unknown>>();
+
+function loadCached<T>(path: string, force = false): Promise<T> {
+  if (!force && pageCache.has(path)) return Promise.resolve(pageCache.get(path) as T);
+  if (!force) {
+    const existing = pageRequests.get(path);
+    if (existing) return existing as Promise<T>;
+  }
+  const request = api<T>(path)
+    .then((value) => {
+      pageCache.set(path, value);
+      return value;
+    })
+    .finally(() => pageRequests.delete(path));
+  pageRequests.set(path, request);
+  return request;
+}
+
 function useLoad<T>(path: string, fallback: T) {
-  const [data, setData] = useState<T>(fallback);
+  const [data, setData] = useState<T>(() => (pageCache.get(path) as T | undefined) ?? fallback);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-  const reload = useCallback(async (options: { background?: boolean } = {}) => {
-    if (!options.background) setLoading(true);
-    try {
-      setData(await api<T>(path));
-      setError('');
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
+  const [loading, setLoading] = useState(() => !pageCache.has(path));
+  const reload = useCallback(
+    async (options: { background?: boolean } = {}) => {
+      if (!options.background) setLoading(true);
+      try {
+        setData(await loadCached<T>(path, true));
+        setError('');
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '加载失败');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [path],
+  );
+  useEffect(() => {
+    let active = true;
+    void loadCached<T>(path).then(
+      (value) => {
+        if (!active) return;
+        setData(value);
+        setError('');
+        setLoading(false);
+      },
+      (cause: unknown) => {
+        if (!active) return;
+        setError(cause instanceof Error ? cause.message : '加载失败');
+        setLoading(false);
+      },
+    );
+    return () => {
+      active = false;
+    };
   }, [path]);
-  useEffect(() => void reload(), [reload]);
-  return { data, error, loading, reload, setData, setError };
+  const updateData = useCallback(
+    (next: T | ((current: T) => T)) => {
+      setData((current) => {
+        const value = typeof next === 'function' ? (next as (current: T) => T)(current) : next;
+        pageCache.set(path, value);
+        return value;
+      });
+    },
+    [path],
+  );
+  return { data, error, loading, reload, setData: updateData, setError };
 }
 
 function App() {
@@ -107,6 +160,21 @@ function App() {
       .then(setAuth)
       .catch(() => setAuth({ configured: false, authenticated: false }));
   }, []);
+
+  useEffect(() => {
+    if (!auth?.authenticated) return;
+    const paths = [
+      '/nodes',
+      '/chat-sessions',
+      '/chat-sessions/candidates',
+      '/blueprints',
+      '/settings/llm',
+      '/settings/simulation',
+      '/reviews',
+      '/logs?page=1&pageSize=50&level=all&search=',
+    ];
+    for (const path of paths) void loadCached(path).catch(() => undefined);
+  }, [auth?.authenticated]);
 
   if (!auth) return <Splash />;
   if (!auth.authenticated) {
@@ -326,9 +394,9 @@ function Sessions() {
     setData((current) =>
       current.map((item) =>
         item.id === session.id
-            ? nextRemark
-              ? { ...item, remark: nextRemark }
-              : (() => {
+          ? nextRemark
+            ? { ...item, remark: nextRemark }
+            : (() => {
                 const withoutRemark = { ...item };
                 delete withoutRemark.remark;
                 return withoutRemark;
@@ -528,19 +596,19 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           ? '消息入口'
           : data.kind === 'simulated-input'
             ? '模拟输入'
-          : data.kind === 'output'
-            ? '发送目标'
-            : data.kind === 'simulated-output'
-              ? '模拟输出'
-            : data.kind === 'translation'
-              ? '文本翻译'
-              : data.kind === 'moderation'
-                ? '文本审核'
-                : data.kind === 'review'
-                  ? '人工审核'
-                  : data.kind === 'fixed'
-                    ? '固定文本'
-                    : '旧版图片合成'}
+            : data.kind === 'output'
+              ? '发送目标'
+              : data.kind === 'simulated-output'
+                ? '模拟输出'
+                : data.kind === 'translation'
+                  ? '文本翻译'
+                  : data.kind === 'moderation'
+                    ? '文本审核'
+                    : data.kind === 'review'
+                      ? '人工审核'
+                      : data.kind === 'fixed'
+                        ? '固定文本'
+                        : '旧版图片合成'}
       </span>
       <strong>{data.label}</strong>
       {data.kind === 'simulated-input' && (
@@ -630,6 +698,8 @@ type MobileBlueprintFlowProps = {
   edges: Edge[];
   onPatchNode: (nodeId: string, patch: Partial<FlowData>) => void;
   onDeleteNode: (nodeId: string) => void;
+  onConnect: (sourceId: string, targetId: string, sourceHandle?: string) => void;
+  onMoveNode: (nodeId: string, direction: 'up' | 'down') => void;
   onSimulate: (nodeId: string, text: string) => Promise<void>;
   onDraftChange: () => void;
   pendingSimulation?: { nodeId: string; text: string };
@@ -642,6 +712,8 @@ function MobileBlueprintFlow({
   edges,
   onPatchNode,
   onDeleteNode,
+  onConnect,
+  onMoveNode,
   onSimulate,
   onDraftChange,
   pendingSimulation,
@@ -650,6 +722,7 @@ function MobileBlueprintFlow({
 }: MobileBlueprintFlowProps) {
   const [rootId, setRootId] = useState('');
   const [choices, setChoices] = useState<Record<string, string>>({});
+  const [draggingId, setDraggingId] = useState('');
   const incoming = useMemo(() => {
     const map = new Set(edges.map((edge) => edge.target));
     return nodes.filter((node) => !map.has(node.id));
@@ -704,7 +777,9 @@ function MobileBlueprintFlow({
       <div className="mobile-flow-heading">
         <div>
           <strong>流程预览</strong>
-          <span>点击分支按钮切换后续路径；卡片内可直接编辑模块。</span>
+          <span>
+            点击分支按钮切换后续路径；卡片内可编辑、改连线，也可拖拽或用上下按钮调整节点位置。
+          </span>
         </div>
         {incoming.length > 1 && (
           <label>
@@ -723,12 +798,32 @@ function MobileBlueprintFlow({
         {path.map((node, index) => {
           const branches = outgoing.get(node.id) ?? [];
           return (
-            <div className="mobile-flow-step" key={node.id}>
+            <div
+              className="mobile-flow-step"
+              key={node.id}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={() => {
+                if (!draggingId || draggingId === node.id) return;
+                const from = path.findIndex((item) => item.id === draggingId);
+                const to = index;
+                const direction = from < to ? 'down' : 'up';
+                for (let step = 0; step < Math.abs(to - from); step += 1) {
+                  onMoveNode(draggingId, direction);
+                }
+                setDraggingId('');
+              }}
+            >
               <MobileFlowCard
                 node={node}
                 savePrompt={pendingSimulation?.nodeId === node.id}
                 onPatch={onPatchNode}
                 onDelete={onDeleteNode}
+                onConnect={onConnect}
+                onMove={onMoveNode}
+                allNodes={nodes}
+                outgoing={branches}
+                onDragStart={() => setDraggingId(node.id)}
+                onDragEnd={() => setDraggingId('')}
                 onSimulate={onSimulate}
                 onDraftChange={onDraftChange}
                 onConfirmSaveSimulation={onConfirmSaveSimulation}
@@ -771,6 +866,12 @@ function MobileBlueprintFlow({
               savePrompt={pendingSimulation?.nodeId === node.id}
               onPatch={onPatchNode}
               onDelete={onDeleteNode}
+              onConnect={onConnect}
+              onMove={onMoveNode}
+              allNodes={nodes}
+              outgoing={outgoing.get(node.id) ?? []}
+              onDragStart={() => setDraggingId(node.id)}
+              onDragEnd={() => setDraggingId('')}
               onSimulate={onSimulate}
               onDraftChange={onDraftChange}
               onConfirmSaveSimulation={onConfirmSaveSimulation}
@@ -788,6 +889,12 @@ function MobileFlowCard({
   savePrompt,
   onPatch,
   onDelete,
+  onConnect,
+  onMove,
+  allNodes,
+  outgoing,
+  onDragStart,
+  onDragEnd,
   onSimulate,
   onDraftChange,
   onConfirmSaveSimulation,
@@ -797,6 +904,12 @@ function MobileFlowCard({
   savePrompt: boolean;
   onPatch: (nodeId: string, patch: Partial<FlowData>) => void;
   onDelete: (nodeId: string) => void;
+  onConnect: (sourceId: string, targetId: string, sourceHandle?: string) => void;
+  onMove: (nodeId: string, direction: 'up' | 'down') => void;
+  allNodes: Node<FlowData>[];
+  outgoing: Edge[];
+  onDragStart: () => void;
+  onDragEnd: () => void;
   onSimulate: (nodeId: string, text: string) => Promise<void>;
   onDraftChange: () => void;
   onConfirmSaveSimulation: () => void;
@@ -821,10 +934,34 @@ function MobileFlowCard({
         </div>
       )}
       <div className="mobile-flow-card-head">
-        <span>{flowKindLabel(data.kind)}</span>
-        <button aria-label={`删除${data.label}`} title="删除模块" onClick={() => onDelete(node.id)}>
-          <Trash2 size={14} />
-        </button>
+        <span className="mobile-flow-kind">
+          <button
+            className="mobile-drag-handle"
+            draggable
+            aria-label="拖拽调整节点位置"
+            title="拖拽调整节点位置"
+            onDragStart={onDragStart}
+            onDragEnd={onDragEnd}
+          >
+            <GripVertical size={14} aria-hidden="true" />
+          </button>
+          {flowKindLabel(data.kind)}
+        </span>
+        <div className="mobile-flow-card-actions">
+          <button aria-label="上移模块" title="上移模块" onClick={() => onMove(node.id, 'up')}>
+            <ChevronUp size={14} />
+          </button>
+          <button aria-label="下移模块" title="下移模块" onClick={() => onMove(node.id, 'down')}>
+            <ChevronDown size={14} />
+          </button>
+          <button
+            aria-label={`删除${data.label}`}
+            title="删除模块"
+            onClick={() => onDelete(node.id)}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
       </div>
       <strong>{data.label}</strong>
       {data.simulation && <p className="mobile-flow-activity">{data.simulation.message}</p>}
@@ -893,6 +1030,38 @@ function MobileFlowCard({
           />
         </div>
       )}
+      {data.kind !== 'output' && data.kind !== 'simulated-output' && (
+        <div className="mobile-flow-connections">
+          <span>连接到</span>
+          {(data.kind === 'moderation' || data.kind === 'review'
+            ? [
+                { handle: 'passed', label: data.kind === 'review' ? '通过' : '过审' },
+                { handle: 'blocked', label: data.kind === 'review' ? '拦截' : '未过' },
+              ]
+            : [{ handle: undefined, label: '下一步' }]
+          ).map(({ handle, label }) => {
+            const edge = outgoing.find((item) => item.sourceHandle === handle);
+            return (
+              <label key={handle ?? 'default'}>
+                {label}
+                <select
+                  value={edge?.target ?? ''}
+                  onChange={(event) => onConnect(node.id, event.target.value, handle)}
+                >
+                  <option value="">未连接</option>
+                  {allNodes
+                    .filter((candidate) => candidate.id !== node.id)
+                    .map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.data.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            );
+          })}
+        </div>
+      )}
     </article>
   );
 }
@@ -926,6 +1095,9 @@ function mobileBranchLabel(edge: Edge, index: number): string {
 function BlueprintEditor() {
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
   const blueprints = useLoad<Blueprint[]>('/blueprints', []);
+  const simulationSettings = useLoad<{ delayMs: number }>('/settings/simulation', {
+    delayMs: 1_000,
+  });
   const usable = sessions.data.filter((item) => item.status === 'verified');
   const [nodes, setNodes, onNodesChangeBase] = useNodesState<Node<FlowData>>([]);
   const [edges, setEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
@@ -992,7 +1164,9 @@ function BlueprintEditor() {
             },
           })),
         );
-        await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+        await new Promise((resolve) =>
+          window.setTimeout(resolve, Math.max(0, simulationSettings.data.delayMs ?? 1_000)),
+        );
         setNodes((current) =>
           current.map((node) =>
             node.id === activity.nodeId
@@ -1059,7 +1233,7 @@ function BlueprintEditor() {
       activityQueue.current = [];
       activityPlaying.current = false;
     };
-  }, [currentBlueprintId, setNodes]);
+  }, [currentBlueprintId, setNodes, simulationSettings.data.delayMs]);
 
   if (sessions.loading || blueprints.loading) {
     return <LoadingState text="正在载入蓝图和会话" />;
@@ -1108,19 +1282,19 @@ function BlueprintEditor() {
             ? 'input'
             : node.type === 'simulated-input'
               ? 'simulated-input'
-            : node.type === 'chat-output'
-              ? 'output'
-              : node.type === 'simulated-output'
-                ? 'simulated-output'
-              : node.type === 'llm-translation'
-                ? 'translation'
-                : node.type === 'llm-moderation'
-                  ? 'moderation'
-                  : node.type === 'manual-review'
-                    ? 'review'
-                    : node.type === 'fixed-text'
-                      ? 'fixed'
-                      : 'renderer';
+              : node.type === 'chat-output'
+                ? 'output'
+                : node.type === 'simulated-output'
+                  ? 'simulated-output'
+                  : node.type === 'llm-translation'
+                    ? 'translation'
+                    : node.type === 'llm-moderation'
+                      ? 'moderation'
+                      : node.type === 'manual-review'
+                        ? 'review'
+                        : node.type === 'fixed-text'
+                          ? 'fixed'
+                          : 'renderer';
         return {
           id: node.id,
           type: 'session',
@@ -1135,15 +1309,15 @@ function BlueprintEditor() {
                   ? '手动发送测试消息'
                   : kind === 'simulated-output'
                     ? '查看流程输出'
-                : kind === 'translation'
-                  ? '翻译当前文本'
-                  : kind === 'moderation'
-                    ? '按违规分数分流'
-                    : kind === 'review'
-                      ? '等待管理员处理'
-                      : kind === 'fixed'
-                        ? '替换当前文本'
-                        : '使用原消息资料生成 PNG',
+                    : kind === 'translation'
+                      ? '翻译当前文本'
+                      : kind === 'moderation'
+                        ? '按违规分数分流'
+                        : kind === 'review'
+                          ? '等待管理员处理'
+                          : kind === 'fixed'
+                            ? '替换当前文本'
+                            : '使用原消息资料生成 PNG',
             kind,
             ...(sessionId ? { sessionId } : {}),
             ...(typeof node.config.prompt === 'string' ? { prompt: node.config.prompt } : {}),
@@ -1271,19 +1445,19 @@ function BlueprintEditor() {
           ? 'chat-input'
           : node.data.kind === 'simulated-input'
             ? 'simulated-input'
-          : node.data.kind === 'output'
-            ? 'chat-output'
-            : node.data.kind === 'simulated-output'
-              ? 'simulated-output'
-            : node.data.kind === 'translation'
-              ? 'llm-translation'
-              : node.data.kind === 'moderation'
-                ? 'llm-moderation'
-                : node.data.kind === 'review'
-                  ? 'manual-review'
-                  : node.data.kind === 'fixed'
-                    ? 'fixed-text'
-                    : 'card-renderer',
+            : node.data.kind === 'output'
+              ? 'chat-output'
+              : node.data.kind === 'simulated-output'
+                ? 'simulated-output'
+                : node.data.kind === 'translation'
+                  ? 'llm-translation'
+                  : node.data.kind === 'moderation'
+                    ? 'llm-moderation'
+                    : node.data.kind === 'review'
+                      ? 'manual-review'
+                      : node.data.kind === 'fixed'
+                        ? 'fixed-text'
+                        : 'card-renderer',
       position: node.position,
       config:
         node.data.kind === 'input' || node.data.kind === 'output'
@@ -1338,6 +1512,40 @@ function BlueprintEditor() {
       return;
     }
     await executeSimulatedInput(nodeId, text);
+  };
+
+  const reconnectMobile = (sourceId: string, targetId: string, sourceHandle?: string) => {
+    setDraftDirty(true);
+    setEdges((current) => {
+      const remaining = current.filter(
+        (edge) => !(edge.source === sourceId && (edge.sourceHandle ?? undefined) === sourceHandle),
+      );
+      if (!targetId) return remaining;
+      return addEdge(
+        {
+          id: createBrowserId(),
+          source: sourceId,
+          target: targetId,
+          ...(sourceHandle ? { sourceHandle } : {}),
+        },
+        remaining,
+      );
+    });
+  };
+
+  const moveMobileNode = (nodeId: string, direction: 'up' | 'down') => {
+    setDraftDirty(true);
+    const delta = direction === 'up' ? -1 : 1;
+    setNodes((current) =>
+      current.map((node) =>
+        node.id === nodeId
+          ? {
+              ...node,
+              position: { ...node.position, y: Math.max(20, node.position.y + delta * 160) },
+            }
+          : node,
+      ),
+    );
   };
 
   const save = async (): Promise<boolean> => {
@@ -1475,11 +1683,11 @@ function BlueprintEditor() {
               <option value="__simulated-output__">模拟输出</option>
             </optgroup>
             <optgroup label="真实会话">
-            {usable.map((session) => (
-              <option key={session.id} value={session.id}>
-                {sessionLabel(session)}
-              </option>
-            ))}
+              {usable.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {sessionLabel(session)}
+                </option>
+              ))}
             </optgroup>
           </select>
         </label>
@@ -1544,12 +1752,10 @@ function BlueprintEditor() {
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
-          onConnect={(connection: Connection) =>
-            {
-              setDraftDirty(true);
-              setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items));
-            }
-          }
+          onConnect={(connection: Connection) => {
+            setDraftDirty(true);
+            setEdges((items) => addEdge({ ...connection, id: createBrowserId() }, items));
+          }}
           onEdgeClick={(_event, edge) => {
             setDraftDirty(true);
             setEdges((items) => items.filter((item) => item.id !== edge.id));
@@ -1560,12 +1766,7 @@ function BlueprintEditor() {
           fitView
         >
           <Background color="#25282d" gap={24} />
-          <MiniMap
-            pannable
-            zoomable
-            nodeColor="#656b72"
-            maskColor="rgb(13 15 17 / 76%)"
-          />
+          <MiniMap pannable zoomable nodeColor="#656b72" maskColor="rgb(13 15 17 / 76%)" />
           <Controls />
         </ReactFlow>
       </div>
@@ -1587,6 +1788,8 @@ function BlueprintEditor() {
             current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
           );
         }}
+        onConnect={reconnectMobile}
+        onMoveNode={moveMobileNode}
         onSimulate={runSimulatedInput}
         onDraftChange={() => setDraftDirty(true)}
         {...(pendingSimulation ? { pendingSimulation } : {})}
@@ -1605,6 +1808,14 @@ function Nodes() {
   const [adding, setAdding] = useState<Record<string, boolean>>({});
   const [verificationCodes, setVerificationCodes] = useState<Record<string, string>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
+  const [sending, setSending] = useState<Record<string, boolean>>({});
+  const [verifying, setVerifying] = useState<Record<string, boolean>>({});
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const configure = async (node: NodeRuntime) => {
     const candidate = candidates.data.find(
@@ -1614,13 +1825,20 @@ function Nodes() {
       setNotices((current) => ({ ...current, [node.nodeId]: '请先选择一个会话。' }));
       return;
     }
+    setSending((current) => ({ ...current, [node.nodeId]: true }));
     try {
       const session = await api<ChatSession>('/chat-sessions', {
         method: 'POST',
         json: candidate,
       });
-      sessions.setData((current) => [...current.filter((item) => item.id !== session.id), session]);
-      await api(`/chat-sessions/${session.id}/send-code`, { method: 'POST' });
+      const verification = await api<{ expiresAt: string }>(
+        `/chat-sessions/${session.id}/send-code`,
+        { method: 'POST' },
+      );
+      sessions.setData((current) => [
+        ...current.filter((item) => item.id !== session.id),
+        { ...session, verificationExpiresAt: verification.expiresAt },
+      ]);
       setAdding((current) => ({ ...current, [node.nodeId]: false }));
       setDrafts((current) => ({ ...current, [node.nodeId]: '' }));
       setNotices((current) => ({
@@ -1632,30 +1850,58 @@ function Nodes() {
         ...current,
         [node.nodeId]: cause instanceof Error ? cause.message : '配置失败',
       }));
+    } finally {
+      setSending((current) => ({ ...current, [node.nodeId]: false }));
     }
   };
 
   const verify = async (node: NodeRuntime, session: ChatSession) => {
-    const previous = sessions.data;
-    sessions.setData((current) =>
-      current.map((item) =>
-        item.id === session.id
-          ? { ...item, status: 'verified' }
-          : item,
-      ),
-    );
+    setVerifying((current) => ({ ...current, [session.id]: true }));
     try {
-      await api(`/chat-sessions/${session.id}/verify`, {
+      const verified = await api<ChatSession>(`/chat-sessions/${session.id}/verify`, {
         method: 'POST',
         json: { code: verificationCodes[session.id] ?? '' },
       });
+      sessions.setData((current) =>
+        current.map((item) => (item.id === session.id ? { ...item, ...verified } : item)),
+      );
+      setVerificationCodes((current) => ({ ...current, [session.id]: '' }));
       setNotices((current) => ({ ...current, [node.nodeId]: '客户端与会话验证成功。' }));
     } catch (cause) {
-      sessions.setData(previous);
       setNotices((current) => ({
         ...current,
         [node.nodeId]: cause instanceof Error ? cause.message : '验证码错误',
       }));
+    } finally {
+      setVerifying((current) => ({ ...current, [session.id]: false }));
+    }
+  };
+
+  const resend = async (node: NodeRuntime, session: ChatSession) => {
+    setSending((current) => ({ ...current, [session.id]: true }));
+    try {
+      const verification = await api<{ expiresAt: string }>(
+        `/chat-sessions/${session.id}/send-code`,
+        { method: 'POST' },
+      );
+      sessions.setData((current) =>
+        current.map((item) =>
+          item.id === session.id
+            ? { ...item, verificationExpiresAt: verification.expiresAt }
+            : item,
+        ),
+      );
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: '新验证码已发送，请从目标群或频道读取。',
+      }));
+    } catch (cause) {
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: cause instanceof Error ? cause.message : '重新发送失败',
+      }));
+    } finally {
+      setSending((current) => ({ ...current, [session.id]: false }));
     }
   };
 
@@ -1671,7 +1917,7 @@ function Nodes() {
     <div className="panel binding-panel">
       <PanelTitle
         title="客户端与会话"
-        subtitle="每个客户端可以验证并绑定多个群或频道"
+        subtitle="这里只负责绑定新会话；已绑定会话请在“聊天会话”页面查看和管理"
         action={
           <button className="icon-button" title="刷新" onClick={() => void reload()}>
             <RefreshCw size={16} />
@@ -1680,13 +1926,18 @@ function Nodes() {
       />
       <div className="node-list">
         {nodes.data.map((node) => {
-          const verified = sessions.data.filter(
-            (session) => session.nodeId === node.nodeId && session.status === 'verified',
-          );
           const pending = sessions.data.filter(
             (session) => session.nodeId === node.nodeId && session.status === 'pending',
           );
-          const used = new Set([...verified, ...pending].map((session) => session.externalId));
+          const used = new Set(
+            sessions.data
+              .filter(
+                (session) =>
+                  session.nodeId === node.nodeId &&
+                  ['verified', 'pending'].includes(session.status),
+              )
+              .map((session) => session.externalId),
+          );
           const available = candidates.data.filter(
             (candidate) => candidate.nodeId === node.nodeId && !used.has(candidate.externalId),
           );
@@ -1701,30 +1952,20 @@ function Nodes() {
               </div>
               <div className="connection-state">
                 <i className={node.online ? 'online' : ''} />
-                {node.online ? '在线' : '离线'} · 已绑定 {verified.length} 个会话
-              </div>
-
-              <div className="bound-session-list">
-                {verified.map((session) => (
-                  <div className="bound-session" key={session.id}>
-                    <div>
-                      <strong>{sessionLabel(session)}</strong>
-                      <span>
-                        {session.remark ? `原名：${session.displayName}` : '已验证，可在蓝图中使用'}
-                      </span>
-                    </div>
-                    <span className="badge success">
-                      <Check size={13} />
-                      已绑定
-                    </span>
-                  </div>
-                ))}
-                {!verified.length && <Empty text="这个客户端还没有已绑定会话" />}
+                {node.online ? '在线' : '离线'} · 可从客户端发现并绑定会话
               </div>
 
               {pending.map((session) => (
                 <div className="verify-box" key={session.id}>
-                  <strong>{sessionLabel(session)}</strong>
+                  <div className="verify-title">
+                    <strong>{sessionLabel(session)}</strong>
+                    <span>
+                      {session.verificationExpiresAt &&
+                      Date.parse(session.verificationExpiresAt) > now
+                        ? `验证码有效至 ${formatTime(session.verificationExpiresAt)}`
+                        : '验证码已过期，请重新发送'}
+                    </span>
+                  </div>
                   <input
                     placeholder="回填频道或群内的验证码"
                     value={verificationCodes[session.id] ?? ''}
@@ -1735,7 +1976,24 @@ function Nodes() {
                       }))
                     }
                   />
-                  <button onClick={() => void verify(node, session)}>完成验证</button>
+                  <button
+                    className="verify-submit"
+                    disabled={
+                      Boolean(verifying[session.id]) || !verificationCodes[session.id]?.trim()
+                    }
+                    onClick={() => void verify(node, session)}
+                  >
+                    {verifying[session.id] && <LoaderCircle className="spin" size={15} />}
+                    {verifying[session.id] ? '验证中' : '完成验证'}
+                  </button>
+                  <button
+                    className="verify-resend"
+                    disabled={Boolean(sending[session.id])}
+                    onClick={() => void resend(node, session)}
+                  >
+                    {sending[session.id] && <LoaderCircle className="spin" size={14} />}
+                    {sending[session.id] ? '发送中' : '重新发送验证码'}
+                  </button>
                 </div>
               ))}
 
@@ -1765,10 +2023,11 @@ function Nodes() {
                   <div className="binding-actions">
                     <button
                       className="primary"
-                      disabled={!node.online || !available.length}
+                      disabled={!node.online || !available.length || Boolean(sending[node.nodeId])}
                       onClick={() => void configure(node)}
                     >
-                      发送验证码
+                      {sending[node.nodeId] && <LoaderCircle className="spin" size={15} />}
+                      {sending[node.nodeId] ? '发送中' : '发送验证码'}
                     </button>
                     <button
                       onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: false }))}
@@ -1803,6 +2062,7 @@ function candidateKey(candidate: SessionCandidate): string {
 
 function LlmSettings() {
   const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
+  const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
   const [form, setForm] = useState({
     baseUrl: '',
     apiKey: '',
@@ -1812,27 +2072,40 @@ function LlmSettings() {
     maxRetries: 2,
     concurrency: 4,
   });
+  const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [notice, setNotice] = useState('');
   useEffect(() => {
     if (Object.keys(settings.data).length)
       setForm((current) => ({ ...current, ...settings.data, apiKey: '' }));
   }, [settings.data]);
+  useEffect(() => {
+    setSimulationDelayMs(simulation.data.delayMs ?? 1_000);
+  }, [simulation.data.delayMs]);
   const save = async () => {
     try {
-      await apiRetry(
-        '/settings/llm',
-        {
-          method: 'PUT',
-          json: { ...form, ...(form.apiKey ? {} : { apiKey: undefined }) },
-        },
-        { attempts: 3 },
-      );
+      const [savedSettings, savedSimulation] = await Promise.all([
+        apiRetry(
+          '/settings/llm',
+          {
+            method: 'PUT',
+            json: { ...form, ...(form.apiKey ? {} : { apiKey: undefined }) },
+          },
+          { attempts: 3 },
+        ),
+        apiRetry(
+          '/settings/simulation',
+          { method: 'PUT', json: { delayMs: simulationDelayMs } },
+          { attempts: 3 },
+        ),
+      ]);
+      settings.setData(savedSettings as Record<string, unknown>);
+      simulation.setData(savedSimulation as { delayMs: number });
       setNotice('设置已保存，API 密钥不会回传到浏览器。');
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '保存失败');
     }
   };
-  if (settings.loading) return <LoadingState text="正在读取模型设置" />;
+  if (settings.loading || simulation.loading) return <LoadingState text="正在读取基础设置" />;
   return (
     <div className="panel form-panel">
       <PanelTitle
@@ -1887,6 +2160,18 @@ function LlmSettings() {
             onChange={(event) => setForm({ ...form, concurrency: Number(event.target.value) })}
           />
         </label>
+        <label>
+          蓝图模拟节点间隔（毫秒）
+          <input
+            type="number"
+            min="0"
+            max="10000"
+            step="100"
+            value={simulationDelayMs}
+            onChange={(event) => setSimulationDelayMs(Number(event.target.value))}
+          />
+          <small className="field-hint">只影响模拟播放的视觉节奏，不会给真实消息增加延迟。</small>
+        </label>
       </div>
       <div className="safety-note">
         <ShieldCheck size={17} />
@@ -1905,11 +2190,20 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
   const [logLevel, setLogLevel] = useState('all');
   const [logSearch, setLogSearch] = useState('');
   const [logPage, setLogPage] = useState(1);
+  const [logDevice, setLogDevice] = useState('central');
   const reviewRecords = useLoad<Array<Record<string, unknown>>>('/reviews', []);
-  const logs = useLoad<LogPage>(
-    `/logs?page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel)}&search=${encodeURIComponent(logSearch)}`,
-    { items: [], page: 1, pageSize: 50, total: 0, totalPages: 1 },
-  );
+  const logNodes = useLoad<NodeRuntime[]>('/nodes', []);
+  const logPath =
+    logDevice === 'central'
+      ? `/logs?page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel)}&search=${encodeURIComponent(logSearch)}`
+      : `/node-logs?nodeId=${encodeURIComponent(logDevice)}&page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel === 'warn' || logLevel === 'error' ? logLevel : 'all')}&search=${encodeURIComponent(logSearch)}`;
+  const logs = useLoad<LogPage>(logPath, {
+    items: [],
+    page: 1,
+    pageSize: 50,
+    total: 0,
+    totalPages: 1,
+  });
   const records = kind === 'reviews' ? reviewRecords : logs;
   const visibleRecords =
     kind === 'reviews'
@@ -1965,6 +2259,28 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
           <div className="log-actions">
             {kind === 'logs' && (
               <>
+                <select
+                  value={logDevice}
+                  onChange={(event) => {
+                    setLogDevice(event.target.value);
+                    setLogPage(1);
+                    if (
+                      event.target.value !== 'central' &&
+                      !['all', 'warn', 'error'].includes(logLevel)
+                    ) {
+                      setLogLevel('all');
+                    }
+                  }}
+                  title="选择日志设备"
+                >
+                  <option value="central">中央服务</option>
+                  {logNodes.data.map((node) => (
+                    <option key={node.nodeId} value={node.nodeId}>
+                      {node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'} ·{' '}
+                      {node.nodeId.slice(0, 8)}
+                    </option>
+                  ))}
+                </select>
                 <input
                   className="log-search"
                   value={logSearch}
@@ -1982,8 +2298,8 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
                   }}
                 >
                   <option value="all">全部级别</option>
-                  <option value="debug">Debug</option>
-                  <option value="info">Info</option>
+                  {logDevice === 'central' && <option value="debug">Debug</option>}
+                  {logDevice === 'central' && <option value="info">Info</option>}
                   <option value="warn">Warn</option>
                   <option value="error">Error</option>
                 </select>
@@ -2006,7 +2322,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
         }
       />
       {records.error && <div className="error">{records.error}</div>}
-      {records.loading && (
+      {(records.loading || (kind === 'logs' && logNodes.loading)) && (
         <LoadingState text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
       )}
       <div className="record-list">
@@ -2016,7 +2332,9 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
             key={String(record.taskId ?? record.id ?? index)}
           >
             <div>
-              <strong>{String(record.event ?? record.reason ?? '审核任务')}</strong>
+              <strong>
+                {translateLogEvent(String(record.event ?? record.reason ?? '审核任务'))}
+              </strong>
               <span>{formatTime(String(record.createdAt ?? ''))}</span>
             </div>
             {kind === 'logs' && (
@@ -2057,9 +2375,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
             </button>
             <button
               disabled={logs.data.page >= logs.data.totalPages}
-              onClick={() =>
-                setLogPage((current) => Math.min(logs.data.totalPages, current + 1))
-              }
+              onClick={() => setLogPage((current) => Math.min(logs.data.totalPages, current + 1))}
             >
               下一页
             </button>
@@ -2108,6 +2424,59 @@ function formatTime(value?: string) {
   if (!value) return '暂无记录';
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+const logEventLabels: Record<string, string> = {
+  runtime_starting: '节点启动',
+  runtime_stopped: '节点已停止',
+  runtime_retrying: '节点重试连接',
+  central_connected: '已连接中央服务',
+  pairing_started: '开始配对',
+  pairing_completed: '配对完成',
+  session_candidates_ready: '会话列表已更新',
+  verification_requested: '收到验证请求',
+  verification_sent: '验证码已发送',
+  message_queued: '消息已加入队列',
+  message_upload_attempt_started: '开始上传消息',
+  message_upload_acknowledged: '消息上传已确认',
+  message_upload_retry_scheduled: '消息上传将重试',
+  message_upload_dead_letter: '消息上传进入死信队列',
+  delivery_queued: '发送任务已加入队列',
+  delivery_attempt_started: '开始发送消息',
+  delivery_platform_confirmed: '平台确认发送成功',
+  delivery_acknowledged_by_central: '中央服务已确认发送',
+  delivery_retry_scheduled: '发送失败，将重试',
+  delivery_dead_letter: '发送进入死信队列',
+  delivery_recovery_failed: '恢复发送任务失败',
+  delivery_failure_report_failed: '上报发送失败失败',
+  delivery_succeeded: '消息发送成功',
+  delivery_failed: '消息发送失败',
+  node_logs_sent: '客户端日志已回传',
+  blueprint_started: '蓝图开始处理',
+  blueprint_completed: '蓝图处理完成',
+  blueprint_failed: '蓝图处理失败',
+  blueprint_invalid: '蓝图配置无效',
+  blueprint_node_entered: '进入蓝图节点',
+  blueprint_paused: '蓝图已暂停',
+  message_received: '收到消息',
+  message_deduplicated: '重复消息已忽略',
+  message_discarded: '消息已丢弃',
+  source_session_matched: '已匹配来源会话',
+  unmatched_blueprint: '没有匹配的蓝图',
+  unmatched_session: '没有匹配的会话',
+  translation_requested: '请求翻译',
+  translation_response: '收到翻译结果',
+  moderation_requested: '请求审核',
+  moderation_response: '收到审核结果',
+  manual_review_created: '已创建人工审核任务',
+  manual_review_resolved: '人工审核任务已处理',
+  render_succeeded: '图片合成成功',
+  fixed_text_applied: '已替换为固定文本',
+  delivery_command_failed: '发送命令失败',
+};
+
+function translateLogEvent(event: string): string {
+  return logEventLabels[event] ?? event.replaceAll('_', ' ');
 }
 
 function createBrowserId(): string {

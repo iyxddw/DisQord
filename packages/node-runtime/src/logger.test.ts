@@ -9,7 +9,8 @@ import { NodeLogger } from './logger.js';
 const directories: string[] = [];
 
 afterEach(() => {
-  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of directories.splice(0))
+    rmSync(directory, { recursive: true, force: true });
 });
 
 describe('NodeLogger', () => {
@@ -28,6 +29,10 @@ describe('NodeLogger', () => {
     expect(logger.list({ search: 'discord', pageSize: 10 })).toMatchObject({
       total: 1,
       items: [expect.objectContaining({ event: 'delivery_failed' })],
+    });
+    expect(logger.list({ levels: ['warn', 'error'], pageSize: 10 })).toMatchObject({
+      total: 1,
+      items: [expect.objectContaining({ event: 'delivery_failed', level: 'error' })],
     });
   });
 });

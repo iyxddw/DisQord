@@ -84,7 +84,8 @@ function App() {
         const response = await fetch(`/api/node/logs?${query.toString()}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
-        if (!response.ok) throw new Error(response.status === 401 ? '需要节点面板令牌' : '读取日志失败');
+        if (!response.ok)
+          throw new Error(response.status === 401 ? '需要节点面板令牌' : '读取日志失败');
         setLogs((await response.json()) as NodeLogPage);
         setLogError('');
       } catch (cause) {
@@ -220,7 +221,7 @@ function App() {
           {logs.items.map((record, index) => (
             <article className={`node-log ${record.level}`} key={`${record.createdAt}-${index}`}>
               <div>
-                <strong>{record.event}</strong>
+                <strong>{translateLogEvent(record.event)}</strong>
                 <span>{record.level.toUpperCase()}</span>
                 <time>{new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}</time>
               </div>
@@ -231,7 +232,9 @@ function App() {
         </div>
         {logs.totalPages > 1 && (
           <div className="node-log-pagination">
-            <span>第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条</span>
+            <span>
+              第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条
+            </span>
             <div>
               <button
                 disabled={logs.page <= 1}
@@ -241,9 +244,7 @@ function App() {
               </button>
               <button
                 disabled={logs.page >= logs.totalPages}
-                onClick={() =>
-                  setLogPage((current) => Math.min(logs.totalPages, current + 1))
-                }
+                onClick={() => setLogPage((current) => Math.min(logs.totalPages, current + 1))}
               >
                 下一页
               </button>
@@ -303,6 +304,36 @@ function stateLabel(state?: Status['state']) {
   return { starting: '启动中', connected: '运行正常', retrying: '正在重连', stopped: '已停止' }[
     state ?? 'starting'
   ];
+}
+
+const logEventLabels: Record<string, string> = {
+  runtime_starting: '节点启动',
+  runtime_stopped: '节点已停止',
+  runtime_retrying: '节点重试连接',
+  central_connected: '已连接中央服务',
+  pairing_started: '开始配对',
+  pairing_completed: '配对完成',
+  session_candidates_ready: '会话列表已更新',
+  verification_requested: '收到验证请求',
+  verification_sent: '验证码已发送',
+  message_queued: '消息已加入队列',
+  message_upload_attempt_started: '开始上传消息',
+  message_upload_acknowledged: '消息上传已确认',
+  message_upload_retry_scheduled: '消息上传将重试',
+  message_upload_dead_letter: '消息上传进入死信队列',
+  delivery_queued: '发送任务已加入队列',
+  delivery_attempt_started: '开始发送消息',
+  delivery_platform_confirmed: '平台确认发送成功',
+  delivery_acknowledged_by_central: '中央服务已确认发送',
+  delivery_retry_scheduled: '发送失败，将重试',
+  delivery_dead_letter: '发送进入死信队列',
+  delivery_recovery_failed: '恢复发送任务失败',
+  delivery_failure_report_failed: '上报发送失败失败',
+  node_logs_sent: '客户端日志已回传',
+};
+
+function translateLogEvent(event: string): string {
+  return logEventLabels[event] ?? event.replaceAll('_', ' ');
 }
 
 const root = document.querySelector('#root');

@@ -487,6 +487,30 @@ h1 {
   cursor: pointer;
   font-weight: 650;
 }
+.verify-title {
+  display: grid;
+  gap: 3px;
+  min-width: 190px;
+  flex: 1 1 100%;
+}
+.verify-title span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.verify-box .verify-submit,
+.verify-box .verify-resend {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.verify-box .verify-resend {
+  color: #c3c8cc;
+  background: #1b1e21;
+  border-color: #424950;
+  font-weight: 500;
+}
 .verify-box button:hover:not(:disabled) {
   border-color: #dfe2e4;
   background: #e8eaeb;
@@ -503,6 +527,12 @@ label {
   color: #aeb8c9;
   font-size: 13px;
   font-weight: 500;
+}
+.field-hint {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
 }
 input,
 select,
@@ -1397,6 +1427,31 @@ code {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+.mobile-flow-kind {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 5px;
+}
+.mobile-drag-handle {
+  width: 22px !important;
+  height: 22px !important;
+  padding: 0 !important;
+  cursor: grab !important;
+  color: #7d858d !important;
+  border-color: transparent !important;
+  background: transparent !important;
+}
+.mobile-drag-handle:active {
+  cursor: grabbing !important;
+}
+.mobile-flow-kind svg {
+  color: #6f777e;
+}
+.mobile-flow-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .mobile-flow-card-head button {
   width: 26px;
   height: 26px;
@@ -1412,6 +1467,9 @@ code {
   color: #ff9bad;
   border-color: #b95f70;
   background: #26191e;
+}
+.mobile-flow-card-actions button {
+  flex: 0 0 auto;
 }
 .mobile-flow-card > strong {
   font-size: 14px;
@@ -1472,6 +1530,29 @@ code {
 }
 .mobile-flow-save-prompt span {
   color: #aeb5bb;
+}
+.mobile-flow-connections {
+  display: grid;
+  gap: 7px;
+  padding-top: 8px;
+  border-top: 1px solid #30343a;
+}
+.mobile-flow-connections > span {
+  color: #8b949c;
+  font-size: 11px;
+}
+.mobile-flow-connections label {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: #aeb5bb;
+  font-size: 11px;
+}
+.mobile-flow-connections select {
+  min-width: 0;
+  padding: 7px 8px;
+  font-size: 11px;
 }
 .mobile-branch-picker {
   display: grid;
@@ -1674,6 +1755,26 @@ code {
   .remark-editor input {
     width: auto;
     flex: 1;
+  }
+  .verify-box {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .verify-title,
+  .verify-box input {
+    grid-column: 1 / -1;
+  }
+  .verify-box input,
+  .verify-box button {
+    width: 100%;
+  }
+  .log-actions {
+    flex-wrap: wrap;
+  }
+  .log-actions select,
+  .log-search {
+    width: 100%;
   }
   .node-grid,
   .form-grid {

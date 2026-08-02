@@ -40,6 +40,14 @@ const deliverCommandSchema = z.object({
   targetMessageId: z.string().min(1).optional(),
 });
 
+const nodeLogRequestSchema = z.object({
+  requestId: z.uuid(),
+  page: z.number().int().min(1).default(1),
+  pageSize: z.number().int().min(10).max(200).default(50),
+  level: z.enum(['all', 'warn', 'error']).default('all'),
+  search: z.string().trim().max(200).default(''),
+});
+
 type DeliveryCommand = z.infer<typeof deliverCommandSchema>;
 
 export interface NodeBridgeRuntimeOptions {
@@ -179,6 +187,25 @@ export class NodeBridgeRuntime {
       this.#log('info', 'verification_sent', { externalId: command.externalId });
       return;
     }
+    if (kind === 'node.logs.request') {
+      const request = nodeLogRequestSchema.parse(payload);
+      const page = this.#logger.list({
+        page: request.page,
+        pageSize: request.pageSize,
+        search: request.search,
+        levels: request.level === 'all' ? ['warn', 'error'] : [request.level],
+      });
+      await this.#client?.send('node.logs.response', {
+        requestId: request.requestId,
+        page,
+      });
+      this.#log('debug', 'node_logs_sent', {
+        requestId: request.requestId,
+        page: page.page,
+        count: page.items.length,
+      });
+      return;
+    }
     if (kind === 'message.deliver') {
       const command = deliverCommandSchema.parse(payload);
       this.#log('info', 'delivery_queued', {
@@ -271,7 +298,11 @@ export class NodeBridgeRuntime {
         if (!current || current.status === 'acknowledged') throw error;
         if (current.attempts >= MAX_DELIVERY_ATTEMPTS) {
           queue.markDeadLetter(taskId);
-          this.#log('error', 'delivery_dead_letter', { taskId, attempts: current.attempts, error: message });
+          this.#log('error', 'delivery_dead_letter', {
+            taskId,
+            attempts: current.attempts,
+            error: message,
+          });
           await this.#sendDeliveryFailed(item.payload, message);
           throw error;
         }
@@ -392,7 +423,11 @@ export class NodeBridgeRuntime {
     this.#log('warn', 'runtime_retrying', { error: detail });
   }
 
-  #log(level: 'debug' | 'info' | 'warn' | 'error', event: string, details?: Record<string, unknown>): void {
+  #log(
+    level: 'debug' | 'info' | 'warn' | 'error',
+    event: string,
+    details?: Record<string, unknown>,
+  ): void {
     try {
       this.#logger.write(level, event, details);
     } catch {

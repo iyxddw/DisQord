@@ -17,6 +17,8 @@ export interface NodeLogQuery {
   readonly page?: number;
   readonly pageSize?: number;
   readonly level?: NodeLogLevel | 'all';
+  /** Optional multi-level filter used by the central log proxy. */
+  readonly levels?: readonly NodeLogLevel[];
   readonly search?: string;
 }
 
@@ -57,6 +59,10 @@ export class NodeLogger {
     const search = query.search?.trim().toLocaleLowerCase() ?? '';
     let records = this.#read();
     if (level !== 'all') records = records.filter((record) => record.level === level);
+    if (query.levels?.length) {
+      const levels = new Set(query.levels);
+      records = records.filter((record) => levels.has(record.level));
+    }
     if (search) {
       records = records.filter((record) =>
         JSON.stringify(record).toLocaleLowerCase().includes(search),
@@ -83,7 +89,8 @@ export class NodeLogger {
       .flatMap((line) => {
         try {
           const value = JSON.parse(line) as NodeLogRecord;
-          return nodeLogLevelSchema.safeParse(value.level).success && typeof value.event === 'string'
+          return nodeLogLevelSchema.safeParse(value.level).success &&
+            typeof value.event === 'string'
             ? [value]
             : [];
         } catch {

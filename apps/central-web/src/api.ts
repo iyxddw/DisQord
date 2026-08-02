@@ -69,6 +69,7 @@ export interface ChatSession {
   spaceId: string;
   displayName: string;
   remark?: string;
+  verificationExpiresAt?: string;
   status: 'pending' | 'verified' | 'disabled' | 'stale';
 }
 
