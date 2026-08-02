@@ -512,6 +512,11 @@ type FlowKind =
   | 'review'
   | 'fixed'
   | 'renderer';
+type FlowSimulationNote = {
+  id: string;
+  text: string;
+  kind: 'done' | 'error';
+};
 type FlowData = {
   label: string;
   kind: FlowKind;
@@ -534,9 +539,10 @@ type FlowData = {
       | {
           state: 'active' | 'done' | 'error';
           message?: string;
+          activeMessageId?: string;
           progress?: number;
           /** Completed messages are kept as a small stack for coalesced runs. */
-          messages?: string[];
+          messages?: FlowSimulationNote[];
           outputs?: string[];
         }
     | undefined;
@@ -546,6 +552,9 @@ const defaultTranslationPrompt =
   '请将消息自然、准确地翻译成目标聊天使用的语言。保留姓名、@提及、网址、代码、Emoji、换行和语气，不要回答、解释、审查或概括消息。';
 const defaultModerationPrompt =
   '请评估文本的违规程度。正常对话应接近 0，明确严重违规应接近 1。重点考虑骚扰、仇恨、色情、暴力、自残、违法活动、隐私泄露和垃圾信息。';
+const FLOW_ACTIVITY_POPUP_TTL_MS = 5_500;
+const FLOW_ACTIVITY_COALESCE_MS = 80;
+const FLOW_ACTIVITY_NOTE_LIMIT = 4;
 
 function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
   const { deleteElements, updateNodeData } = useReactFlow();
@@ -593,13 +602,13 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
       )}
       {(data.simulation?.message || data.simulation?.messages?.length) && (
         <div className="flow-simulation-stack" role="status">
-          {(data.simulation?.messages ?? []).map((message, index) => (
-            <div className="flow-simulation-note done" key={`${index}-${message}`}>
-              {message}
+          {(data.simulation?.messages ?? []).map((message) => (
+            <div className={`flow-simulation-note ${message.kind}`} key={message.id}>
+              {message.text}
             </div>
           ))}
           {data.simulation.message &&
-            data.simulation.messages?.at(-1) !== data.simulation.message && (
+            data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
               <div className={`flow-simulation-note ${data.simulation.state}`}>
                 {data.simulation.message}
               </div>
@@ -890,13 +899,13 @@ function MobileFlowCard({
       <strong>{data.label}</strong>
       {(data.simulation?.message || data.simulation?.messages?.length) && (
         <div className="mobile-flow-activity-stack">
-          {(data.simulation?.messages ?? []).map((message, index) => (
-            <div className="mobile-flow-activity" key={`${index}-${message}`}>
-              <p>{message}</p>
+          {(data.simulation?.messages ?? []).map((message) => (
+            <div className="mobile-flow-activity" key={message.id}>
+              <p>{message.text}</p>
             </div>
           ))}
           {data.simulation.message &&
-            data.simulation.messages?.at(-1) !== data.simulation.message && (
+            data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
               <div className="mobile-flow-activity">
                 <p>{data.simulation.message}</p>
               </div>
@@ -1010,8 +1019,8 @@ function BlueprintEditor() {
   const [notice, setNotice] = useState('');
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<FlowData>, Edge>>();
   const activityCursor = useRef('');
-  const activityQueues = useRef(new Map<string, BlueprintActivity[]>());
-  const activityPlaying = useRef(new Set<string>());
+  const activityQueue = useRef<BlueprintActivity[]>([]);
+  const activityPlaying = useRef(false);
   const nodeTypes = useMemo(() => ({ session: FlowNode }), []);
 
   const onNodesChange = (changes: Parameters<typeof onNodesChangeBase>[0]) => {
@@ -1045,18 +1054,23 @@ function BlueprintEditor() {
     let initialized = false;
     const controller = new AbortController();
     activityCursor.current = '';
-    activityQueues.current.clear();
-    activityPlaying.current.clear();
+    activityQueue.current = [];
+    activityPlaying.current = false;
 
     const progressFrames = new Set<number>();
+    const noteTimers = new Set<number>();
+    const sleep = (milliseconds: number) =>
+      new Promise<void>((resolve) => window.setTimeout(resolve, Math.max(0, milliseconds)));
+
     const waitWithProgress = (
-      nodeId: string,
+      nodeIds: readonly string[],
       startProgress: number,
       endProgress: number,
       delayMs: number,
       easing: 'linear' | 'ease-out' = 'linear',
     ) =>
       new Promise<void>((resolve) => {
+        const targets = new Set(nodeIds);
         const duration = Math.max(0, delayMs);
         const startedAt = performance.now();
         let frame: number | undefined;
@@ -1072,7 +1086,7 @@ function BlueprintEditor() {
           if (!cancelled) {
             setNodes((current) =>
               current.map((node) =>
-                node.id === nodeId && node.data.simulation?.state === 'active'
+                targets.has(node.id) && node.data.simulation?.state === 'active'
                   ? {
                       ...node,
                       data: {
@@ -1106,9 +1120,10 @@ function BlueprintEditor() {
             current.map((node) => {
               if (node.data.simulation?.state !== 'active') return node;
               const progress = Math.max(50, node.data.simulation.progress ?? 50);
+              if (progress < 90) return node;
               if (progress >= 99) return node;
               const remaining = 99 - progress;
-              const step = Math.max(0.12, remaining * (0.06 + Math.random() * 0.12));
+              const step = Math.max(0.08, remaining * (0.035 + Math.random() * 0.075));
               return {
                 ...node,
                 data: {
@@ -1128,136 +1143,71 @@ function BlueprintEditor() {
     };
     scheduleProgressDrift();
 
-    const playTrace = async (traceId: string) => {
-      if (activityPlaying.current.has(traceId)) return;
-      activityPlaying.current.add(traceId);
-      try {
-        while (!cancelled) {
-          const queue = activityQueues.current.get(traceId);
-          if (!queue?.length) break;
-          const activity = queue.shift()!;
-          const phase = activity.phase ?? 'completed';
-          const delay = Math.max(0, simulationSettings.data.delayMs ?? 1_000);
-          if (phase === 'entered') {
-            const startsAtHalf = activity.nodeType === 'simulated-input';
-            setNodes((current) =>
-              current.map((node) => ({
-                ...node,
-                data: {
-                  ...node.data,
-                  simulation:
-                    node.id === activity.nodeId
-                      ? {
-                          state: 'active' as const,
-                          progress: startsAtHalf
-                            ? 50
-                            : node.data.simulation?.state === 'active'
-                              ? (node.data.simulation.progress ?? 0)
-                              : 0,
-                          messages: node.data.simulation?.messages ?? [],
-                          outputs: node.data.simulation?.outputs ?? [],
-                        }
-                      : node.data.simulation,
-                },
-              })),
-            );
-            const quickDuration = Math.min(320, Math.round(delay * 0.28));
-            if (!startsAtHalf) {
-              await waitWithProgress(activity.nodeId, 0, 50, quickDuration, 'ease-out');
+    const scheduleNoteDismiss = (nodeId: string, noteId: string): void => {
+      let timer = 0;
+      timer = window.setTimeout(() => {
+        noteTimers.delete(timer);
+        if (cancelled) return;
+        setNodes((current) =>
+          current.map((node) => {
+            if (node.id !== nodeId || !node.data.simulation) return node;
+            const simulation = node.data.simulation;
+            const messages = (simulation.messages ?? []).filter((note) => note.id !== noteId);
+            const nextSimulation = { ...simulation, messages };
+            if (simulation.activeMessageId === noteId) {
+              delete nextSimulation.message;
+              delete nextSimulation.activeMessageId;
             }
-            await waitWithProgress(
-              activity.nodeId,
-              50,
-              95,
-              Math.max(0, delay - quickDuration),
-              'ease-out',
-            );
-            continue;
-          }
-          if (phase === 'failed') {
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                simulation: nextSimulation,
+              },
+            };
+          }),
+        );
+      }, FLOW_ACTIVITY_POPUP_TTL_MS);
+      noteTimers.add(timer);
+    };
+
+    const activityBatchKey = (activity: BlueprintActivity): string =>
+      activity.batchId ?? activity.traceId ?? 'unknown';
+    const activityGroupKey = (activity: BlueprintActivity): string =>
+      `${activity.blueprintId}:${activity.version}:${activityBatchKey(activity)}:${activity.step}:${activity.phase ?? 'completed'}`;
+    const takeActivityGroup = async (): Promise<BlueprintActivity[] | undefined> => {
+      const first = activityQueue.current.shift();
+      if (!first) return undefined;
+      await sleep(FLOW_ACTIVITY_COALESCE_MS);
+      if (cancelled) return undefined;
+      const key = activityGroupKey(first);
+      const group = [first];
+      const remaining: BlueprintActivity[] = [];
+      for (const activity of activityQueue.current) {
+        if (activityGroupKey(activity) === key) group.push(activity);
+        else remaining.push(activity);
+      }
+      activityQueue.current = remaining;
+      return group.sort((left, right) => left.sequence - right.sequence);
+    };
+
+    const playBatches = async (): Promise<void> => {
+      if (activityPlaying.current) return;
+      activityPlaying.current = true;
+      try {
+        while (!cancelled && activityQueue.current.length) {
+          const group = await takeActivityGroup();
+          if (!group?.length) break;
+          const delay = Math.max(0, simulationSettings.data.delayMs ?? 1_000);
+          const entered = group.filter((activity) => (activity.phase ?? 'completed') === 'entered');
+          const failed = group.filter((activity) => activity.phase === 'failed');
+          const completed = group.filter((activity) => (activity.phase ?? 'completed') === 'completed');
+
+          const enteredNodeIds = [...new Set(entered.map((activity) => activity.nodeId))];
+          if (enteredNodeIds.length) {
             setNodes((current) =>
               current.map((node) =>
-                node.id === activity.nodeId
-                  ? {
-                      ...node,
-                      data: {
-                        ...node.data,
-                        simulation: {
-                          state: 'error' as const,
-                          message: activity.message,
-                          progress: 100,
-                          messages: [
-                            ...(node.data.simulation?.messages ?? []),
-                            activity.message,
-                          ],
-                          outputs: node.data.simulation?.outputs ?? [],
-                        },
-                      },
-                    }
-                  : node,
-              ),
-            );
-            continue;
-          }
-          setNodes((current) =>
-            current.map((node) => {
-              if (node.id !== activity.nodeId) return node;
-              const messages = [...(node.data.simulation?.messages ?? []), activity.message].slice(-8);
-              const outputs =
-                activity.nodeType === 'simulated-output' && activity.text
-                  ? [...(node.data.simulation?.outputs ?? []), activity.text].slice(-8)
-                  : (node.data.simulation?.outputs ?? []);
-              return {
-                ...node,
-                data: {
-                  ...node.data,
-                  ...(activity.nodeType === 'simulated-output'
-                    ? { outputText: activity.text ?? '' }
-                    : {}),
-                  simulation: {
-                    state: 'active' as const,
-                    message: activity.message,
-                    messages,
-                    outputs,
-                    progress:
-                      node.data.simulation?.state === 'active'
-                        ? Math.max(95, node.data.simulation.progress ?? 0)
-                        : 95,
-                  },
-                },
-              };
-            }),
-          );
-          await waitWithProgress(activity.nodeId, 95, 100, Math.min(220, delay), 'ease-out');
-          const nextNodeIds =
-            activity.nodeType === 'chat-output' || activity.nodeType === 'simulated-output'
-              ? new Set<string>()
-              : new Set(
-                  edges
-                    .filter(
-                      (edge) =>
-                        edge.source === activity.nodeId &&
-                        (!activity.route || (edge.sourceHandle ?? undefined) === activity.route),
-                    )
-                    .map((edge) => edge.target),
-                );
-          setNodes((current) =>
-            current.map((node) =>
-              node.id === activity.nodeId
-                ? {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      simulation: {
-                        state: 'done' as const,
-                        message: activity.message,
-                        progress: 100,
-                        messages: node.data.simulation?.messages ?? [],
-                        outputs: node.data.simulation?.outputs ?? [],
-                      },
-                    },
-                  }
-                : nextNodeIds.has(node.id)
+                enteredNodeIds.includes(node.id)
                   ? {
                       ...node,
                       data: {
@@ -1271,13 +1221,156 @@ function BlueprintEditor() {
                       },
                     }
                   : node,
-            ),
-          );
+              ),
+            );
+            await waitWithProgress(enteredNodeIds, 50, 90, delay, 'ease-out');
+          }
+
+          if (failed.length) {
+            setNodes((current) =>
+              current.map((node) => {
+                const activity = failed.find((item) => item.nodeId === node.id);
+                if (!activity) return node;
+                const note: FlowSimulationNote = {
+                  id: activity.id,
+                  text: activity.message,
+                  kind: 'error',
+                };
+                const messages = [...(node.data.simulation?.messages ?? []), note].slice(
+                  -FLOW_ACTIVITY_NOTE_LIMIT,
+                );
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    simulation: {
+                      state: 'error' as const,
+                      message: activity.message,
+                      activeMessageId: activity.id,
+                      progress: 100,
+                      messages,
+                      outputs: node.data.simulation?.outputs ?? [],
+                    },
+                  },
+                };
+              }),
+            );
+            for (const activity of failed) scheduleNoteDismiss(activity.nodeId, activity.id);
+          }
+
+          if (completed.length) {
+            const completedByNode = new Map<string, BlueprintActivity[]>();
+            for (const activity of completed) {
+              const list = completedByNode.get(activity.nodeId) ?? [];
+              list.push(activity);
+              completedByNode.set(activity.nodeId, list);
+              scheduleNoteDismiss(activity.nodeId, activity.id);
+            }
+            setNodes((current) =>
+              current.map((node) => {
+                const activities = completedByNode.get(node.id);
+                if (!activities?.length) return node;
+                const last = activities.at(-1)!;
+                const notes = activities.map<FlowSimulationNote>((activity) => ({
+                  id: activity.id,
+                  text: activity.message,
+                  kind: 'done',
+                }));
+                const messages = [
+                  ...(node.data.simulation?.messages ?? []),
+                  ...notes,
+                ].slice(-FLOW_ACTIVITY_NOTE_LIMIT);
+                const output = activities.find(
+                  (activity) => activity.nodeType === 'simulated-output' && activity.text,
+                );
+                const outputs = output
+                  ? [...(node.data.simulation?.outputs ?? []), output.text!].slice(-8)
+                  : (node.data.simulation?.outputs ?? []);
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    ...(output ? { outputText: output.text } : {}),
+                    simulation: {
+                      state: 'active' as const,
+                      message: last.message,
+                      activeMessageId: last.id,
+                      messages,
+                      outputs,
+                      progress: Math.max(90, node.data.simulation?.progress ?? 0),
+                    },
+                  },
+                };
+              }),
+            );
+
+            const completedNodeIds = [...completedByNode.keys()];
+            await waitWithProgress(
+              completedNodeIds,
+              90,
+              99,
+              Math.min(260, Math.max(120, Math.round(delay * 0.35))),
+              'ease-out',
+            );
+            const nextNodeIds = new Set<string>();
+            const finishedNodeIds = new Set<string>();
+            for (const activity of completed) {
+              const targets =
+                activity.nodeType === 'chat-output' || activity.nodeType === 'simulated-output'
+                  ? []
+                  : edges
+                      .filter(
+                        (edge) =>
+                          edge.source === activity.nodeId &&
+                          (!activity.route || (edge.sourceHandle ?? undefined) === activity.route),
+                      )
+                      .map((edge) => edge.target);
+              finishedNodeIds.add(activity.nodeId);
+              targets.forEach((target) => nextNodeIds.add(target));
+            }
+            setNodes((current) =>
+              current.map((node) => {
+                if (nextNodeIds.has(node.id)) {
+                  return {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      simulation: {
+                        state: 'active' as const,
+                        progress: 50,
+                        messages: node.data.simulation?.messages ?? [],
+                        outputs: node.data.simulation?.outputs ?? [],
+                      },
+                    },
+                  };
+                }
+                if (!finishedNodeIds.has(node.id)) return node;
+                const previousSimulation = node.data.simulation;
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    simulation: {
+                      state: 'done' as const,
+                      progress: 100,
+                      messages: previousSimulation?.messages ?? [],
+                      outputs: previousSimulation?.outputs ?? [],
+                      ...(previousSimulation?.message !== undefined
+                        ? { message: previousSimulation.message }
+                        : {}),
+                      ...(previousSimulation?.activeMessageId !== undefined
+                        ? { activeMessageId: previousSimulation.activeMessageId }
+                        : {}),
+                    },
+                  },
+                };
+              }),
+            );
+          }
         }
       } finally {
-        activityPlaying.current.delete(traceId);
-        const queue = activityQueues.current.get(traceId);
-        if (!queue?.length) activityQueues.current.delete(traceId);
+        activityPlaying.current = false;
+        if (!cancelled && activityQueue.current.length) void playBatches();
       }
     };
 
@@ -1313,13 +1406,9 @@ function BlueprintEditor() {
             continue;
           }
           if (page.items.length) {
-            for (const activity of page.items) {
-              const traceId = activity.traceId || 'unknown';
-              const queue = activityQueues.current.get(traceId) ?? [];
-              queue.push(activity);
-              activityQueues.current.set(traceId, queue);
-              void playTrace(traceId);
-            }
+            activityQueue.current.push(...page.items);
+            activityQueue.current.sort((left, right) => left.sequence - right.sequence);
+            void playBatches();
           }
         } catch (cause) {
           if (cancelled || (cause instanceof DOMException && cause.name === 'AbortError')) return;
@@ -1331,11 +1420,13 @@ function BlueprintEditor() {
     return () => {
       cancelled = true;
       controller.abort();
-      activityQueues.current.clear();
-      activityPlaying.current.clear();
+      activityQueue.current = [];
+      activityPlaying.current = false;
       if (driftTimer !== undefined) window.clearTimeout(driftTimer);
       for (const frame of progressFrames) window.cancelAnimationFrame(frame);
       progressFrames.clear();
+      for (const timer of noteTimers) window.clearTimeout(timer);
+      noteTimers.clear();
     };
   }, [currentBlueprintId, edges, setNodes, simulationSettings.data.delayMs]);
 

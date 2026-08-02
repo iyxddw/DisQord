@@ -200,11 +200,26 @@ interface ManualReviewRecord {
   readonly error?: string;
 }
 
+interface ActivityBatchContext {
+  readonly batchId: string;
+  readonly batchIndex: number;
+  readonly batchSize: number;
+}
+
+type BlueprintActivityDetail = Pick<
+  BlueprintActivityRecord,
+  'message' | 'text' | 'violationScore' | 'route'
+> &
+  Partial<Pick<BlueprintActivityRecord, 'phase'>>;
+
 interface BlueprintActivityRecord {
   readonly id: string;
   readonly blueprintId: string;
   readonly version: number;
   readonly traceId: string;
+  readonly batchId?: string;
+  readonly batchIndex?: number;
+  readonly batchSize?: number;
   readonly nodeId: string;
   readonly nodeType: string;
   readonly phase: 'entered' | 'completed' | 'failed';
@@ -552,6 +567,8 @@ export class MessageOrchestrator {
         message,
         [],
         [{ nodeId, state: { text, fixedText: false } }],
+        undefined,
+        { batchId: traceId, batchIndex: 0, batchSize: 1 },
       );
       await this.#log(traceId, 'info', result.paused ? 'blueprint_paused' : 'blueprint_completed', {
         blueprintId,
@@ -576,8 +593,14 @@ export class MessageOrchestrator {
     messagePayload: unknown = frame.payload,
     deliveryCollector?: DeliveryIntent[],
     strict = false,
+    activityBatch?: ActivityBatchContext,
   ): Promise<void> {
     const message = messageEnvelopeSchema.parse(messagePayload);
+    const batchContext: ActivityBatchContext = activityBatch ?? {
+      batchId: message.eventId,
+      batchIndex: 0,
+      batchSize: 1,
+    };
     if (message.source.nodeId !== frame.nodeId || message.source.platform !== frame.nodeType) {
       throw new Error('Uploaded message source does not match the authenticated node.');
     }
@@ -671,6 +694,7 @@ export class MessageOrchestrator {
           recentMessages,
           undefined,
           deliveryCollector,
+          batchContext,
         );
         await this.#log(
           message.traceId,
@@ -900,7 +924,17 @@ export class MessageOrchestrator {
         const index = nextIndex++;
         if (index >= messages.length) return;
         try {
-          await this.#handleMessageUpload(frame, messages[index], collectors[index], true);
+          await this.#handleMessageUpload(
+            frame,
+            messages[index],
+            collectors[index],
+            true,
+            {
+              batchId: batch.batchId ?? frame.frameId,
+              batchIndex: index,
+              batchSize: messages.length,
+            },
+          );
         } catch (error) {
           failures.push({ index, error });
         }
@@ -959,6 +993,7 @@ export class MessageOrchestrator {
     recentMessages: readonly MessageEnvelope[],
     initialWork?: readonly WorkItem[],
     deliveryCollector?: DeliveryIntent[],
+    activityBatch?: ActivityBatchContext,
   ): Promise<{ paused: boolean }> {
     const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
     const outgoing = new Map<string, BlueprintEdge[]>();
@@ -993,6 +1028,11 @@ export class MessageOrchestrator {
           ),
         }
       : undefined;
+    const recordActivity = (
+      node: BlueprintNode,
+      step: number,
+      detail: BlueprintActivityDetail,
+    ): Promise<void> => this.#recordActivity(blueprint, message, node, step, detail, activityBatch);
 
     while (work.length) {
       if ((processedSteps += 1) > 2_000)
@@ -1008,14 +1048,14 @@ export class MessageOrchestrator {
         nodeType: node.type,
         currentText: state.text,
       });
-      await this.#recordActivity(blueprint, message, node, processedSteps, {
+      await recordActivity(node, processedSteps, {
         phase: 'entered',
         message: '消息已到达，准备运行此节点',
         text: state.text,
       });
 
       if (node.type === 'chat-input' || node.type === 'simulated-input') {
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: node.type === 'simulated-input' ? '模拟消息已进入流程' : '收到消息',
           text: state.text,
         });
@@ -1070,7 +1110,7 @@ export class MessageOrchestrator {
           rawResult: result,
         });
         state = { ...state, text: result.translatedText, fixedText: false };
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: `翻译结果：${result.translatedText}`,
           text: result.translatedText,
         });
@@ -1132,7 +1172,7 @@ export class MessageOrchestrator {
           selectedOutput: passed ? 'passed' : 'blocked',
           rawResult: assessment,
         });
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: `此消息违规程度为 ${Math.round(assessment.violationScore * 100)}%，走“${passed ? '过审' : '未过'}”出口`,
           text: state.text,
           violationScore: assessment.violationScore,
@@ -1152,7 +1192,7 @@ export class MessageOrchestrator {
           nodeId: node.id,
           outputText: config.text,
         });
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: `固定文本：${config.text || '[空文本]'}`,
           text: config.text,
         });
@@ -1179,7 +1219,7 @@ export class MessageOrchestrator {
           nodeId: node.id,
           inputText: state.text,
         });
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: '等待人工审核',
           text: state.text,
         });
@@ -1196,7 +1236,7 @@ export class MessageOrchestrator {
           cardCount: cards.length,
           byteSizes: cards.map((card) => card.byteLength),
         });
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: `已合成 ${cards.length} 张消息图片`,
           text: state.text,
         });
@@ -1225,26 +1265,26 @@ export class MessageOrchestrator {
           cards,
           state.text,
         );
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: `已发送到 ${target.remark?.trim() || target.displayName}`,
           text: state.text,
         });
         continue;
       } else if (node.type === 'simulated-output') {
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: '模拟输出已收到结果',
           text: state.text,
         });
         continue;
       } else if (node.type === 'discard') {
         await this.#log(message.traceId, 'info', 'message_discarded', { nodeId: node.id });
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: '消息已丢弃',
           text: state.text,
         });
         continue;
       } else if (node.type !== 'chat-input' && node.type !== 'simulated-input') {
-        await this.#recordActivity(blueprint, message, node, processedSteps, {
+        await recordActivity(node, processedSteps, {
           message: '消息已通过此模块',
           text: state.text,
         });
@@ -1278,8 +1318,8 @@ export class MessageOrchestrator {
     message: MessageEnvelope,
     node: BlueprintNode,
     step: number,
-    detail: Pick<BlueprintActivityRecord, 'message' | 'text' | 'violationScore' | 'route'> &
-      Partial<Pick<BlueprintActivityRecord, 'phase'>>,
+    detail: BlueprintActivityDetail,
+    activityBatch?: ActivityBatchContext,
   ): Promise<void> {
     const id = randomUUID();
     this.#activitySequence = Math.max(Date.now() * 1_000, this.#activitySequence + 1);
@@ -1288,6 +1328,13 @@ export class MessageOrchestrator {
       blueprintId: blueprint.blueprintId,
       version: blueprint.version,
       traceId: message.traceId,
+      ...(activityBatch
+        ? {
+            batchId: activityBatch.batchId,
+            batchIndex: activityBatch.batchIndex,
+            batchSize: activityBatch.batchSize,
+          }
+        : {}),
       nodeId: node.id,
       nodeType: node.type,
       phase: detail.phase ?? 'completed',

@@ -264,6 +264,13 @@ describe('blueprint message pipeline', () => {
         ],
       }),
     );
+    const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
+      (entry) => entry.value,
+    );
+    const batchActivities = activities.filter((activity) => activity.batchId === batchId);
+    expect(batchActivities.length).toBeGreaterThan(0);
+    expect(new Set(batchActivities.map((activity) => activity.batchSize))).toEqual(new Set([2]));
+    expect(new Set(batchActivities.map((activity) => activity.batchIndex))).toEqual(new Set([0, 1]));
   });
 
   it('records the full LLM failure for a simulated run', async () => {

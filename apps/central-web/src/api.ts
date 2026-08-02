@@ -133,6 +133,9 @@ export interface BlueprintActivity {
   blueprintId: string;
   version: number;
   traceId: string;
+  batchId?: string;
+  batchIndex?: number;
+  batchSize?: number;
   nodeId: string;
   nodeType: string;
   phase?: 'entered' | 'completed' | 'failed';
