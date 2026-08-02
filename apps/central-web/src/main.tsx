@@ -31,8 +31,6 @@ import {
   Bot,
   Check,
   ChevronRight,
-  ChevronDown,
-  ChevronUp,
   CircleAlert,
   FileClock,
   LogOut,
@@ -718,41 +716,9 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
 type MobileBlueprintFlowProps = {
   nodes: Node<FlowData>[];
   edges: Edge[];
-  onPatchNode: (nodeId: string, patch: Partial<FlowData>) => void;
-  onDeleteNode: (nodeId: string) => void;
-  onConnect: (sourceId: string, targetId: string, sourceHandle?: string) => void;
-  onMoveNode: (
-    nodeId: string,
-    direction: 'up' | 'down',
-    pathNodeIds: string[],
-    pathEdgeIds: string[],
-  ) => void;
-  onEnqueueNode: (nodeId: string, afterNodeId?: string) => void;
-  onSimulate: (nodeId: string, text: string) => Promise<void>;
-  onDraftChange: () => void;
-  pendingSimulation?: { nodeId: string; text: string };
-  onConfirmSaveSimulation: () => void;
-  onCancelSaveSimulation: () => void;
-  saveBusy: boolean;
-  simulationBusy: boolean;
 };
 
-function MobileBlueprintFlow({
-  nodes,
-  edges,
-  onPatchNode,
-  onDeleteNode,
-  onConnect,
-  onMoveNode,
-  onEnqueueNode,
-  onSimulate,
-  onDraftChange,
-  pendingSimulation,
-  onConfirmSaveSimulation,
-  onCancelSaveSimulation,
-  saveBusy,
-  simulationBusy,
-}: MobileBlueprintFlowProps) {
+function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
   const [rootId, setRootId] = useState('');
   const [choices, setChoices] = useState<Record<string, string>>({});
   const incoming = useMemo(() => {
@@ -810,10 +776,14 @@ function MobileBlueprintFlow({
 
   return (
     <div className="mobile-blueprint-flow">
+      <div className="mobile-readonly-notice" role="note">
+        <strong>手机端仅供查看</strong>
+        <span>请使用桌面端编辑模块、调整连线、发布蓝图或运行模拟消息。</span>
+      </div>
       <div className="mobile-flow-heading">
         <div>
           <strong>流程预览</strong>
-          <span>点击分支按钮切换后续路径；使用上下按钮可真实调整模块顺序与连接关系。</span>
+          <span>点击分支按钮可以查看不同出口的后续路径。</span>
         </div>
         {incoming.length > 1 && (
           <label>
@@ -833,31 +803,7 @@ function MobileBlueprintFlow({
           const branches = outgoing.get(node.id) ?? [];
           return (
             <div className="mobile-flow-step" key={node.id}>
-              <MobileFlowCard
-                node={node}
-                savePrompt={pendingSimulation?.nodeId === node.id}
-                onPatch={onPatchNode}
-                onDelete={onDeleteNode}
-                onConnect={onConnect}
-                onMove={(nodeId, direction) =>
-                  onMoveNode(
-                    nodeId,
-                    direction,
-                    orderedPath.map((item) => item.id),
-                    pathView.edges.map((edge) => edge.id),
-                  )
-                }
-                canMoveUp={index > 0}
-                canMoveDown={index < orderedPath.length - 1}
-                allNodes={nodes}
-                outgoing={branches}
-                onSimulate={onSimulate}
-                onDraftChange={onDraftChange}
-                onConfirmSaveSimulation={onConfirmSaveSimulation}
-                onCancelSaveSimulation={onCancelSaveSimulation}
-                saveBusy={saveBusy}
-                simulationBusy={simulationBusy}
-              />
+              <MobileFlowCard node={node} allNodes={nodes} outgoing={branches} />
               {branches.length > 1 && (
                 <div className="mobile-branch-picker">
                   <span>选择下一条路径</span>
@@ -892,22 +838,8 @@ function MobileBlueprintFlow({
             <MobileFlowCard
               key={node.id}
               node={node}
-              savePrompt={pendingSimulation?.nodeId === node.id}
-              onPatch={onPatchNode}
-              onDelete={onDeleteNode}
-              onConnect={onConnect}
-              onMove={() => undefined}
-              canMoveUp={false}
-              canMoveDown={false}
-              onEnqueue={() => onEnqueueNode(node.id, orderedPath.at(-1)?.id)}
               allNodes={nodes}
               outgoing={outgoing.get(node.id) ?? []}
-              onSimulate={onSimulate}
-              onDraftChange={onDraftChange}
-              onConfirmSaveSimulation={onConfirmSaveSimulation}
-              onCancelSaveSimulation={onCancelSaveSimulation}
-              saveBusy={saveBusy}
-              simulationBusy={simulationBusy}
             />
           ))}
         </details>
@@ -918,47 +850,14 @@ function MobileBlueprintFlow({
 
 function MobileFlowCard({
   node,
-  savePrompt,
-  onPatch,
-  onDelete,
-  onConnect,
-  onMove,
-  canMoveUp,
-  canMoveDown,
-  onEnqueue,
   allNodes,
   outgoing,
-  onSimulate,
-  onDraftChange,
-  onConfirmSaveSimulation,
-  onCancelSaveSimulation,
-  saveBusy,
-  simulationBusy,
 }: {
   node: Node<FlowData>;
-  savePrompt: boolean;
-  onPatch: (nodeId: string, patch: Partial<FlowData>) => void;
-  onDelete: (nodeId: string) => void;
-  onConnect: (sourceId: string, targetId: string, sourceHandle?: string) => void;
-  onMove: (nodeId: string, direction: 'up' | 'down') => void;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onEnqueue?: () => void;
   allNodes: Node<FlowData>[];
   outgoing: Edge[];
-  onSimulate: (nodeId: string, text: string) => Promise<void>;
-  onDraftChange: () => void;
-  onConfirmSaveSimulation: () => void;
-  onCancelSaveSimulation: () => void;
-  saveBusy: boolean;
-  simulationBusy: boolean;
 }) {
   const { data } = node;
-  const [testText, setTestText] = useState('');
-  const patch = (value: Partial<FlowData>) => {
-    onPatch(node.id, value);
-    onDraftChange();
-  };
   const cardStyle = {
     '--simulation-progress': `${Math.max(0, Math.min(100, data.simulation?.state === 'active' ? (data.simulation.progress ?? 0) : 0))}%`,
   } as CSSProperties;
@@ -967,54 +866,8 @@ function MobileFlowCard({
       className={`mobile-flow-card ${data.kind} ${data.simulation?.state ?? ''}`}
       style={cardStyle}
     >
-      {savePrompt && (
-        <div className="mobile-flow-save-prompt" role="dialog">
-          <strong>当前蓝图有未发布修改</strong>
-          <span>先保存并发布，再运行这条模拟消息？</span>
-          <div>
-            <button disabled={saveBusy || simulationBusy} onClick={onConfirmSaveSimulation}>
-              {(saveBusy || simulationBusy) && <LoaderCircle className="spin" size={13} />}
-              {saveBusy ? '保存中' : simulationBusy ? '运行中' : '保存并运行'}
-            </button>
-            <button disabled={saveBusy || simulationBusy} onClick={onCancelSaveSimulation}>
-              取消
-            </button>
-          </div>
-        </div>
-      )}
       <div className="mobile-flow-card-head">
         <span className="mobile-flow-kind">{flowKindLabel(data.kind)}</span>
-        <div className="mobile-flow-card-actions">
-          {onEnqueue && (
-            <button className="mobile-enqueue" onClick={onEnqueue}>
-              <Plus size={14} />
-              入队
-            </button>
-          )}
-          <button
-            aria-label="上移模块"
-            title="上移模块"
-            disabled={!canMoveUp}
-            onClick={() => onMove(node.id, 'up')}
-          >
-            <ChevronUp size={14} />
-          </button>
-          <button
-            aria-label="下移模块"
-            title="下移模块"
-            disabled={!canMoveDown}
-            onClick={() => onMove(node.id, 'down')}
-          >
-            <ChevronDown size={14} />
-          </button>
-          <button
-            aria-label={`删除${data.label}`}
-            title="删除模块"
-            onClick={() => onDelete(node.id)}
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
       </div>
       <strong>{data.label}</strong>
       {data.simulation && (
@@ -1022,74 +875,28 @@ function MobileFlowCard({
           <p>{data.simulation.message}</p>
         </div>
       )}
-      {data.kind === 'simulated-input' && (
-        <div className="mobile-flow-config">
-          <textarea
-            value={testText}
-            onChange={(event) => setTestText(event.target.value)}
-            placeholder="输入测试消息"
-          />
-          <button
-            disabled={data.busy || !testText.trim()}
-            onClick={() => void onSimulate(node.id, testText.trim())}
-          >
-            {data.busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}
-            {data.busy ? '运行中' : '发送'}
-          </button>
-        </div>
-      )}
+      {data.kind === 'simulated-input' && <div className="mobile-flow-output">模拟输入</div>}
       {data.kind === 'simulated-output' && (
         <div className="mobile-flow-output">{data.outputText || '等待流程输出…'}</div>
       )}
       {data.kind === 'translation' && (
-        <div className="mobile-flow-config">
-          <textarea
-            value={data.prompt ?? ''}
-            onChange={(event) => patch({ prompt: event.target.value })}
-            placeholder="翻译提示词"
-          />
-          <label className="memory-toggle">
-            <input
-              type="checkbox"
-              checked={Boolean(data.memoryMode)}
-              onChange={(event) => patch({ memoryMode: event.target.checked })}
-            />
-            <span>记忆模式</span>
-          </label>
+        <div className="mobile-flow-readonly-config">
+          <span>{data.memoryMode ? '已开启记忆模式' : '未开启记忆模式'}</span>
+          <p>{data.prompt || '未设置翻译提示词'}</p>
         </div>
       )}
       {data.kind === 'moderation' && (
-        <div className="mobile-flow-config">
-          <label>
-            允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={data.threshold ?? 0.5}
-              onChange={(event) => patch({ threshold: Number(event.target.value) })}
-            />
-          </label>
-          <textarea
-            value={data.prompt ?? ''}
-            onChange={(event) => patch({ prompt: event.target.value })}
-            placeholder="审核提示词"
-          />
+        <div className="mobile-flow-readonly-config">
+          <span>允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%</span>
+          <p>{data.prompt || '未设置审核提示词'}</p>
         </div>
       )}
       {data.kind === 'fixed' && (
-        <div className="mobile-flow-config">
-          <textarea
-            value={data.text ?? ''}
-            onChange={(event) => patch({ text: event.target.value })}
-            placeholder="经过此模块后输出的固定文本"
-          />
-        </div>
+        <div className="mobile-flow-output">{data.text || '输出空文本'}</div>
       )}
       {data.kind !== 'output' && data.kind !== 'simulated-output' && (
-        <div className="mobile-flow-connections">
-          <span>连接到</span>
+        <div className="mobile-flow-connections readonly">
+          <span>当前连接</span>
           {(data.kind === 'moderation' || data.kind === 'review'
             ? [
                 { handle: 'passed', label: data.kind === 'review' ? '通过' : '过审' },
@@ -1098,23 +905,12 @@ function MobileFlowCard({
             : [{ handle: undefined, label: '下一步' }]
           ).map(({ handle, label }) => {
             const edge = outgoing.find((item) => item.sourceHandle === handle);
+            const target = allNodes.find((candidate) => candidate.id === edge?.target);
             return (
-              <label key={handle ?? 'default'}>
-                {label}
-                <select
-                  value={edge?.target ?? ''}
-                  onChange={(event) => onConnect(node.id, event.target.value, handle)}
-                >
-                  <option value="">未连接</option>
-                  {allNodes
-                    .filter((candidate) => candidate.id !== node.id)
-                    .map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.data.label}
-                      </option>
-                    ))}
-                </select>
-              </label>
+              <div key={handle ?? 'default'}>
+                <span>{label}</span>
+                <strong>{target?.data.label ?? '未连接'}</strong>
+              </div>
             );
           })}
         </div>
@@ -1216,7 +1012,7 @@ function BlueprintEditor() {
     activityCursor.current = '';
     activityQueue.current = [];
 
-    const progressTimers = new Set<number>();
+    const progressFrames = new Set<number>();
     const waitWithProgress = (
       nodeId: string,
       startProgress: number,
@@ -1227,7 +1023,9 @@ function BlueprintEditor() {
       new Promise<void>((resolve) => {
         const duration = Math.max(0, delayMs);
         const startedAt = performance.now();
+        let frame: number | undefined;
         const update = () => {
+          if (frame !== undefined) progressFrames.delete(frame);
           const elapsed =
             duration === 0 ? 1 : Math.min(1, (performance.now() - startedAt) / duration);
           const eased = easing === 'ease-out' ? 1 - Math.pow(1 - elapsed, 3) : elapsed;
@@ -1241,24 +1039,58 @@ function BlueprintEditor() {
                 node.id === nodeId && node.data.simulation?.state === 'active'
                   ? {
                       ...node,
-                      data: { ...node.data, simulation: { ...node.data.simulation, progress } },
+                      data: {
+                        ...node.data,
+                        simulation: {
+                          ...node.data.simulation,
+                          progress: Math.max(node.data.simulation.progress ?? 0, progress),
+                        },
+                      },
                     }
                   : node,
               ),
             );
           }
-          if (progress >= endProgress || cancelled) {
-            if (timer !== undefined) {
-              window.clearInterval(timer);
-              progressTimers.delete(timer);
-            }
+          if (elapsed >= 1 || cancelled) {
             resolve();
+          } else {
+            frame = window.requestAnimationFrame(update);
+            progressFrames.add(frame);
           }
         };
-        const timer = duration === 0 ? undefined : window.setInterval(update, 45);
-        if (timer !== undefined) progressTimers.add(timer);
         update();
       });
+
+    let driftTimer: number | undefined;
+    const scheduleProgressDrift = () => {
+      driftTimer = window.setTimeout(
+        () => {
+          if (cancelled) return;
+          setNodes((current) =>
+            current.map((node) => {
+              if (node.data.simulation?.state !== 'active') return node;
+              const progress = Math.max(50, node.data.simulation.progress ?? 50);
+              if (progress >= 99) return node;
+              const remaining = 99 - progress;
+              const step = Math.max(0.12, remaining * (0.06 + Math.random() * 0.12));
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  simulation: {
+                    ...node.data.simulation,
+                    progress: Math.min(99, progress + step),
+                  },
+                },
+              };
+            }),
+          );
+          scheduleProgressDrift();
+        },
+        500 + Math.random() * 1_500,
+      );
+    };
+    scheduleProgressDrift();
 
     const playQueued = async () => {
       if (activityPlaying.current) return;
@@ -1379,7 +1211,7 @@ function BlueprintEditor() {
                       simulation: {
                         state: 'active' as const,
                         message: '上一节点已完成，等待运行此节点',
-                        progress: 0,
+                        progress: 50,
                       },
                     },
                   }
@@ -1437,8 +1269,9 @@ function BlueprintEditor() {
       controller.abort();
       activityQueue.current = [];
       activityPlaying.current = false;
-      for (const timer of progressTimers) window.clearInterval(timer);
-      progressTimers.clear();
+      if (driftTimer !== undefined) window.clearTimeout(driftTimer);
+      for (const frame of progressFrames) window.cancelAnimationFrame(frame);
+      progressFrames.clear();
     };
   }, [currentBlueprintId, edges, setNodes, simulationSettings.data.delayMs]);
 
@@ -1784,95 +1617,6 @@ function BlueprintEditor() {
     await executeSimulatedInput(nodeId, text);
   };
 
-  const reconnectMobile = (sourceId: string, targetId: string, sourceHandle?: string) => {
-    setDraftDirty(true);
-    setEdges((current) => {
-      const remaining = current.filter(
-        (edge) => !(edge.source === sourceId && (edge.sourceHandle ?? undefined) === sourceHandle),
-      );
-      if (!targetId) return remaining;
-      return addEdge(
-        {
-          id: createBrowserId(),
-          source: sourceId,
-          target: targetId,
-          ...(sourceHandle ? { sourceHandle } : {}),
-        },
-        remaining,
-      );
-    });
-  };
-
-  const moveMobileNode = (
-    nodeId: string,
-    direction: 'up' | 'down',
-    pathNodeIds: string[],
-    pathEdgeIds: string[],
-  ) => {
-    const from = pathNodeIds.indexOf(nodeId);
-    const to = from + (direction === 'up' ? -1 : 1);
-    if (from < 0 || to < 0 || to >= pathNodeIds.length) return;
-    const reordered = [...pathNodeIds];
-    [reordered[from], reordered[to]] = [reordered[to]!, reordered[from]!];
-    const positions = new Map(reordered.map((id, index) => [id, 70 + index * 180]));
-    setNodes((current) =>
-      current.map((node) => {
-        const y = positions.get(node.id);
-        return y === undefined ? node : { ...node, position: { ...node.position, y } };
-      }),
-    );
-    setEdges((current) => {
-      const selected = current.filter((edge) => pathEdgeIds.includes(edge.id));
-      const selectedBySource = new Map(selected.map((edge) => [edge.source, edge]));
-      const remaining = current.filter((edge) => !pathEdgeIds.includes(edge.id));
-      const rebuilt = reordered.slice(0, -1).map((source, index) => {
-        const template = selectedBySource.get(source);
-        const sourceNode = nodes.find((node) => node.id === source);
-        const sourceHandle = template?.sourceHandle ?? defaultFlowSourceHandle(sourceNode);
-        return {
-          id: template?.id ?? createBrowserId(),
-          source,
-          target: reordered[index + 1]!,
-          ...(sourceHandle ? { sourceHandle } : {}),
-          ...(template?.targetHandle ? { targetHandle: template.targetHandle } : {}),
-        };
-      });
-      return [...remaining, ...rebuilt];
-    });
-    setDraftDirty(true);
-  };
-
-  const enqueueMobileNode = (nodeId: string, afterNodeId?: string) => {
-    if (!afterNodeId || nodeId === afterNodeId) return;
-    const sourceNode = nodes.find((node) => node.id === afterNodeId);
-    const queuedNode = nodes.find((node) => node.id === nodeId);
-    if (!sourceNode || !queuedNode) return;
-    const sourceHandle = defaultFlowSourceHandle(sourceNode);
-    setEdges((current) => [
-      ...current.filter(
-        (edge) => edge.source !== afterNodeId || edge.sourceHandle !== sourceHandle,
-      ),
-      {
-        id: createBrowserId(),
-        source: afterNodeId,
-        target: nodeId,
-        ...(sourceHandle ? { sourceHandle } : {}),
-      },
-    ]);
-    setNodes((current) =>
-      current.map((node) =>
-        node.id === nodeId
-          ? {
-              ...node,
-              position: { x: sourceNode.position.x + 280, y: sourceNode.position.y },
-            }
-          : node,
-      ),
-    );
-    setDraftDirty(true);
-    setNotice(`已将“${queuedNode.data.label}”追加到流程末尾。`);
-  };
-
   const save = async (): Promise<boolean> => {
     if (saving) return false;
     setSaving(true);
@@ -2122,35 +1866,7 @@ function BlueprintEditor() {
           <Controls />
         </ReactFlow>
       </div>
-      <MobileBlueprintFlow
-        nodes={nodes}
-        edges={edges}
-        onPatchNode={(nodeId, patch) => {
-          setDraftDirty(true);
-          setNodes((current) =>
-            current.map((node) =>
-              node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node,
-            ),
-          );
-        }}
-        onDeleteNode={(nodeId) => {
-          setDraftDirty(true);
-          setNodes((current) => current.filter((node) => node.id !== nodeId));
-          setEdges((current) =>
-            current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
-          );
-        }}
-        onConnect={reconnectMobile}
-        onMoveNode={moveMobileNode}
-        onEnqueueNode={enqueueMobileNode}
-        onSimulate={runSimulatedInput}
-        onDraftChange={() => setDraftDirty(true)}
-        {...(pendingSimulation ? { pendingSimulation } : {})}
-        onConfirmSaveSimulation={() => void confirmSaveSimulation()}
-        onCancelSaveSimulation={() => setPendingSimulation(undefined)}
-        saveBusy={saving}
-        simulationBusy={simulationBusy}
-      />
+      <MobileBlueprintFlow nodes={nodes} edges={edges} />
     </div>
   );
 }

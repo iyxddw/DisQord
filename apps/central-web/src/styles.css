@@ -1,3 +1,9 @@
+@property --simulation-progress {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+
 :root {
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
@@ -889,6 +895,7 @@ button.fit {
   background: #181b1f;
   box-shadow: none;
   transition:
+    --simulation-progress 180ms linear,
     border-color 140ms ease,
     background 140ms ease;
 }
@@ -1373,6 +1380,25 @@ code {
   overflow: auto;
 }
 
+.mobile-readonly-notice {
+  display: grid;
+  gap: 4px;
+  margin: 16px 16px 0;
+  padding: 11px 12px;
+  border: 1px solid #41474d;
+  border-radius: 3px;
+  color: #b9bec3;
+  background: #171a1d;
+}
+.mobile-readonly-notice strong {
+  color: #e0e2e4;
+  font-size: 13px;
+}
+.mobile-readonly-notice span {
+  color: #929aa2;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .mobile-flow-heading {
   display: flex;
   align-items: flex-start;
@@ -1423,6 +1449,7 @@ code {
   color: #d7dadd;
   background: #171a1d;
   transition:
+    --simulation-progress 180ms linear,
     transform 120ms ease,
     border-color 140ms ease,
     background 140ms ease,
@@ -1459,50 +1486,6 @@ code {
   align-items: center;
   gap: 5px;
 }
-.mobile-flow-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.mobile-flow-card-head button {
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: 1px solid #3f454b;
-  border-radius: 2px;
-  color: #9da3a9;
-  background: #131619;
-  cursor: pointer;
-}
-.mobile-flow-card-head button:hover {
-  color: #ff9bad;
-  border-color: #b95f70;
-  background: #26191e;
-}
-.mobile-flow-card-head button:disabled {
-  color: #555c63;
-  border-color: #30353a;
-  background: #15181b;
-  cursor: not-allowed;
-}
-.mobile-flow-card-head .mobile-enqueue {
-  width: auto;
-  padding: 0 8px;
-  grid-auto-flow: column;
-  gap: 4px;
-  color: #a9cdb3;
-  border-color: #466550;
-  background: #18231c;
-}
-.mobile-flow-card-head .mobile-enqueue:hover {
-  color: #c3e4cb;
-  border-color: #5d8067;
-  background: #1d2d22;
-}
-.mobile-flow-card-actions button {
-  flex: 0 0 auto;
-}
 .mobile-flow-card > strong {
   font-size: 14px;
 }
@@ -1518,6 +1501,37 @@ code {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.mobile-flow-readonly-config {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #30343a;
+  border-radius: 2px;
+  background: #101214;
+}
+.mobile-flow-readonly-config span {
+  color: #aeb5bb;
+  font-size: 11px;
+}
+.mobile-flow-readonly-config p {
+  margin: 0;
+  color: #c6cacf;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.mobile-flow-connections.readonly > div {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  gap: 8px;
+  align-items: center;
+  color: #8f98a1;
+  font-size: 11px;
+}
+.mobile-flow-connections.readonly strong {
+  color: #cbd0d4;
+  font-weight: 550;
 }
 .mobile-flow-activity p {
   margin: 0;
