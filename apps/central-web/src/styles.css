@@ -832,6 +832,10 @@ button.fit {
 .mobile-blueprint-flow {
   display: none;
 }
+body.mobile-blueprint-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
 .flow-save-prompt {
   position: absolute;
   z-index: 10;
@@ -914,6 +918,29 @@ button.fit {
   line-height: 1.45;
   overflow-wrap: anywhere;
   box-shadow: none;
+}
+.flow-simulation-progress {
+  height: 4px;
+  margin: -1px -2px 6px;
+  overflow: hidden;
+  border: 1px solid #3a4047;
+  border-radius: 1px;
+  background: #0e1012;
+}
+.flow-simulation-progress > span,
+.mobile-flow-progress > span {
+  display: block;
+  height: 100%;
+  background: #aeb5bb;
+  transition: width 80ms linear;
+}
+.flow-simulation-progress-label {
+  position: absolute;
+  top: 7px;
+  right: 10px;
+  color: #aeb5bb;
+  font-size: 10px;
+  line-height: 1;
 }
 .flow-simulation-note.done {
   color: #9eafb4;
@@ -1408,6 +1435,18 @@ code {
   border-radius: 3px;
   color: #d7dadd;
   background: #171a1d;
+  transition:
+    transform 120ms ease,
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+.mobile-flow-card.is-dragging {
+  z-index: 20;
+  border-color: #c0c5ca;
+  background: #202429;
+  box-shadow: 0 16px 28px rgb(0 0 0 / 32%);
+  transition: none;
 }
 .mobile-flow-card.active {
   border-color: #858b92;
@@ -1440,6 +1479,8 @@ code {
   color: #7d858d !important;
   border-color: transparent !important;
   background: transparent !important;
+  touch-action: none;
+  user-select: none;
 }
 .mobile-drag-handle:active {
   cursor: grabbing !important;
@@ -1486,6 +1527,33 @@ code {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.mobile-flow-activity {
+  display: grid;
+  gap: 6px;
+}
+.mobile-flow-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9da5ad;
+  font-size: 10px;
+}
+.mobile-flow-progress-head b {
+  color: #d1d5d8;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.mobile-flow-progress {
+  height: 5px;
+  overflow: hidden;
+  border: 1px solid #3a4047;
+  border-radius: 1px;
+  background: #0e1012;
+}
+.mobile-flow-activity p {
+  margin: 0;
 }
 .mobile-flow-config {
   display: grid;
