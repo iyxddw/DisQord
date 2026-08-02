@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
@@ -8,6 +9,11 @@ import { z } from 'zod';
 
 import { NodeConfigStore } from './config.js';
 import { NodeLogger, type NodeLogPage, type NodeLogQuery } from './logger.js';
+
+const UPLOAD_BATCH_DELAYS_MS = [8_000, 6_000, 4_000, 2_000, 0] as const;
+const MAX_UPLOAD_BATCH_SIZE = 25;
+const DELIVERY_MIN_GAP_MS = 6_000;
+const DELIVERY_MAX_GAP_MS = 13_000;
 
 export interface PlatformSessionCandidate {
   readonly externalId: string;
@@ -38,6 +44,11 @@ const deliverCommandSchema = z.object({
   cards: z.array(z.string().min(1)).min(1).max(20),
   replyMessageId: z.string().min(1).optional(),
   targetMessageId: z.string().min(1).optional(),
+});
+
+const deliverBatchCommandSchema = z.object({
+  batchId: z.uuid(),
+  deliveries: z.array(deliverCommandSchema).min(1).max(25),
 });
 
 const nodeLogRequestSchema = z.object({
@@ -75,8 +86,11 @@ export class NodeBridgeRuntime {
   #adapter: PlatformAdapter | undefined;
   #draining = false;
   #retryTimer: NodeJS.Timeout | undefined;
+  #uploadBatchTimer: NodeJS.Timeout | undefined;
+  #uploadBatchStage = 0;
   readonly #deliveryChains = new Map<string, Promise<void>>();
   readonly #deliveryTasks = new Map<string, Promise<void>>();
+  readonly #lastDeliveryAt = new Map<string, number>();
 
   constructor(options: NodeBridgeRuntimeOptions) {
     this.#options = options;
@@ -139,7 +153,7 @@ export class NodeBridgeRuntime {
         messageId: validated.source.messageId,
         duplicate: queued === false,
       });
-      await this.#drainQueue();
+      this.#scheduleUploadBatch();
     });
     try {
       await this.#client.connect();
@@ -150,7 +164,9 @@ export class NodeBridgeRuntime {
 
   async stop(): Promise<void> {
     if (this.#retryTimer) clearTimeout(this.#retryTimer);
+    if (this.#uploadBatchTimer) clearTimeout(this.#uploadBatchTimer);
     this.#retryTimer = undefined;
+    this.#uploadBatchTimer = undefined;
     this.#client?.disconnect();
     await this.#adapter?.stop();
     this.#queue?.close();
@@ -215,6 +231,32 @@ export class NodeBridgeRuntime {
         cardCount: command.cards.length,
       });
       await this.#scheduleDelivery(command.taskId, command);
+      return;
+    }
+    if (kind === 'message.deliver.batch') {
+      const batch = deliverBatchCommandSchema.parse(payload);
+      if (!this.#queue) throw new Error('Node queue is not ready.');
+      this.#log('info', 'delivery_batch_queued', {
+        batchId: batch.batchId,
+        count: batch.deliveries.length,
+      });
+      // Persist every task before starting any of them.  The per-session
+      // delivery chain then preserves the order from the central batch even
+      // though each task is processed asynchronously.
+      for (const command of batch.deliveries) {
+        if (!this.#queue.get(command.taskId)) {
+          this.#queue.enqueue({ id: command.taskId, kind: 'message.deliver', payload: command });
+        }
+      }
+      for (const command of batch.deliveries) {
+        void this.#scheduleDelivery(command.taskId).catch((error: unknown) => {
+          this.#log('error', 'delivery_batch_item_failed', {
+            batchId: batch.batchId,
+            taskId: command.taskId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
     }
   }
 
@@ -271,6 +313,7 @@ export class NodeBridgeRuntime {
         attempt,
       });
       try {
+        await this.#waitForDeliveryGap(item.payload.targetSessionId);
         let firstMessageId: string | undefined;
         for (const [index, card] of item.payload.cards.entries()) {
           if (!this.#adapter) throw new Error('Platform adapter is not running.');
@@ -282,6 +325,7 @@ export class NodeBridgeRuntime {
           firstMessageId ??= messageId;
         }
         if (!firstMessageId) throw new Error('The platform did not return a message ID.');
+        this.#lastDeliveryAt.set(item.payload.targetSessionId, Date.now());
         const completed = { ...item.payload, targetMessageId: firstMessageId };
         queue.updatePayload(taskId, completed);
         queue.markAcknowledged(taskId);
@@ -351,11 +395,16 @@ export class NodeBridgeRuntime {
     if (this.#draining || !this.#queue || !this.#client) return;
     this.#draining = true;
     try {
-      for (const item of this.#queue.listRecoverable(100)) {
-        if (item.kind === 'message.upload') {
-          const completed = await this.#processUpload(item as QueueItem<MessageEnvelope>);
-          if (!completed) break;
-        } else if (item.kind === 'message.deliver') {
+      const recoverable = this.#queue.listRecoverable(100);
+      const uploads = recoverable
+        .filter((item) => item.kind === 'message.upload')
+        .slice(0, MAX_UPLOAD_BATCH_SIZE) as QueueItem<MessageEnvelope>[];
+      if (uploads.length) {
+        const completed = await this.#processUploadBatch(uploads);
+        if (!completed) return;
+      }
+      for (const item of recoverable) {
+        if (item.kind === 'message.deliver') {
           void this.#scheduleDelivery(item.id).catch((error: unknown) => {
             this.#log('error', 'delivery_recovery_failed', {
               taskId: item.id,
@@ -366,46 +415,106 @@ export class NodeBridgeRuntime {
       }
     } finally {
       this.#draining = false;
+      const hasUploads = this.#queue
+        ?.listRecoverable(100)
+        .some((item) => item.kind === 'message.upload');
+      if (hasUploads && !this.#retryTimer) this.#scheduleUploadBatch();
+      else if (!hasUploads) this.#uploadBatchStage = 0;
     }
   }
 
-  async #processUpload(item: QueueItem<MessageEnvelope>): Promise<boolean> {
+  async #processUploadBatch(items: readonly QueueItem<MessageEnvelope>[]): Promise<boolean> {
     if (!this.#queue || !this.#client) return false;
+    if (!items.length) return true;
+    const eventIds = items.map((item) => item.id);
     try {
-      if (item.status === 'processing') this.#queue.markRetrying(item.id);
-      this.#queue.markProcessing(item.id);
+      for (const item of items) {
+        if (item.status === 'processing') this.#queue.markRetrying(item.id);
+        this.#queue.markProcessing(item.id);
+      }
       this.#log('debug', 'message_upload_attempt_started', {
-        eventId: item.id,
-        attempt: this.#queue.get(item.id)?.attempts ?? 1,
+        eventIds,
+        batchSize: items.length,
+        attempt: Math.max(...items.map((item) => this.#queue?.get(item.id)?.attempts ?? 1)),
       });
-      await this.#client.send(item.kind, item.payload);
-      this.#queue.markAcknowledged(item.id);
-      this.#log('info', 'message_upload_acknowledged', { eventId: item.id });
+      if (items.length === 1) {
+        await this.#client.send('message.upload', items[0]!.payload);
+      } else {
+        await this.#client.send('message.upload.batch', {
+          batchId: randomUUID(),
+          messages: items.map((item) => item.payload),
+        });
+      }
+      for (const item of items) this.#queue.markAcknowledged(item.id);
+      this.#log(
+        'info',
+        items.length === 1 ? 'message_upload_acknowledged' : 'message_upload_batch_acknowledged',
+        items.length === 1
+          ? { eventId: eventIds[0] }
+          : { eventIds, batchSize: items.length },
+      );
       return true;
     } catch (error) {
-      const current = this.#queue.get(item.id);
       const message = error instanceof Error ? error.message : String(error);
-      if (current?.status === 'processing') {
-        if (current.attempts >= 10) {
-          this.#queue.markDeadLetter(item.id);
-          this.#log('error', 'message_upload_dead_letter', {
-            eventId: item.id,
-            attempts: current.attempts,
-            error: message,
-          });
-        } else {
-          this.#queue.markRetrying(item.id);
-          this.#log('warn', 'message_upload_retry_scheduled', {
-            eventId: item.id,
-            attempts: current.attempts,
-            error: message,
-          });
-          this.#scheduleDrain(retryDelay(current.attempts));
+      let maxAttempts = 0;
+      let deadLettered = false;
+      for (const item of items) {
+        const current = this.#queue.get(item.id);
+        if (current?.status === 'processing') {
+          maxAttempts = Math.max(maxAttempts, current.attempts);
+          if (current.attempts >= 10) {
+            this.#queue.markDeadLetter(item.id);
+            deadLettered = true;
+          } else {
+            this.#queue.markRetrying(item.id);
+          }
         }
       }
+      this.#log(deadLettered ? 'error' : 'warn', deadLettered ? 'message_upload_dead_letter' : 'message_upload_retry_scheduled', {
+        eventIds,
+        batchSize: items.length,
+        attempts: maxAttempts,
+        error: message,
+        ...(deadLettered ? {} : { nextDelayMs: retryDelay(maxAttempts) }),
+      });
+      if (!deadLettered) this.#scheduleDrain(retryDelay(maxAttempts));
       this.#setRetrying(error);
       return false;
     }
+  }
+
+  #scheduleUploadBatch(delayOverride?: number): void {
+    if (this.#uploadBatchTimer || this.#retryTimer || this.#draining) return;
+    const delayMs =
+      delayOverride ?? UPLOAD_BATCH_DELAYS_MS[Math.min(this.#uploadBatchStage, UPLOAD_BATCH_DELAYS_MS.length - 1)]!;
+    if (delayOverride === undefined) {
+      this.#uploadBatchStage = Math.min(
+        this.#uploadBatchStage + 1,
+        UPLOAD_BATCH_DELAYS_MS.length - 1,
+      );
+    }
+    this.#log('debug', 'message_upload_batch_window_scheduled', {
+      delayMs,
+      stage: this.#uploadBatchStage,
+    });
+    this.#uploadBatchTimer = setTimeout(() => {
+      this.#uploadBatchTimer = undefined;
+      void this.#drainQueue();
+    }, delayMs);
+    this.#uploadBatchTimer.unref();
+  }
+
+  async #waitForDeliveryGap(targetSessionId: string): Promise<void> {
+    const previous = this.#lastDeliveryAt.get(targetSessionId);
+    if (previous === undefined) return;
+    const gap = randomInteger(DELIVERY_MIN_GAP_MS, DELIVERY_MAX_GAP_MS);
+    const waitMs = Math.max(0, previous + gap - Date.now());
+    this.#log('debug', 'delivery_interval_scheduled', {
+      targetSessionId,
+      requestedGapMs: gap,
+      waitMs,
+    });
+    if (waitMs) await delay(waitMs);
   }
 
   #scheduleDrain(delayMs: number): void {
@@ -438,6 +547,10 @@ export class NodeBridgeRuntime {
 
 function retryDelay(attempt: number): number {
   return Math.min(16_000, 1_000 * 2 ** Math.max(0, attempt - 1));
+}
+
+function randomInteger(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
 async function delay(milliseconds: number): Promise<void> {

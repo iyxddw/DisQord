@@ -7,6 +7,7 @@ import {
   createMessageIdempotencyKey,
   createProgramDescriptor,
   messageEnvelopeSchema,
+  messageUploadBatchSchema,
 } from './index.js';
 
 describe('createProgramDescriptor', () => {
@@ -70,6 +71,27 @@ describe('messageEnvelopeSchema', () => {
   it('rejects an image message without attachments', () => {
     expect(() =>
       messageEnvelopeSchema.parse({ ...message, kind: 'image', text: undefined }),
+    ).toThrow();
+  });
+
+  it('accepts an ordered upload batch and caps its size', () => {
+    const first = messageEnvelopeSchema.parse(message);
+    const second = messageEnvelopeSchema.parse({
+      ...message,
+      eventId: randomUUID(),
+      source: { ...message.source, messageId: '90002' },
+    });
+    expect(
+      messageUploadBatchSchema.parse({ batchId: randomUUID(), messages: [first, second] }).messages,
+    ).toHaveLength(2);
+    expect(() =>
+      messageUploadBatchSchema.parse({
+        messages: Array.from({ length: 26 }, (_, index) => ({
+          ...message,
+          eventId: randomUUID(),
+          source: { ...message.source, messageId: String(90_000 + index) },
+        })),
+      }),
     ).toThrow();
   });
 });

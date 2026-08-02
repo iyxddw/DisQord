@@ -187,6 +187,70 @@ describe('blueprint message pipeline', () => {
     expect(await setup.store.list('moderation-review')).toHaveLength(0);
   });
 
+  it('processes an upload batch concurrently but queues deliveries in receive order', async () => {
+    const input = randomUUID();
+    const translation = randomUUID();
+    const output = randomUUID();
+    let activeTranslations = 0;
+    let peakTranslations = 0;
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(translation, 'llm-translation', { prompt: '翻译', memoryMode: false }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
+        { id: randomUUID(), sourceNodeId: translation, targetNodeId: output },
+      ],
+      {
+        translate: vi.fn(async (_message, _target, text) => {
+          activeTranslations += 1;
+          peakTranslations = Math.max(peakTranslations, activeTranslations);
+          await new Promise((resolve) => setTimeout(resolve, text === 'one' ? 25 : 5));
+          activeTranslations -= 1;
+          return {
+            detectedLanguage: 'zh',
+            translatedText: `translated-${text}`,
+            confidence: 1,
+            model: 'translator',
+            promptVersion: 1,
+          };
+        }),
+        render: vi.fn(async (message) => [Buffer.from(`card-${message.text}`)]),
+      },
+    );
+
+    const first = message(setup.sourceSession.nodeId, 'one');
+    const second = message(setup.sourceSession.nodeId, 'two');
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload.batch',
+      frameId: randomUUID(),
+      payload: { batchId: randomUUID(), messages: [first, second] },
+    });
+
+    expect(peakTranslations).toBe(2);
+    expect(setup.sendToNode).toHaveBeenCalledTimes(1);
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver.batch',
+      expect.objectContaining({
+        deliveries: [
+          expect.objectContaining({
+            sourceMessageId: first.source.messageId,
+            cards: [Buffer.from('card-one').toString('base64')],
+          }),
+          expect.objectContaining({
+            sourceMessageId: second.source.messageId,
+            cards: [Buffer.from('card-two').toString('base64')],
+          }),
+        ],
+      }),
+    );
+  });
+
   it('records the full LLM failure for a simulated run', async () => {
     const input = randomUUID();
     const translation = randomUUID();

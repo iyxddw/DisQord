@@ -20,6 +20,7 @@ import {
   chatSessionSchema,
   createMessageIdempotencyKey,
   messageEnvelopeSchema,
+  messageUploadBatchSchema,
   type Blueprint,
   type BlueprintEdge,
   type BlueprintNode,
@@ -59,6 +60,7 @@ const moderationConfigSchema = z.object({
   threshold: z.number().min(0).max(1),
 });
 const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
+const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -122,6 +124,30 @@ interface PipelineState {
 interface WorkItem {
   readonly nodeId: string;
   readonly state: PipelineState;
+}
+
+interface DeliveryIntent {
+  readonly blueprint: BlueprintVersion;
+  readonly sourceSession: ChatSession;
+  readonly target: ChatSession;
+  readonly message: MessageEnvelope;
+  readonly cards: readonly Buffer[];
+  readonly processedText: string;
+}
+
+interface OutboundDeliveryCommand {
+  readonly taskId: string;
+  readonly sourceSessionId: string;
+  readonly sourceMessageId: string;
+  readonly targetSessionId: string;
+  readonly externalId: string;
+  readonly cards: readonly string[];
+  readonly replyMessageId?: string;
+}
+
+interface PreparedDelivery {
+  readonly intent: DeliveryIntent;
+  readonly command: OutboundDeliveryCommand;
 }
 
 interface BlueprintFlowSimulationStep {
@@ -190,6 +216,8 @@ export class MessageOrchestrator {
   async handleNodeFrame(frame: ReceivedNodeFrame): Promise<void> {
     if (frame.kind === 'message.upload') {
       await this.#handleMessageUpload(frame);
+    } else if (frame.kind === 'message.upload.batch') {
+      await this.#handleMessageUploadBatch(frame);
     } else if (frame.kind === 'message.delivered') {
       await this.#handleDelivered(frame.payload);
     } else if (frame.kind === 'message.delivery_failed') {
@@ -519,8 +547,13 @@ export class MessageOrchestrator {
     return { traceId };
   }
 
-  async #handleMessageUpload(frame: ReceivedNodeFrame): Promise<void> {
-    const message = messageEnvelopeSchema.parse(frame.payload);
+  async #handleMessageUpload(
+    frame: ReceivedNodeFrame,
+    messagePayload: unknown = frame.payload,
+    deliveryCollector?: DeliveryIntent[],
+    strict = false,
+  ): Promise<void> {
+    const message = messageEnvelopeSchema.parse(messagePayload);
     if (message.source.nodeId !== frame.nodeId || message.source.platform !== frame.nodeType) {
       throw new Error('Uploaded message source does not match the authenticated node.');
     }
@@ -612,6 +645,8 @@ export class MessageOrchestrator {
           sessions,
           message,
           recentMessages,
+          undefined,
+          deliveryCollector,
         );
         await this.#log(
           message.traceId,
@@ -629,8 +664,75 @@ export class MessageOrchestrator {
           error: error instanceof Error ? error.message : String(error),
           errorDetails: describeError(error),
         });
+        if (strict) {
+          await this.#store.delete('message-dedupe', dedupeKey);
+          throw error;
+        }
       }
     }
+  }
+
+  async #handleMessageUploadBatch(frame: ReceivedNodeFrame): Promise<void> {
+    const batch = messageUploadBatchSchema.parse(frame.payload);
+    const messages = batch.messages;
+    const collectors = messages.map(() => [] as DeliveryIntent[]);
+    const concurrency = await this.#configuredLlmConcurrency();
+    let nextIndex = 0;
+    const failures: { index: number; error: unknown }[] = [];
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= messages.length) return;
+        try {
+          await this.#handleMessageUpload(frame, messages[index], collectors[index], true);
+        } catch (error) {
+          failures.push({ index, error });
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, messages.length) }, () => worker()),
+    );
+    await this.#log(
+      messages[0]!.traceId,
+      failures.length ? 'error' : 'info',
+      failures.length ? 'message_upload_batch_failed' : 'message_upload_batch_processed',
+      {
+        batchId: batch.batchId,
+        batchSize: messages.length,
+        concurrency: Math.min(concurrency, messages.length),
+        eventIds: messages.map((message) => message.eventId),
+        failures: failures.map(({ index, error }) => ({
+          index,
+          eventId: messages[index]?.eventId,
+          error: describeError(error),
+        })),
+      },
+    );
+    if (failures.length) {
+      for (const message of messages) {
+        await this.#store.delete('message-dedupe', createMessageIdempotencyKey(message));
+      }
+      throw failures[0]!.error;
+    }
+
+    // Preserve the node's receive order even though each message's LLM work
+    // ran concurrently.  The target node has its own per-session queue and
+    // will send these tasks one by one.
+    const deliveries = collectors.flat();
+    if (deliveries.length) await this.#dispatchDeliveryBatch(deliveries);
+    await this.#log(messages[0]!.traceId, 'info', 'message_upload_batch_deliveries_queued', {
+      batchId: batch.batchId,
+      batchSize: messages.length,
+      deliveryCount: deliveries.length,
+    });
+  }
+
+  async #configuredLlmConcurrency(): Promise<number> {
+    const entry = await this.#store.get('settings', 'llm');
+    if (!entry) return 4;
+    const parsed = llmSettingsSchema.safeParse(entry.value);
+    return parsed.success ? parsed.data.concurrency : 4;
   }
 
   async #executeBlueprint(
@@ -640,6 +742,7 @@ export class MessageOrchestrator {
     message: MessageEnvelope,
     recentMessages: readonly MessageEnvelope[],
     initialWork?: readonly WorkItem[],
+    deliveryCollector?: DeliveryIntent[],
   ): Promise<{ paused: boolean }> {
     const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
     const outgoing = new Map<string, BlueprintEdge[]>();
@@ -889,7 +992,23 @@ export class MessageOrchestrator {
           state.cards && state.renderedForSessionId === target.id
             ? state.cards
             : await this.#render(message, target, state.text, state.fixedText);
-        await this.#dispatchDelivery(blueprint, sourceSession, target, message, cards, state.text);
+        const delivery: DeliveryIntent = {
+          blueprint,
+          sourceSession,
+          target,
+          message,
+          cards,
+          processedText: state.text,
+        };
+        if (deliveryCollector) deliveryCollector.push(delivery);
+        else await this.#dispatchDelivery(
+          blueprint,
+          sourceSession,
+          target,
+          message,
+          cards,
+          state.text,
+        );
         await this.#recordActivity(blueprint, message, node, processedSteps, {
           message: `已发送到 ${target.remark?.trim() || target.displayName}`,
           text: state.text,
@@ -1013,6 +1132,19 @@ export class MessageOrchestrator {
     cards: readonly Buffer[],
     processedText: string,
   ): Promise<void> {
+    const prepared = await this.#prepareDelivery({
+      blueprint,
+      sourceSession,
+      target,
+      message,
+      cards,
+      processedText,
+    });
+    await this.#sendPreparedDelivery(prepared);
+  }
+
+  async #prepareDelivery(intent: DeliveryIntent): Promise<PreparedDelivery> {
+    const { blueprint, sourceSession, target, message, cards, processedText } = intent;
     const taskId = randomUUID();
     const now = new Date().toISOString();
     await this.#store.set('delivery-task', taskId, {
@@ -1036,7 +1168,7 @@ export class MessageOrchestrator {
           )
         )?.value.targetMessageId
       : undefined;
-    const command = {
+    const command: OutboundDeliveryCommand = {
       taskId,
       sourceSessionId: sourceSession.id,
       sourceMessageId: message.source.messageId,
@@ -1045,10 +1177,16 @@ export class MessageOrchestrator {
       cards: cards.map((card) => card.toString('base64')),
       ...(mappedReplyId ? { replyMessageId: mappedReplyId } : {}),
     };
+    return { intent, command };
+  }
+
+  async #sendPreparedDelivery(prepared: PreparedDelivery): Promise<void> {
+    const { intent, command } = prepared;
+    const { message, target, cards } = intent;
     try {
       await this.#commandBus.sendToNode(target.nodeId, 'message.deliver', command);
       await this.#log(message.traceId, 'info', 'delivery_queued', {
-        taskId,
+        taskId: command.taskId,
         target: {
           nodeId: target.nodeId,
           platform: target.platform,
@@ -1056,21 +1194,91 @@ export class MessageOrchestrator {
           externalId: target.externalId,
         },
         cardCount: cards.length,
-        replyMessageId: mappedReplyId,
+        replyMessageId: command.replyMessageId,
       });
     } catch (error) {
-      await this.#store.set('delivery-task', taskId, {
-        ...(await this.#store.get<Record<string, unknown>>('delivery-task', taskId))?.value,
+      await this.#store.set('delivery-task', command.taskId, {
+        ...(await this.#store.get<Record<string, unknown>>('delivery-task', command.taskId))?.value,
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
         updatedAt: new Date().toISOString(),
       });
       await this.#log(message.traceId, 'error', 'delivery_command_failed', {
-        taskId,
+        taskId: command.taskId,
         targetSessionId: target.id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  async #dispatchDeliveryBatch(intents: readonly DeliveryIntent[]): Promise<void> {
+    if (!intents.length) return;
+    const prepared = await Promise.all(intents.map((intent) => this.#prepareDelivery(intent)));
+    const byNode = new Map<string, PreparedDelivery[]>();
+    for (const item of prepared) {
+      const list = byNode.get(item.intent.target.nodeId) ?? [];
+      list.push(item);
+      byNode.set(item.intent.target.nodeId, list);
+    }
+    await Promise.all(
+      [...byNode.entries()].map(async ([nodeId, deliveries]) => {
+        const chunks: PreparedDelivery[][] = [];
+        let current: PreparedDelivery[] = [];
+        for (const delivery of deliveries) {
+          const candidate = [...current, delivery];
+          const size = Buffer.byteLength(
+            JSON.stringify({ deliveries: candidate.map(({ command }) => command) }),
+            'utf8',
+          );
+          if (current.length && size > MAX_DELIVERY_BATCH_BYTES) {
+            chunks.push(current);
+            current = [delivery];
+          } else {
+            current = candidate;
+          }
+        }
+        if (current.length) chunks.push(current);
+
+        // Chunks for the same node are sent serially so a large batch cannot
+        // overtake an earlier chunk on the WebSocket.
+        for (const chunk of chunks) {
+          const payload = { batchId: randomUUID(), deliveries: chunk.map(({ command }) => command) };
+          try {
+            await this.#commandBus.sendToNode(nodeId, 'message.deliver.batch', payload);
+            for (const { intent, command } of chunk) {
+              await this.#log(intent.message.traceId, 'info', 'delivery_queued', {
+                taskId: command.taskId,
+                batchId: payload.batchId,
+                target: {
+                  nodeId,
+                  platform: intent.target.platform,
+                  sessionId: intent.target.id,
+                  externalId: intent.target.externalId,
+                },
+                cardCount: intent.cards.length,
+                replyMessageId: command.replyMessageId,
+              });
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            for (const { intent, command } of chunk) {
+              await this.#store.set('delivery-task', command.taskId, {
+                ...(await this.#store.get<Record<string, unknown>>('delivery-task', command.taskId))?.value,
+                status: 'failed',
+                error: message,
+                updatedAt: new Date().toISOString(),
+              });
+              await this.#log(intent.message.traceId, 'error', 'delivery_command_failed', {
+                taskId: command.taskId,
+                batchId: payload.batchId,
+                targetSessionId: intent.target.id,
+                error: message,
+              });
+            }
+          }
+        }
+      }),
+    );
   }
 
   async handleReview(taskId: string, decision: 'approve' | 'reject'): Promise<void> {

@@ -91,6 +91,18 @@ export type MessageEnvelope = z.infer<typeof messageEnvelopeSchema>;
 export type ReplyReference = z.infer<typeof replyReferenceSchema>;
 export type MediaReference = z.infer<typeof mediaReferenceSchema>;
 
+/**
+ * Upload envelope used by nodes when several messages are coalesced during a
+ * poor network window.  The individual envelopes remain authoritative so
+ * the central server can preserve their order and idempotency semantics.
+ */
+export const messageUploadBatchSchema = z.object({
+  batchId: internalIdSchema.optional(),
+  messages: z.array(messageEnvelopeSchema).min(1).max(25),
+});
+
+export type MessageUploadBatch = z.infer<typeof messageUploadBatchSchema>;
+
 export function createMessageIdempotencyKey(message: MessageEnvelope): string {
   return createHash('sha256')
     .update(
