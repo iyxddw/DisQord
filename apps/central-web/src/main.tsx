@@ -533,7 +533,7 @@ type FlowData = {
   simulation?:
     | {
         state: 'active' | 'done' | 'error';
-        message: string;
+        message?: string;
         progress?: number;
       }
     | undefined;
@@ -588,7 +588,7 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           </div>
         </div>
       )}
-      {data.simulation && (
+      {data.simulation?.message && (
         <div className={`flow-simulation-note ${data.simulation.state}`} role="status">
           {data.simulation.message}
         </div>
@@ -647,10 +647,8 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           </button>
         </div>
       )}
-      {data.kind === 'simulated-output' && (
-        <div className="simulated-output-value nodrag nopan">
-          {data.outputText || '等待流程输出…'}
-        </div>
+      {data.kind === 'simulated-output' && data.outputText && (
+        <div className="simulated-output-value nodrag nopan">{data.outputText}</div>
       )}
       {data.kind === 'translation' && (
         <div className="flow-node-config nodrag nopan">
@@ -870,14 +868,14 @@ function MobileFlowCard({
         <span className="mobile-flow-kind">{flowKindLabel(data.kind)}</span>
       </div>
       <strong>{data.label}</strong>
-      {data.simulation && (
+      {data.simulation?.message && (
         <div className="mobile-flow-activity">
           <p>{data.simulation.message}</p>
         </div>
       )}
       {data.kind === 'simulated-input' && <div className="mobile-flow-output">模拟输入</div>}
-      {data.kind === 'simulated-output' && (
-        <div className="mobile-flow-output">{data.outputText || '等待流程输出…'}</div>
+      {data.kind === 'simulated-output' && data.outputText && (
+        <div className="mobile-flow-output">{data.outputText}</div>
       )}
       {data.kind === 'translation' && (
         <div className="mobile-flow-readonly-config">
@@ -1114,7 +1112,6 @@ function BlueprintEditor() {
                     node.id === activity.nodeId
                       ? {
                           state: 'active' as const,
-                          message: activity.message,
                           progress: startsAtHalf
                             ? 50
                             : node.data.simulation?.state === 'active'
@@ -1182,15 +1179,18 @@ function BlueprintEditor() {
             ),
           );
           await waitWithProgress(activity.nodeId, 95, 100, Math.min(220, delay), 'ease-out');
-          const nextNodeIds = new Set(
-            edges
-              .filter(
-                (edge) =>
-                  edge.source === activity.nodeId &&
-                  (!activity.route || (edge.sourceHandle ?? undefined) === activity.route),
-              )
-              .map((edge) => edge.target),
-          );
+          const nextNodeIds =
+            activity.nodeType === 'chat-output' || activity.nodeType === 'simulated-output'
+              ? new Set<string>()
+              : new Set(
+                  edges
+                    .filter(
+                      (edge) =>
+                        edge.source === activity.nodeId &&
+                        (!activity.route || (edge.sourceHandle ?? undefined) === activity.route),
+                    )
+                    .map((edge) => edge.target),
+                );
           setNodes((current) =>
             current.map((node) =>
               node.id === activity.nodeId
@@ -1212,7 +1212,6 @@ function BlueprintEditor() {
                         ...node.data,
                         simulation: {
                           state: 'active' as const,
-                          message: '上一节点已完成，等待运行此节点',
                           progress: 50,
                         },
                       },
@@ -1576,7 +1575,6 @@ function BlueprintEditor() {
                 busy: true,
                 simulation: {
                   state: 'active' as const,
-                  message: '正在提交模拟消息…',
                   progress: 50,
                 },
               },
