@@ -71,6 +71,26 @@ corepack prepare pnpm@10.14.0 --activate
 
 所有启动命令都必须在项目根目录执行，否则程序可能找不到已经构建的网页文件。
 
+### PM2 启动脚本
+
+仓库根目录提供三个带前置检查的 PM2 脚本。它们不会自动切换目录，必须在 DisQord 项目根目录执行；
+脚本会检查对应环境文件、构建产物和 `pm2`，已存在的进程会重启，不会重复创建：
+
+```bash
+cd /root/DisQord
+bash pm2-start-central.sh   # 中央端
+bash pm2-start-qq.sh        # QQ 节点
+bash pm2-start-discord.sh   # Discord 节点
+```
+
+首次使用前先构建对应程序，例如：
+
+```bash
+pnpm --filter @disqord/central-server... build
+pnpm --filter @disqord/qq-node... build
+pnpm --filter @disqord/discord-node... build
+```
+
 ## 从零启动
 
 以下是“不使用 Docker、不使用 Caddy、不配置自启动”的最短流程。环境变量只在当前终端有效，
