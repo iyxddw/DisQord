@@ -12,8 +12,8 @@ import { NodeLogger, type NodeLogPage, type NodeLogQuery } from './logger.js';
 
 const UPLOAD_BATCH_DELAYS_MS = [8_000, 6_000, 4_000, 2_000, 0] as const;
 const MAX_UPLOAD_BATCH_SIZE = 25;
-const DELIVERY_MIN_GAP_MS = 6_000;
-const DELIVERY_MAX_GAP_MS = 13_000;
+const DELIVERY_MIN_GAP_MS = 0;
+const DELIVERY_MAX_GAP_MS = 3_000;
 const FAST_DELIVERY_INTERVAL_MS = 5_000;
 const FAST_UPLOAD_RETRY_DELAY_MS = 250;
 
