@@ -91,6 +91,17 @@ pnpm --filter @disqord/qq-node... build
 pnpm --filter @disqord/discord-node... build
 ```
 
+也可以使用交互式更新脚本。它会先检查项目根目录和本地修改，再执行 `git pull --ff-only`、同步依赖，
+最后用方向键移动、空格勾选、回车确认要构建的程序：
+
+```bash
+cd /root/DisQord
+bash update.sh
+```
+
+脚本不会强制覆盖未提交修改，也不会自动重启正在运行的 PM2 进程；构建完成后按需运行对应的
+`pm2-start-central.sh`、`pm2-start-qq.sh` 或 `pm2-start-discord.sh`。
+
 ## 从零启动
 
 以下是“不使用 Docker、不使用 Caddy、不配置自启动”的最短流程。环境变量只在当前终端有效，
