@@ -11,6 +11,14 @@ import {
 import { createProgramDescriptor, type MessageEnvelope } from '@disqord/shared';
 import { z } from 'zod';
 
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error('[DisQord/Discord] unhandled rejection', reason);
+});
+process.on('uncaughtException', (error: unknown) => {
+  console.error('[DisQord/Discord] uncaught exception', error);
+  process.exitCode = 1;
+});
+
 export const program = createProgramDescriptor('discord-node');
 
 const envSchema = z.object({
@@ -63,6 +71,10 @@ class DiscordPlatformAdapter implements PlatformAdapter {
 
   async sendCard(externalId: string, png: Uint8Array, replyMessageId?: string): Promise<string> {
     return await this.#client.sendRenderedCard(externalId, png, replyMessageId);
+  }
+
+  async sendText(externalId: string, text: string, replyMessageId?: string): Promise<string> {
+    return await this.#client.sendText(externalId, text, replyMessageId);
   }
 }
 

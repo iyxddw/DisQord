@@ -87,6 +87,7 @@ mkdir -p data logs
 export CENTRAL_HOST=0.0.0.0
 export CENTRAL_PORT=18080
 export CENTRAL_DATA_PATH=./data/central.json
+export CENTRAL_AVATAR_CACHE_PATH=./data/avatar-cache
 export PAIRING_PEPPER="$(openssl rand -hex 48)"
 export COOKIE_SECURE=false
 
@@ -184,7 +185,9 @@ pnpm --filter @disqord/qq-node start
 
 节点队列现在以可读的 JSON 文件保存，客户端日志以 JSONL 写入 `~/DisQord/logs/`，也可以在节点控制
 面板按等级和关键词查看。升级旧版本时，请把仍指向 `*.sqlite` 的 `NODE_QUEUE_PATH` 改成上面的
-`*.json` 路径；旧队列文件不会自动迁移，建议先停掉节点并备份后再切换。
+`*.json` 路径；旧队列文件不会自动迁移，建议先停掉节点并备份后再切换。若启动时发现旧文件内容
+不是 JSON（例如曾经误创建的 `queue.sqlite`），节点会把它改名为带 `.invalid-时间戳` 的备份文件并
+从空队列继续启动，不会因为队列损坏退出。
 
 ## 控制面板配置顺序
 
@@ -261,6 +264,12 @@ pnpm --filter @disqord/qq-node start
 
 基础设置只管理 API 连接和模型名称。所有生产提示词、记忆模式和审核阈值均保存在对应蓝图版本
 中。推荐提示词和结构化输出约束见 [`docs/PROMPTS.md`](docs/PROMPTS.md)。
+
+如果消息需要尽快到达，可以在基础设置打开“疾速模式”。它会关闭头像和附件下载、图片合成以及
+客户端的 8/6/4/2 秒聚合窗口，中央仍然执行翻译和审核，但节点改为发送纯文本（保留发送者昵称）。
+同一目标的发送槽位固定为每 5 秒一个，单条发送失败最多重试 4 次；不同目标可以并行处理。图片在疾速
+模式下无法交给识图模型，审核会按“无法审核”处理并走拦截分支。关闭疾速模式后恢复 PNG 卡片和正常
+批量聚合策略。
 
 “运行日志”可以按设备、Debug、Info、Warn 和 Error 筛选，并记录入口消息、蓝图和节点、翻译原始
 返回、审核原始评分、渲染结果、发送排队、平台发送成功与失败。选择 QQ 或 Discord 客户端时，中央服务

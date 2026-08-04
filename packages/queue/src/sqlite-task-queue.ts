@@ -52,6 +52,9 @@ const queueFileSchema = z.object({
 
 type StoredItem = z.infer<typeof storedItemSchema>;
 
+const COMPLETED_RETENTION_MS = 10 * 60_000;
+const MAX_COMPLETED_ITEMS = 1_000;
+
 /**
  * Small JSON-backed queue for the node processes.
  *
@@ -135,14 +138,26 @@ export class FileTaskQueue {
       const parsed = queueFileSchema.parse(JSON.parse(readFileSync(this.#path, 'utf8')));
       for (const item of parsed.items) this.#items.set(item.id, item);
     } catch (error) {
-      throw new Error(
-        `Queue file ${this.#path} is invalid: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
+      // A previous release called this file `queue.sqlite` even though it was
+      // JSON.  Preserve the damaged/legacy file and start with an empty queue
+      // instead of crashing the whole node before it can reconnect.
+      const backupPath = `${this.#path}.invalid-${Date.now()}`;
+      try {
+        renameSync(this.#path, backupPath);
+      } catch {
+        // If the backup cannot be created, the next enqueue will still try to
+        // replace the file atomically; keep startup alive and report the path.
+      }
+      console.error(
+        `[DisQord/Queue] invalid queue file moved to ${backupPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
   }
 
   #flush(): void {
+    this.#pruneCompleted();
     const temporaryPath = `${this.#path}.tmp`;
     writeFileSync(
       temporaryPath,
@@ -150,6 +165,25 @@ export class FileTaskQueue {
       'utf8',
     );
     renameSync(temporaryPath, this.#path);
+  }
+
+  #pruneCompleted(): void {
+    const now = Date.now();
+    const completed = [...this.#items.values()]
+      .filter((item) => item.status === 'acknowledged' || item.status === 'dead_letter')
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    const removable = new Set(
+      completed
+        .filter((item) => now - Date.parse(item.updatedAt) > COMPLETED_RETENTION_MS)
+        .map((item) => item.id),
+    );
+    if (completed.length - removable.size > MAX_COMPLETED_ITEMS) {
+      for (const item of completed) {
+        if (completed.length - removable.size <= MAX_COMPLETED_ITEMS) break;
+        removable.add(item.id);
+      }
+    }
+    for (const id of removable) this.#items.delete(id);
   }
 
   #transition(

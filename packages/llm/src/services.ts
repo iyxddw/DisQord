@@ -147,6 +147,7 @@ export const llmSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),
+  fastMode: z.boolean().default(false),
 });
 
 export type LlmSettings = z.infer<typeof llmSettingsSchema>;

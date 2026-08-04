@@ -76,6 +76,7 @@ const llmSettingsInputSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),
+  fastMode: z.boolean().default(false),
 });
 const promptDraftBodySchema = z.object({ content: z.string().min(1).max(50_000) });
 const blueprintDraftBodySchema = z.object({
@@ -195,6 +196,31 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     if (!valid) await reply.code(401).send({ error: 'Authentication required.' });
   };
 
+  const broadcastRuntimeSettings = async (fastMode: boolean): Promise<void> => {
+    if (!gateway) return;
+    const nodes = await options.store.list<NodeSession>('node-session');
+    const online = nodes.filter(
+      (entry) => !entry.value.revoked && gateway?.isNodeConnected(entry.value.nodeId),
+    );
+    await Promise.allSettled(
+      online.map(async (entry) => {
+        try {
+          await gateway!.sendToNode(entry.value.nodeId, 'node.runtime.settings', {
+            fastMode,
+            fastDeliveryIntervalMs: 5_000,
+          });
+        } catch (error) {
+          // A node may disconnect while settings are being saved.  It will
+          // request the current value again after its next reconnect.
+          app.log.warn(
+            { nodeId: entry.value.nodeId, error: error instanceof Error ? error.message : String(error) },
+            'runtime settings broadcast failed',
+          );
+        }
+      }),
+    );
+  };
+
   app.get('/api/health', async () => ({
     status: 'ok',
     now: new Date().toISOString(),
@@ -292,6 +318,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       const { apiKey, ...settings } = input;
       if (apiKey) await options.secrets.set('llm-api-key', apiKey);
       await options.store.set('settings', 'llm', settings);
+      void broadcastRuntimeSettings(settings.fastMode);
       return { ...settings, apiKeyConfigured: await options.secrets.has('llm-api-key') };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });

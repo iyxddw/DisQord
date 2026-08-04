@@ -2300,6 +2300,7 @@ function LlmSettings() {
     timeoutMs: 30000,
     maxRetries: 2,
     concurrency: 4,
+    fastMode: false,
   });
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [notice, setNotice] = useState('');
@@ -2450,6 +2451,19 @@ function LlmSettings() {
             value={form.concurrency}
             onChange={(event) => setForm({ ...form, concurrency: Number(event.target.value) })}
           />
+        </label>
+        <label className="wide setting-toggle">
+          <span>
+            <input
+              type="checkbox"
+              checked={Boolean(form.fastMode)}
+              onChange={(event) => setForm({ ...form, fastMode: event.target.checked })}
+            />{' '}
+            疾速模式
+          </span>
+          <small className="field-hint">
+            关闭图片下载与合成，直接发送文本；客户端不等待打组，立即入队并发处理，发送固定间隔 5 秒，失败最多重试 4 次。翻译和审核仍会执行；图片审核无法读取图片时按未通过处理。
+          </small>
         </label>
         <label>
           蓝图模拟节点间隔（毫秒）

@@ -23,6 +23,12 @@ export const clientWireMessageSchema = z.discriminatedUnion('type', [
     type: z.literal('command.ack'),
     frameId: internalIdSchema,
   }),
+  z.object({
+    type: z.literal('command.error'),
+    frameId: internalIdSchema,
+    code: z.string().trim().min(1).max(128),
+    message: z.string().trim().min(1).max(1_000),
+  }),
 ]);
 
 export const serverWireMessageSchema = z.discriminatedUnion('type', [

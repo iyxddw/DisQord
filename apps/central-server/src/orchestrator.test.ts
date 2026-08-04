@@ -119,6 +119,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
   }
 }
 
+async function waitForAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for the batch worker.');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe('blueprint message pipeline', () => {
   it('runs a simulated input through the real pipeline and sends to a real target', async () => {
     const input = randomUUID();
@@ -356,6 +364,7 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
+    await waitForAsync(async () => (await setup.store.list('blueprint-activity')).length >= 3);
     expect(setup.sendToNode).not.toHaveBeenCalled();
     const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
       (entry) => entry.value,
@@ -387,6 +396,7 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(process).not.toHaveBeenCalled();
     expect(await setup.store.list('trace-log')).toHaveLength(0);
     expect(await setup.store.list('message-dedupe')).toHaveLength(0);
@@ -419,6 +429,7 @@ describe('blueprint message pipeline', () => {
       payload: incoming,
       frameId: randomUUID(),
     });
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(process).not.toHaveBeenCalled();
 
     await setup.store.set('blueprint', setup.blueprint.id, setup.blueprint);
@@ -429,10 +440,13 @@ describe('blueprint message pipeline', () => {
       payload: message(setup.sourceSession.nodeId),
       frameId: randomUUID(),
     });
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
     expect(setup.sendToNode).toHaveBeenCalledWith(
       setup.targetSession.nodeId,
-      'message.deliver',
-      expect.objectContaining({ cards: [Buffer.from('legacy-card').toString('base64')] }),
+      'message.deliver.batch',
+      expect.objectContaining({
+        deliveries: [expect.objectContaining({ cards: [Buffer.from('legacy-card').toString('base64')] })],
+      }),
     );
   });
 
@@ -499,6 +513,7 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
+    await waitFor(() => translate.mock.calls.length === 1);
     expect(translate).toHaveBeenCalledWith(
       incoming,
       setup.targetSession,
@@ -509,13 +524,19 @@ describe('blueprint message pipeline', () => {
     );
     expect(moderate).toHaveBeenCalledWith('Hello', '审核提示词');
     expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, 'Hello', false);
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
     expect(setup.sendToNode).toHaveBeenCalledOnce();
-    const sentCommand = setup.sendToNode.mock.calls[0]![2] as {
-      taskId: string;
-      sourceSessionId: string;
-      sourceMessageId: string;
-      targetSessionId: string;
+    const sentBatch = setup.sendToNode.mock.calls[0]![2] as {
+      deliveries: [
+        {
+          taskId: string;
+          sourceSessionId: string;
+          sourceMessageId: string;
+          targetSessionId: string;
+        },
+      ];
     };
+    const sentCommand = sentBatch.deliveries[0]!;
     await setup.orchestrator.handleNodeFrame({
       nodeId: setup.targetSession.nodeId,
       nodeType: 'discord',
@@ -595,6 +616,7 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
+    await waitFor(() => moderate.mock.calls.length === 1);
     expect(moderate).toHaveBeenCalledWith(
       '',
       '审核图片',
@@ -666,14 +688,21 @@ describe('blueprint message pipeline', () => {
       payload: incoming,
       frameId: randomUUID(),
     });
+    await waitFor(() => render.mock.calls.length === 1);
     expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, '内容未通过审核', true);
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
     expect(setup.sendToNode).toHaveBeenCalledOnce();
-    const sentCommand = setup.sendToNode.mock.calls[0]![2] as {
-      taskId: string;
-      sourceSessionId: string;
-      sourceMessageId: string;
-      targetSessionId: string;
+    const sentBatch = setup.sendToNode.mock.calls[0]![2] as {
+      deliveries: [
+        {
+          taskId: string;
+          sourceSessionId: string;
+          sourceMessageId: string;
+          targetSessionId: string;
+        },
+      ];
     };
+    const sentCommand = sentBatch.deliveries[0]!;
     await setup.orchestrator.handleNodeFrame({
       nodeId: setup.targetSession.nodeId,
       nodeType: 'discord',
@@ -730,6 +759,7 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
+    await waitForAsync(async () => (await setup.store.list('moderation-review')).length === 1);
     expect(setup.sendToNode).not.toHaveBeenCalled();
     const reviews = await setup.store.list<Record<string, unknown>>('moderation-review');
     expect(reviews).toHaveLength(1);

@@ -43,6 +43,7 @@ interface ConnectionContext {
 }
 
 interface PendingCommand {
+  readonly nodeId: string;
   readonly resolve: () => void;
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
@@ -127,13 +128,14 @@ export class CentralNodeGateway {
         reject(new Error(`Node command acknowledgement timed out: ${frame.frameId}`));
       }, acknowledgementTimeoutMs);
       timer.unref();
-      this.#pendingCommands.set(frame.frameId, { resolve, reject, timer });
+      this.#pendingCommands.set(frame.frameId, { nodeId, resolve, reject, timer });
       this.#send(socket, { type: 'command', frame });
     });
   }
 
   async close(): Promise<void> {
     clearInterval(this.#heartbeatTimer);
+    this.#rejectPendingCommands(new Error('Central node gateway is shutting down.'));
     for (const socket of this.#connections.values()) {
       socket.close(1001, 'Server shutting down');
     }
@@ -160,6 +162,12 @@ export class CentralNodeGateway {
       });
     });
     socket.on('close', () => {
+      if (context.nodeId) {
+        this.#rejectPendingCommands(
+          new Error(`Node ${context.nodeId} disconnected before acknowledging a command.`),
+          context.nodeId,
+        );
+      }
       if (context.nodeId && this.#connections.get(context.nodeId) === socket) {
         this.#connections.delete(context.nodeId);
         this.#contexts.delete(context.nodeId);
@@ -236,6 +244,19 @@ export class CentralNodeGateway {
       return;
     }
 
+    if (message.type === 'command.error') {
+      if (!context.nodeId) {
+        throw new Error('The connection must authenticate before reporting command errors.');
+      }
+      const pending = this.#pendingCommands.get(message.frameId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.#pendingCommands.delete(message.frameId);
+        pending.reject(new Error(`${message.code}: ${message.message}`));
+      }
+      return;
+    }
+
     if (!context.nodeId || !context.nodeType || !context.replayGuard) {
       throw new Error('The connection must authenticate before sending frames.');
     }
@@ -277,6 +298,10 @@ export class CentralNodeGateway {
         contextSocket.readyState !== WebSocket.OPEN ||
         now - contextSocket.lastPongAt > this.#connectionTimeoutMs
       ) {
+        this.#rejectPendingCommands(
+          new Error(`Node ${nodeId} timed out before acknowledging a command.`),
+          nodeId,
+        );
         socket.terminate();
         this.#connections.delete(nodeId);
         continue;
@@ -288,6 +313,15 @@ export class CentralNodeGateway {
   #send(socket: WebSocket, message: ServerWireMessage): void {
     if (socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(serverWireMessageSchema.parse(message)));
+    }
+  }
+
+  #rejectPendingCommands(error: Error, nodeId?: string): void {
+    for (const [frameId, pending] of this.#pendingCommands) {
+      if (nodeId && pending.nodeId !== nodeId) continue;
+      clearTimeout(pending.timer);
+      this.#pendingCommands.delete(frameId);
+      pending.reject(error);
     }
   }
 }
@@ -459,7 +493,12 @@ export class AuthenticatedNodeClient {
               pending.resolve();
             }
           } else if (message.type === 'command') {
-            void this.#handleCommand(socket, message.frame);
+            void this.#handleCommand(socket, message.frame).catch((error: unknown) => {
+              // #handleCommand emits command.error itself.  This final guard
+              // prevents a malformed frame or socket failure from becoming an
+              // unhandled rejection in the node process.
+              console.error('[DisQord/Transport] command handling failed', error);
+            });
           } else if (message.type === 'error' && !authenticated) {
             reject(new Error(message.message));
             socket.close();
@@ -475,6 +514,7 @@ export class AuthenticatedNodeClient {
       });
       socket.once('close', () => {
         if (this.#socket === socket) this.#socket = undefined;
+        this.#rejectPending(new Error('Gateway connection closed before frame acknowledgement.'));
         if (!authenticated) reject(new Error('Gateway closed before authentication.'));
         if (!this.#manualClose) this.#scheduleReconnect();
       });
@@ -504,6 +544,14 @@ export class AuthenticatedNodeClient {
     });
   }
 
+  #rejectPending(error: Error): void {
+    for (const pending of this.#pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.#pending.clear();
+  }
+
   async #handleCommand(
     socket: WebSocket,
     frame: ReturnType<typeof createSecureFrame>,
@@ -512,22 +560,37 @@ export class AuthenticatedNodeClient {
       socket.send(JSON.stringify({ type: 'command.ack', frameId: frame.frameId }));
       return;
     }
-    if (!this.#commandReplayGuard) {
-      throw new Error('Node client received a command before authentication.');
+    try {
+      if (!this.#commandReplayGuard) {
+        throw new Error('Node client received a command before authentication.');
+      }
+      this.#commandReplayGuard.verify(frame);
+      await this.#options.onCommand?.({
+        kind: frame.kind,
+        payload: frame.payload,
+        frameId: frame.frameId,
+      });
+      this.#processedCommands.add(frame.frameId);
+      while (this.#processedCommands.size > 10_000) {
+        const oldest = this.#processedCommands.values().next().value as string | undefined;
+        if (!oldest) break;
+        this.#processedCommands.delete(oldest);
+      }
+      socket.send(JSON.stringify({ type: 'command.ack', frameId: frame.frameId }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[DisQord/Transport] command rejected', message);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: 'command.error',
+            frameId: frame.frameId,
+            code: 'COMMAND_FAILED',
+            message: message.slice(0, 1_000) || 'Command failed.',
+          }),
+        );
+      }
     }
-    this.#commandReplayGuard.verify(frame);
-    await this.#options.onCommand?.({
-      kind: frame.kind,
-      payload: frame.payload,
-      frameId: frame.frameId,
-    });
-    this.#processedCommands.add(frame.frameId);
-    while (this.#processedCommands.size > 10_000) {
-      const oldest = this.#processedCommands.values().next().value as string | undefined;
-      if (!oldest) break;
-      this.#processedCommands.delete(oldest);
-    }
-    socket.send(JSON.stringify({ type: 'command.ack', frameId: frame.frameId }));
   }
 
   #scheduleReconnect(): void {

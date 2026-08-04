@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  Options,
   PermissionFlagsBits,
   type Message,
 } from 'discord.js';
@@ -36,9 +37,24 @@ export class DiscordBotAdapter {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
       ],
+      makeCache: Options.cacheWithLimits({
+        MessageManager: 0,
+        GuildMemberManager: 0,
+        PresenceManager: 0,
+        ReactionManager: 0,
+        ThreadManager: 0,
+        ThreadMemberManager: 0,
+        VoiceStateManager: 0,
+        UserManager: 1_000,
+      }),
+      sweepers: {
+        messages: { interval: 300, lifetime: 600 },
+      },
     });
     this.#client.on(Events.MessageCreate, (message) => {
-      void this.#handleMessage(message);
+      void this.#handleMessage(message).catch((error: unknown) => {
+        console.error('[DisQord/Discord] message handling failed', error);
+      });
     });
   }
 
@@ -104,6 +120,21 @@ export class DiscordBotAdapter {
     }
     const message = await channel.send({
       files: [new AttachmentBuilder(Buffer.from(png), { name: 'disqord-message.png' })],
+      allowedMentions: { parse: [] },
+      ...(replyMessageId
+        ? { reply: { messageReference: replyMessageId, failIfNotExists: false } }
+        : {}),
+    });
+    return message.id;
+  }
+
+  async sendText(channelId: string, text: string, replyMessageId?: string): Promise<string> {
+    const channel = await this.#client.channels.fetch(channelId);
+    if (!channel?.isSendable()) {
+      throw new Error(`Discord channel ${channelId} is not sendable by this bot.`);
+    }
+    const message = await channel.send({
+      content: text,
       allowedMentions: { parse: [] },
       ...(replyMessageId
         ? { reply: { messageReference: replyMessageId, failIfNotExists: false } }

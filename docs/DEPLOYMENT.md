@@ -65,7 +65,8 @@ sudo fc-cache -f
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/central
 ```
 
-中央端的全部持久数据写入 `/var/lib/disqord/central/central.json`。文件首次启动时自动创建，
+中央端的配置和运行数据写入 `/var/lib/disqord/central/central.json`，头像缓存写入
+`/var/lib/disqord/central/avatar-cache`。文件和目录首次启动时自动创建，
 包含管理员记录、节点、会话、蓝图、日志、提示词和明文大模型 API Key，权限固定为 `0600`。
 
 ### 2.2 创建中央端环境文件
@@ -82,7 +83,8 @@ sudo nano /etc/disqord/central.env
 openssl rand -hex 48
 ```
 
-中央服务固定绑定 `127.0.0.1:18080`，不会占用你原有的 8080，也不会直接暴露公网。保存后：
+中央服务固定绑定 `127.0.0.1:18080`，不会占用你原有的 8080，也不会直接暴露公网。环境文件中的
+`CENTRAL_AVATAR_CACHE_PATH` 可以改成单独的缓存目录。保存后：
 
 ```bash
 sudo chown root:disqord /etc/disqord/central.env
@@ -253,6 +255,10 @@ sudo systemctl status disqord-discord --no-pager
 中央面板“基础设置”填写 OpenAI Chat Completions 兼容 API 地址、密钥、翻译模型和审核模型。
 翻译与审核提示词、记忆模式和审核阈值直接在“转发蓝图”的相应模块中配置。审核仅处理当前
 流水线文字并按违规分数从两个出口分流；发送目标会自动读取原消息资料并完成图片合成。
+
+若需要降低延迟，可在“基础设置”打开“疾速模式”。该模式关闭图片下载和 PNG 合成，客户端直接发送
+带昵称的文本；翻译和审核仍然执行，图片审核在无法提供图片时按无法审核处理。客户端不使用 8/6/4/2
+秒上传聚合窗口，同一目标按 5 秒发送槽位处理，失败最多重试 4 次。关闭后恢复普通卡片和批量策略。
 
 ### 聊天会话
 

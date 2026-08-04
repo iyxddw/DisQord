@@ -23,6 +23,7 @@ const environmentSchema = z.object({
   CENTRAL_HOST: z.string().default('127.0.0.1'),
   CENTRAL_PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
   CENTRAL_DATA_PATH: z.string().min(1).default('./data/central.json'),
+  CENTRAL_AVATAR_CACHE_PATH: z.string().min(1).default('./data/avatar-cache'),
   PAIRING_PEPPER: z.string().min(32),
   COOKIE_SECURE: z
     .enum(['true', 'false'])
@@ -60,7 +61,7 @@ export async function startCentralServer(environment: NodeJS.ProcessEnv = proces
   orchestratorRef.current = new MessageOrchestrator(
     store,
     gateway,
-    new CentralMessageProcessor(store, secrets),
+    new CentralMessageProcessor(store, secrets, resolve(config.CENTRAL_AVATAR_CACHE_PATH)),
   );
   await central.app.listen({ host: config.CENTRAL_HOST, port: config.CENTRAL_PORT });
 

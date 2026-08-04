@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { validateBlueprint } from '@disqord/blueprint';
 import {
+  AvatarCache,
   downloadExternalImage,
   renderMessageCards,
   type MessageCardInput,
@@ -64,6 +65,7 @@ const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
 const MESSAGE_UPLOAD_BATCH_NAMESPACE = 'message-upload-batch';
 const MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS = 3;
+const FAST_DELIVERY_INTERVAL_MS = 5_000;
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -136,6 +138,7 @@ interface DeliveryIntent {
   readonly message: MessageEnvelope;
   readonly cards: readonly Buffer[];
   readonly processedText: string;
+  readonly fastMode: boolean;
 }
 
 interface OutboundDeliveryCommand {
@@ -144,7 +147,11 @@ interface OutboundDeliveryCommand {
   readonly sourceMessageId: string;
   readonly targetSessionId: string;
   readonly externalId: string;
+  readonly mode: 'card' | 'text';
   readonly cards: readonly string[];
+  readonly text?: string;
+  readonly senderName?: string;
+  readonly fastMode?: boolean;
   readonly replyMessageId?: string;
 }
 
@@ -254,9 +261,19 @@ export class MessageOrchestrator {
 
   async handleNodeFrame(frame: ReceivedNodeFrame): Promise<void> {
     if (frame.kind === 'message.upload') {
-      await this.#handleMessageUpload(frame);
+      // A single upload is still acknowledged after the durable batch record
+      // is written.  Processing must never hold the transport frame open
+      // while translation, moderation, rendering, or delivery is running.
+      const message = messageEnvelopeSchema.parse(frame.payload);
+      await this.#acceptMessageUploadBatch({
+        ...frame,
+        kind: 'message.upload.batch',
+        payload: { batchId: frame.frameId, messages: [message] },
+      });
     } else if (frame.kind === 'message.upload.batch') {
       await this.#acceptMessageUploadBatch(frame);
+    } else if (frame.kind === 'node.runtime.settings.request') {
+      await this.#sendRuntimeSettings(frame.nodeId);
     } else if (frame.kind === 'message.delivered') {
       await this.#handleDelivered(frame.payload);
     } else if (frame.kind === 'message.delivery_failed') {
@@ -264,6 +281,13 @@ export class MessageOrchestrator {
     } else if (frame.kind === 'session.candidates') {
       await this.#store.set('session-candidates', frame.nodeId, frame.payload);
     }
+  }
+
+  async #sendRuntimeSettings(nodeId: string): Promise<void> {
+    await this.#commandBus.sendToNode(nodeId, 'node.runtime.settings', {
+      fastMode: await this.#fastMode(),
+      fastDeliveryIntervalMs: FAST_DELIVERY_INTERVAL_MS,
+    });
   }
 
   async simulateBlueprint(
@@ -594,6 +618,7 @@ export class MessageOrchestrator {
     deliveryCollector?: DeliveryIntent[],
     strict = false,
     activityBatch?: ActivityBatchContext,
+    fastMode = false,
   ): Promise<void> {
     const message = messageEnvelopeSchema.parse(messagePayload);
     const batchContext: ActivityBatchContext = activityBatch ?? {
@@ -695,6 +720,7 @@ export class MessageOrchestrator {
           undefined,
           deliveryCollector,
           batchContext,
+          fastMode,
         );
         await this.#log(
           message.traceId,
@@ -728,6 +754,22 @@ export class MessageOrchestrator {
    */
   async #acceptMessageUploadBatch(frame: ReceivedNodeFrame): Promise<void> {
     const batch = messageUploadBatchSchema.parse(frame.payload);
+    const verifiedSessions = (await this.#store.list<ChatSession>('chat-session'))
+      .map((entry) => chatSessionSchema.parse(entry.value))
+      .filter((session) => session.status === 'verified');
+    // An unbound channel is intentionally invisible to the operational log.
+    // Filter it before creating the durable batch record so unmatched traffic
+    // cannot produce noisy `message_upload_*` entries or occupy the queue.
+    const acceptedMessages = batch.messages.filter((message) =>
+      verifiedSessions.some(
+        (session) =>
+          session.nodeId === frame.nodeId &&
+          session.platform === frame.nodeType &&
+          session.externalId === message.source.channelId,
+      ),
+    );
+    if (!acceptedMessages.length) return;
+    const acceptedBatch = { ...batch, messages: acceptedMessages };
     const batchId = batch.batchId ?? frame.frameId;
     const existing = await this.#store.get<MessageUploadBatchRecord>(
       MESSAGE_UPLOAD_BATCH_NAMESPACE,
@@ -768,7 +810,7 @@ export class MessageOrchestrator {
       frameId: existing?.value.frameId ?? frame.frameId,
       nodeId: existing?.value.nodeId ?? frame.nodeId,
       nodeType: existing?.value.nodeType ?? frame.nodeType,
-      messages: existing?.value.messages ?? batch.messages,
+      messages: existing?.value.messages ?? acceptedBatch.messages,
       status: 'queued',
       attempts: existing?.value.attempts ?? 0,
       createdAt: existing?.value.createdAt ?? now,
@@ -917,6 +959,7 @@ export class MessageOrchestrator {
     const messages = batch.messages;
     const collectors = messages.map(() => [] as DeliveryIntent[]);
     const concurrency = await this.#configuredLlmConcurrency();
+    const fastMode = await this.#fastMode();
     let nextIndex = 0;
     const failures: { index: number; error: unknown }[] = [];
     const worker = async (): Promise<void> => {
@@ -934,6 +977,7 @@ export class MessageOrchestrator {
               batchIndex: index,
               batchSize: messages.length,
             },
+            fastMode,
           );
         } catch (error) {
           failures.push({ index, error });
@@ -985,6 +1029,13 @@ export class MessageOrchestrator {
     return parsed.success ? parsed.data.concurrency : 4;
   }
 
+  async #fastMode(): Promise<boolean> {
+    const entry = await this.#store.get('settings', 'llm');
+    if (!entry) return false;
+    const parsed = llmSettingsSchema.safeParse(entry.value);
+    return parsed.success ? parsed.data.fastMode : false;
+  }
+
   async #executeBlueprint(
     blueprint: BlueprintVersion,
     sourceSession: ChatSession,
@@ -994,6 +1045,7 @@ export class MessageOrchestrator {
     initialWork?: readonly WorkItem[],
     deliveryCollector?: DeliveryIntent[],
     activityBatch?: ActivityBatchContext,
+    fastMode = false,
   ): Promise<{ paused: boolean }> {
     const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
     const outgoing = new Map<string, BlueprintEdge[]>();
@@ -1023,9 +1075,14 @@ export class MessageOrchestrator {
       ? {
           imageReviewRequested: true,
           imageCount: moderationImageRefs.length,
-          imageUrls: moderationImageRefs.flatMap((image) =>
-            image.sourceUrl ? [image.sourceUrl] : [],
-          ),
+          // Speed mode never downloads media.  Keeping the image-review flag
+          // with an empty URL list makes the moderation service fail closed
+          // instead of silently approving an unreviewed image.
+          imageUrls: fastMode
+            ? []
+            : moderationImageRefs.flatMap((image) =>
+                image.sourceUrl ? [image.sourceUrl] : [],
+              ),
         }
       : undefined;
     const recordActivity = (
@@ -1228,24 +1285,37 @@ export class MessageOrchestrator {
       } else if (node.type === 'card-renderer') {
         const target = this.#findDownstreamTarget(node.id, nodes, outgoing, sessions);
         if (!target) throw new Error('Image renderer has no reachable verified target session.');
-        const cards = await this.#render(message, target, state.text, state.fixedText);
-        state = { ...state, cards, renderedForSessionId: target.id };
-        await this.#log(message.traceId, 'info', 'render_succeeded', {
-          nodeId: node.id,
-          targetSessionId: target.id,
-          cardCount: cards.length,
-          byteSizes: cards.map((card) => card.byteLength),
-        });
-        await recordActivity(node, processedSteps, {
-          message: `已合成 ${cards.length} 张消息图片`,
-          text: state.text,
-        });
+        if (fastMode) {
+          state = { text: state.text, fixedText: state.fixedText };
+          await this.#log(message.traceId, 'info', 'render_skipped_fast_mode', {
+            nodeId: node.id,
+            targetSessionId: target.id,
+          });
+          await recordActivity(node, processedSteps, {
+            message: '疾速模式：跳过图片下载和合成',
+            text: state.text,
+          });
+        } else {
+          const cards = await this.#render(message, target, state.text, state.fixedText);
+          state = { ...state, cards, renderedForSessionId: target.id };
+          await this.#log(message.traceId, 'info', 'render_succeeded', {
+            nodeId: node.id,
+            targetSessionId: target.id,
+            cardCount: cards.length,
+            byteSizes: cards.map((card) => card.byteLength),
+          });
+          await recordActivity(node, processedSteps, {
+            message: `已合成 ${cards.length} 张消息图片`,
+            text: state.text,
+          });
+        }
       } else if (node.type === 'chat-output') {
         const targetId = chatConfigSchema.parse(node.config).sessionId;
         const target = sessions.find((session) => session.id === targetId);
         if (!target) throw new Error(`Target session ${targetId} is unavailable.`);
-        const cards =
-          state.cards && state.renderedForSessionId === target.id
+        const cards = fastMode
+          ? []
+          : state.cards && state.renderedForSessionId === target.id
             ? state.cards
             : await this.#render(message, target, state.text, state.fixedText);
         const delivery: DeliveryIntent = {
@@ -1255,6 +1325,7 @@ export class MessageOrchestrator {
           message,
           cards,
           processedText: state.text,
+          fastMode,
         };
         if (deliveryCollector) deliveryCollector.push(delivery);
         else await this.#dispatchDelivery(
@@ -1264,6 +1335,7 @@ export class MessageOrchestrator {
           message,
           cards,
           state.text,
+          fastMode,
         );
         await recordActivity(node, processedSteps, {
           message: `已发送到 ${target.remark?.trim() || target.displayName}`,
@@ -1394,6 +1466,7 @@ export class MessageOrchestrator {
     message: MessageEnvelope,
     cards: readonly Buffer[],
     processedText: string,
+    fastMode: boolean,
   ): Promise<void> {
     const prepared = await this.#prepareDelivery({
       blueprint,
@@ -1402,12 +1475,13 @@ export class MessageOrchestrator {
       message,
       cards,
       processedText,
+      fastMode,
     });
     await this.#sendPreparedDelivery(prepared);
   }
 
   async #prepareDelivery(intent: DeliveryIntent): Promise<PreparedDelivery> {
-    const { blueprint, sourceSession, target, message, cards, processedText } = intent;
+    const { blueprint, sourceSession, target, message, cards, processedText, fastMode } = intent;
     const taskId = randomUUID();
     const now = new Date().toISOString();
     await this.#store.set('delivery-task', taskId, {
@@ -1437,7 +1511,18 @@ export class MessageOrchestrator {
       sourceMessageId: message.source.messageId,
       targetSessionId: target.id,
       externalId: target.externalId,
-      cards: cards.map((card) => card.toString('base64')),
+      mode: fastMode ? 'text' : 'card',
+      cards: fastMode ? [] : cards.map((card) => card.toString('base64')),
+      ...(fastMode
+        ? {
+            // Images/attachments have no rendered card in speed mode.  Keep a
+            // deterministic text fallback instead of sending an invalid empty
+            // command to the node.
+            text: processedText || '不支持的消息',
+            senderName: message.sender.displayName,
+            fastMode: true,
+          }
+        : {}),
       ...(mappedReplyId ? { replyMessageId: mappedReplyId } : {}),
     };
     return { intent, command };
@@ -1670,10 +1755,12 @@ export class MessageOrchestrator {
 export class CentralMessageProcessor implements MessageProcessor {
   readonly #store: StateStore;
   readonly #secrets: SecretStore;
+  readonly #avatarCache: AvatarCache;
 
-  constructor(store: StateStore, secrets: SecretStore) {
+  constructor(store: StateStore, secrets: SecretStore, avatarCachePath = './data/avatar-cache') {
     this.#store = store;
     this.#secrets = secrets;
+    this.#avatarCache = new AvatarCache(avatarCachePath);
   }
 
   async process(message: MessageEnvelope, target: ChatSession): Promise<ProcessingResult> {
@@ -1812,7 +1899,7 @@ export class CentralMessageProcessor implements MessageProcessor {
     fixedText: boolean,
   ): Promise<readonly Buffer[]> {
     const avatar = message.sender.avatarUrl
-      ? await downloadExternalImage(message.sender.avatarUrl).catch(() => undefined)
+      ? await this.#avatarCache.get(message.sender.avatarUrl)
       : undefined;
     const replyImage = message.replyTo?.imagePreview?.sourceUrl
       ? await downloadExternalImage(message.replyTo.imagePreview.sourceUrl).catch(() => undefined)

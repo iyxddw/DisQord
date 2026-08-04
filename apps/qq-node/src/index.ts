@@ -11,6 +11,14 @@ import {
 import { createProgramDescriptor, type MessageEnvelope } from '@disqord/shared';
 import { z } from 'zod';
 
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error('[DisQord/QQ] unhandled rejection', reason);
+});
+process.on('uncaughtException', (error: unknown) => {
+  console.error('[DisQord/QQ] uncaught exception', error);
+  process.exitCode = 1;
+});
+
 export const program = createProgramDescriptor('qq-node');
 
 const envSchema = z.object({
@@ -65,6 +73,10 @@ class QqPlatformAdapter implements PlatformAdapter {
 
   async sendCard(externalId: string, png: Uint8Array, replyMessageId?: string): Promise<string> {
     return await this.#client.sendGroupImage(externalId, png, replyMessageId);
+  }
+
+  async sendText(externalId: string, text: string, replyMessageId?: string): Promise<string> {
+    return await this.#client.sendGroupText(externalId, text, replyMessageId);
   }
 
   readonly #dispatch: { handler?: (message: MessageEnvelope) => void | Promise<void> } = {};

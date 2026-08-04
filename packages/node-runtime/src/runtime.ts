@@ -14,6 +14,8 @@ const UPLOAD_BATCH_DELAYS_MS = [8_000, 6_000, 4_000, 2_000, 0] as const;
 const MAX_UPLOAD_BATCH_SIZE = 25;
 const DELIVERY_MIN_GAP_MS = 6_000;
 const DELIVERY_MAX_GAP_MS = 13_000;
+const FAST_DELIVERY_INTERVAL_MS = 5_000;
+const FAST_UPLOAD_RETRY_DELAY_MS = 250;
 
 export interface PlatformSessionCandidate {
   readonly externalId: string;
@@ -27,6 +29,7 @@ export interface PlatformAdapter {
   listSessions(): Promise<readonly PlatformSessionCandidate[]>;
   sendVerification(externalId: string, code: string, expiresAt: string): Promise<string>;
   sendCard(externalId: string, png: Uint8Array, replyMessageId?: string): Promise<string>;
+  sendText(externalId: string, text: string, replyMessageId?: string): Promise<string>;
 }
 
 const verifyCommandSchema = z.object({
@@ -41,9 +44,20 @@ const deliverCommandSchema = z.object({
   sourceMessageId: z.string().min(1),
   targetSessionId: z.uuid(),
   externalId: z.string().min(1),
-  cards: z.array(z.string().min(1)).min(1).max(20),
+  mode: z.enum(['card', 'text']).default('card'),
+  cards: z.array(z.string().min(1)).max(20).default([]),
+  text: z.string().max(30_000).optional(),
+  senderName: z.string().trim().min(1).max(256).optional(),
+  fastMode: z.boolean().default(false),
   replyMessageId: z.string().min(1).optional(),
   targetMessageId: z.string().min(1).optional(),
+}).superRefine((command, context) => {
+  if (command.mode === 'card' && command.cards.length === 0) {
+    context.addIssue({ code: 'custom', path: ['cards'], message: 'Card deliveries require at least one image.' });
+  }
+  if (command.mode === 'text' && !command.text?.trim()) {
+    context.addIssue({ code: 'custom', path: ['text'], message: 'Text deliveries require text.' });
+  }
 });
 
 const deliverBatchCommandSchema = z.object({
@@ -57,6 +71,10 @@ const nodeLogRequestSchema = z.object({
   pageSize: z.number().int().min(10).max(200).default(50),
   level: z.enum(['all', 'warn', 'error']).default('all'),
   search: z.string().trim().max(200).default(''),
+});
+const runtimeSettingsSchema = z.object({
+  fastMode: z.boolean().default(false),
+  fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(FAST_DELIVERY_INTERVAL_MS),
 });
 
 type DeliveryCommand = z.infer<typeof deliverCommandSchema>;
@@ -88,9 +106,13 @@ export class NodeBridgeRuntime {
   #retryTimer: NodeJS.Timeout | undefined;
   #uploadBatchTimer: NodeJS.Timeout | undefined;
   #uploadBatchStage = 0;
+  #fastMode = false;
+  #fastDeliveryIntervalMs = FAST_DELIVERY_INTERVAL_MS;
+  readonly #fastUploadTasks = new Map<string, Promise<boolean>>();
   readonly #deliveryChains = new Map<string, Promise<void>>();
   readonly #deliveryTasks = new Map<string, Promise<void>>();
   readonly #lastDeliveryAt = new Map<string, number>();
+  readonly #nextFastDeliveryAt = new Map<string, number>();
 
   constructor(options: NodeBridgeRuntimeOptions) {
     this.#options = options;
@@ -134,26 +156,43 @@ export class NodeBridgeRuntime {
       onConnected: () => {
         this.#options.onStatus?.({ state: 'connected' });
         this.#log('info', 'central_connected');
-        void this.#announceSessions();
-        void this.#drainQueue();
+        void this.#announceSessions().catch((error: unknown) => {
+          this.#log('error', 'session_announcement_failed', { error: describeError(error) });
+        });
+        void this.#requestRuntimeSettings()
+          .then(() => this.#drainQueue())
+          .catch((error: unknown) => {
+            this.#log('error', 'runtime_settings_failed', { error: describeError(error) });
+            void this.#drainQueue().catch((drainError: unknown) => {
+              this.#log('error', 'queue_drain_failed', { error: describeError(drainError) });
+            });
+          });
       },
       onCommand: async (command) => await this.#handleCommand(command.kind, command.payload),
     });
 
     await this.#adapter.start(async (message) => {
-      const validated = messageEnvelopeSchema.parse(message);
-      const queued = this.#queue?.enqueue({
-        id: validated.eventId,
-        kind: 'message.upload',
-        payload: validated,
-      });
-      this.#log('info', 'message_queued', {
-        eventId: validated.eventId,
-        channelId: validated.source.channelId,
-        messageId: validated.source.messageId,
-        duplicate: queued === false,
-      });
-      this.#scheduleUploadBatch();
+      try {
+        const validated = messageEnvelopeSchema.parse(message);
+        const queued = this.#queue?.enqueue({
+          id: validated.eventId,
+          kind: 'message.upload',
+          payload: validated,
+        });
+        this.#log('info', 'message_queued', {
+          eventId: validated.eventId,
+          channelId: validated.source.channelId,
+          messageId: validated.source.messageId,
+          duplicate: queued === false,
+          fastMode: this.#fastMode,
+        });
+        if (queued !== false) {
+          if (this.#fastMode) void this.#startFastUpload(validated.eventId);
+          else this.#scheduleUploadBatch();
+        }
+      } catch (error) {
+        this.#log('error', 'message_ingest_failed', { error: describeError(error) });
+      }
     });
     try {
       await this.#client.connect();
@@ -190,7 +229,37 @@ export class NodeBridgeRuntime {
     await this.#client?.send('session.candidates', { candidates });
   }
 
+  async #requestRuntimeSettings(): Promise<void> {
+    await this.#client?.send('node.runtime.settings.request', {});
+  }
+
   async #handleCommand(kind: string, payload: unknown): Promise<void> {
+    if (kind === 'node.runtime.settings') {
+      const settings = runtimeSettingsSchema.parse(payload);
+      const wasFast = this.#fastMode;
+      this.#fastMode = settings.fastMode;
+      this.#fastDeliveryIntervalMs = settings.fastDeliveryIntervalMs;
+      this.#log('info', 'runtime_settings_applied', {
+        fastMode: this.#fastMode,
+        fastDeliveryIntervalMs: this.#fastDeliveryIntervalMs,
+      });
+      if (this.#fastMode) {
+        if (this.#uploadBatchTimer) clearTimeout(this.#uploadBatchTimer);
+        this.#uploadBatchTimer = undefined;
+        this.#uploadBatchStage = 0;
+        if (!wasFast) {
+          for (const item of this.#queue?.listRecoverable(100) ?? []) {
+            if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
+          }
+        }
+      } else if (wasFast) {
+        const hasUploads = this.#queue
+          ?.listRecoverable(100)
+          .some((item) => item.kind === 'message.upload');
+        if (hasUploads) this.#scheduleUploadBatch();
+      }
+      return;
+    }
     if (kind === 'session.discover') {
       await this.#announceSessions();
       return;
@@ -229,8 +298,20 @@ export class NodeBridgeRuntime {
         targetSessionId: command.targetSessionId,
         externalId: command.externalId,
         cardCount: command.cards.length,
+        mode: command.mode,
       });
-      await this.#scheduleDelivery(command.taskId, command);
+      // Persist and schedule in the background.  The command acknowledgement
+      // is an acceptance acknowledgement, not a platform delivery receipt.
+      if (!this.#queue) throw new Error('Node queue is not ready.');
+      if (!this.#queue.get(command.taskId)) {
+        this.#queue.enqueue({ id: command.taskId, kind: 'message.deliver', payload: command });
+      }
+      void this.#scheduleDelivery(command.taskId).catch((error: unknown) => {
+        this.#log('error', 'delivery_task_failed', {
+          taskId: command.taskId,
+          error: describeError(error),
+        });
+      });
       return;
     }
     if (kind === 'message.deliver.batch') {
@@ -270,7 +351,7 @@ export class NodeBridgeRuntime {
     }
     const queued = this.#queue.get<DeliveryCommand>(taskId);
     if (!queued) throw new Error(`Delivery queue item ${taskId} is missing.`);
-    const key = queued.payload.targetSessionId;
+    const key = queued.payload.fastMode ? queued.id : queued.payload.targetSessionId;
     const previous = this.#deliveryChains.get(key) ?? Promise.resolve();
     const task = previous
       .catch(() => undefined)
@@ -313,16 +394,25 @@ export class NodeBridgeRuntime {
         attempt,
       });
       try {
-        await this.#waitForDeliveryGap(item.payload.targetSessionId);
+        await this.#waitForDeliveryGap(item.payload.targetSessionId, item.payload.fastMode);
         let firstMessageId: string | undefined;
-        for (const [index, card] of item.payload.cards.entries()) {
-          if (!this.#adapter) throw new Error('Platform adapter is not running.');
-          const messageId = await this.#adapter.sendCard(
+        if (!this.#adapter) throw new Error('Platform adapter is not running.');
+        if (item.payload.mode === 'text') {
+          const prefix = item.payload.senderName ? `${item.payload.senderName}: ` : '';
+          firstMessageId = await this.#adapter.sendText(
             item.payload.externalId,
-            Buffer.from(card, 'base64'),
-            index === 0 ? item.payload.replyMessageId : undefined,
+            `${prefix}${item.payload.text ?? ''}`,
+            item.payload.replyMessageId,
           );
-          firstMessageId ??= messageId;
+        } else {
+          for (const [index, card] of item.payload.cards.entries()) {
+            const messageId = await this.#adapter.sendCard(
+              item.payload.externalId,
+              Buffer.from(card, 'base64'),
+              index === 0 ? item.payload.replyMessageId : undefined,
+            );
+            firstMessageId ??= messageId;
+          }
         }
         if (!firstMessageId) throw new Error('The platform did not return a message ID.');
         this.#lastDeliveryAt.set(item.payload.targetSessionId, Date.now());
@@ -392,7 +482,22 @@ export class NodeBridgeRuntime {
   }
 
   async #drainQueue(): Promise<void> {
-    if (this.#draining || !this.#queue || !this.#client) return;
+    if (!this.#queue || !this.#client) return;
+    if (this.#fastMode) {
+      for (const item of this.#queue.listRecoverable(100)) {
+        if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
+        else if (item.kind === 'message.deliver') {
+          void this.#scheduleDelivery(item.id).catch((error: unknown) => {
+            this.#log('error', 'delivery_recovery_failed', {
+              taskId: item.id,
+              error: describeError(error),
+            });
+          });
+        }
+      }
+      return;
+    }
+    if (this.#draining) return;
     this.#draining = true;
     try {
       const recoverable = this.#queue.listRecoverable(100);
@@ -423,6 +528,26 @@ export class NodeBridgeRuntime {
     }
   }
 
+  #startFastUpload(taskId: string): void {
+    if (this.#fastUploadTasks.has(taskId)) return;
+    const task = (async () => {
+      const item = this.#queue?.get<MessageEnvelope>(taskId);
+      if (!item || item.kind !== 'message.upload') return true;
+      return await this.#processUploadBatch([item]);
+    })();
+    this.#fastUploadTasks.set(taskId, task);
+    void task
+      .catch((error: unknown) => {
+        this.#log('error', 'fast_upload_failed', { taskId, error: describeError(error) });
+      })
+      .finally(() => {
+        if (this.#fastUploadTasks.get(taskId) === task) this.#fastUploadTasks.delete(taskId);
+        if (this.#fastMode && this.#queue?.get(taskId)?.status === 'retrying') {
+          this.#scheduleDrain(FAST_UPLOAD_RETRY_DELAY_MS);
+        }
+      });
+  }
+
   async #processUploadBatch(items: readonly QueueItem<MessageEnvelope>[]): Promise<boolean> {
     if (!this.#queue || !this.#client) return false;
     if (!items.length) return true;
@@ -437,7 +562,7 @@ export class NodeBridgeRuntime {
         batchSize: items.length,
         attempt: Math.max(...items.map((item) => this.#queue?.get(item.id)?.attempts ?? 1)),
       });
-      if (items.length === 1) {
+      if (this.#fastMode && items.length === 1) {
         await this.#client.send('message.upload', items[0]!.payload);
       } else {
         await this.#client.send('message.upload.batch', {
@@ -484,6 +609,12 @@ export class NodeBridgeRuntime {
   }
 
   #scheduleUploadBatch(delayOverride?: number): void {
+    if (this.#fastMode) {
+      for (const item of this.#queue?.listRecoverable(100) ?? []) {
+        if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
+      }
+      return;
+    }
     if (this.#uploadBatchTimer || this.#retryTimer || this.#draining) return;
     const delayMs =
       delayOverride ?? UPLOAD_BATCH_DELAYS_MS[Math.min(this.#uploadBatchStage, UPLOAD_BATCH_DELAYS_MS.length - 1)]!;
@@ -499,12 +630,28 @@ export class NodeBridgeRuntime {
     });
     this.#uploadBatchTimer = setTimeout(() => {
       this.#uploadBatchTimer = undefined;
-      void this.#drainQueue();
+      void this.#drainQueue().catch((error: unknown) => {
+        this.#log('error', 'queue_drain_failed', { error: describeError(error) });
+      });
     }, delayMs);
     this.#uploadBatchTimer.unref();
   }
 
-  async #waitForDeliveryGap(targetSessionId: string): Promise<void> {
+  async #waitForDeliveryGap(targetSessionId: string, fastMode = false): Promise<void> {
+    if (fastMode) {
+      const now = Date.now();
+      const slot = Math.max(now, this.#nextFastDeliveryAt.get(targetSessionId) ?? now);
+      this.#nextFastDeliveryAt.set(targetSessionId, slot + this.#fastDeliveryIntervalMs);
+      const waitMs = Math.max(0, slot - now);
+      this.#log('debug', 'delivery_interval_scheduled', {
+        targetSessionId,
+        requestedGapMs: this.#fastDeliveryIntervalMs,
+        waitMs,
+        fastMode: true,
+      });
+      if (waitMs) await delay(waitMs);
+      return;
+    }
     const previous = this.#lastDeliveryAt.get(targetSessionId);
     if (previous === undefined) return;
     const gap = randomInteger(DELIVERY_MIN_GAP_MS, DELIVERY_MAX_GAP_MS);
@@ -521,8 +668,10 @@ export class NodeBridgeRuntime {
     if (this.#retryTimer) return;
     this.#retryTimer = setTimeout(() => {
       this.#retryTimer = undefined;
-      void this.#drainQueue();
-    }, delayMs);
+      void this.#drainQueue().catch((error: unknown) => {
+        this.#log('error', 'queue_drain_failed', { error: describeError(error) });
+      });
+    }, this.#fastMode ? Math.min(delayMs, FAST_UPLOAD_RETRY_DELAY_MS) : delayMs);
     this.#retryTimer.unref();
   }
 
@@ -551,6 +700,10 @@ function retryDelay(attempt: number): number {
 
 function randomInteger(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function delay(milliseconds: number): Promise<void> {

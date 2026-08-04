@@ -141,8 +141,11 @@ export class NapCatOneBotClient {
     }));
   }
 
-  async sendGroupText(groupId: string, text: string): Promise<string> {
-    return await this.#sendGroupSegments(groupId, [{ type: 'text', data: { text } }]);
+  async sendGroupText(groupId: string, text: string, replyMessageId?: string): Promise<string> {
+    const segments: Array<{ type: string; data: Record<string, unknown> }> = [];
+    if (replyMessageId) segments.push({ type: 'reply', data: { id: replyMessageId } });
+    segments.push({ type: 'text', data: { text } });
+    return await this.#sendGroupSegments(groupId, segments);
   }
 
   async sendGroupImage(groupId: string, png: Uint8Array, replyMessageId?: string): Promise<string> {
