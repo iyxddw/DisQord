@@ -11,7 +11,7 @@ WorkingDirectory=/opt/disqord
 Environment=NODE_ENV=production
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/disqord/central.env
-ExecStart=/usr/bin/env node apps/central-server/dist/index.js
+ExecStart=/usr/bin/env node apps/central-server/dist/main.js
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

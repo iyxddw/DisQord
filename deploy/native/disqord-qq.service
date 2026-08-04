@@ -11,7 +11,7 @@ WorkingDirectory=/opt/disqord
 Environment=NODE_ENV=production
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/disqord/qq.env
-ExecStart=/usr/bin/env node apps/qq-node/dist/index.js
+ExecStart=/usr/bin/env node apps/qq-node/dist/main.js
 Restart=always
 RestartSec=5s
 TimeoutStopSec=30s

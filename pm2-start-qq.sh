@@ -14,7 +14,7 @@ if [[ ! -f qq.env ]]; then
   exit 1
 fi
 
-if [[ ! -f apps/qq-node/dist/index.js ]]; then
+if [[ ! -f apps/qq-node/dist/main.js ]]; then
   echo "错误：QQ 节点尚未构建，请先运行 pnpm --filter @disqord/qq-node... build。" >&2
   exit 1
 fi
@@ -26,9 +26,8 @@ fi
 
 mkdir -p logs
 if pm2 describe disqord-qq >/dev/null 2>&1; then
-  pm2 restart disqord-qq --update-env
-else
-  pm2 start ecosystem.config.cjs --only disqord-qq --update-env
+  pm2 delete disqord-qq
 fi
+pm2 start ecosystem.config.cjs --only disqord-qq --update-env
 pm2 save
 echo "DisQord QQ 节点已由 PM2 启动。"

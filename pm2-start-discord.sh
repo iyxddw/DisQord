@@ -14,7 +14,7 @@ if [[ ! -f discord.env ]]; then
   exit 1
 fi
 
-if [[ ! -f apps/discord-node/dist/index.js ]]; then
+if [[ ! -f apps/discord-node/dist/main.js ]]; then
   echo "错误：Discord 节点尚未构建，请先运行 pnpm --filter @disqord/discord-node... build。" >&2
   exit 1
 fi
@@ -26,9 +26,8 @@ fi
 
 mkdir -p logs
 if pm2 describe disqord-discord >/dev/null 2>&1; then
-  pm2 restart disqord-discord --update-env
-else
-  pm2 start ecosystem.config.cjs --only disqord-discord --update-env
+  pm2 delete disqord-discord
 fi
+pm2 start ecosystem.config.cjs --only disqord-discord --update-env
 pm2 save
 echo "DisQord Discord 节点已由 PM2 启动。"

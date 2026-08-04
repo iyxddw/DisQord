@@ -14,7 +14,7 @@ if [[ ! -f central.env ]]; then
   exit 1
 fi
 
-if [[ ! -f apps/central-server/dist/index.js ]]; then
+if [[ ! -f apps/central-server/dist/main.js ]]; then
   echo "错误：中央端尚未构建，请先运行 pnpm --filter @disqord/central-server... build。" >&2
   exit 1
 fi
@@ -26,9 +26,8 @@ fi
 
 mkdir -p logs
 if pm2 describe disqord-central >/dev/null 2>&1; then
-  pm2 restart disqord-central --update-env
-else
-  pm2 start ecosystem.config.cjs --only disqord-central --update-env
+  pm2 delete disqord-central
 fi
+pm2 start ecosystem.config.cjs --only disqord-central --update-env
 pm2 save
 echo "DisQord Central 已由 PM2 启动。"

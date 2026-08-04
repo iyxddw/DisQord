@@ -3,6 +3,4 @@
 # 用法：./start-central.sh    或    bash start-central.sh
 set -euo pipefail
 cd "$(dirname "$0")"
-mkdir -p logs
-pm2 start ecosystem.config.cjs --only disqord-central
-pm2 save
+exec bash pm2-start-central.sh

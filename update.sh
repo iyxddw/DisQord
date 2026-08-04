@@ -36,7 +36,14 @@ if [[ "$current_directory" != "$repository_root" ]]; then
   exit 1
 fi
 
-tracked_changes="$(git diff --name-only; git diff --cached --name-only)"
+all_tracked_changes="$(git diff --name-only; git diff --cached --name-only)"
+# The updater can be edited locally while it is being used.  Do not let the
+# updater block itself; git pull will still refuse a real conflict if the
+# remote also changed this file.
+tracked_changes="$(printf '%s\n' "$all_tracked_changes" | awk 'NF && $0 != "update.sh"')"
+if [[ -n "$all_tracked_changes" && -z "$tracked_changes" ]]; then
+  echo "提示：检测到 update.sh 本身有本地修改，继续执行；如远端也修改此文件，git pull 会停止。" >&2
+fi
 if [[ -n "$tracked_changes" ]]; then
   echo "错误：检测到未提交的已跟踪修改，已停止更新以避免覆盖本地工作：" >&2
   printf '%s\n' "$tracked_changes" | sed 's/^/  /' >&2
