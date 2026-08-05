@@ -1964,8 +1964,9 @@ export class CentralMessageProcessor implements MessageProcessor {
     memoryMode: boolean,
   ): Promise<TranslationResult> {
     const { settings, client } = await this.#client();
-    return await new LlmTranslationService(client).translate({
-      text,
+    const protectedText = protectCustomEmojiText(text, message.customEmojis);
+    const result = await new LlmTranslationService(client).translate({
+      text: protectedText.text,
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
       model: settings.translationModel,
       prompt: { content: prompt, version: 1 },
@@ -1986,6 +1987,10 @@ export class CentralMessageProcessor implements MessageProcessor {
           }
         : {}),
     });
+    return {
+      ...result,
+      translatedText: protectedText.restore(result.translatedText),
+    };
   }
 
   async moderate(
@@ -2128,6 +2133,17 @@ export class CentralMessageProcessor implements MessageProcessor {
           .filter((image): image is NonNullable<typeof image> => Boolean(image))
           .map((image) => image.dataUri)
       : [];
+    const inlineEmojis = (
+      await Promise.all(
+        (message.customEmojis ?? []).map(async (emoji) => {
+          const image = await downloadExternalImage(emoji.sourceUrl, {
+            maxBytes: 2 * 1024 * 1024,
+            resize: { width: 64, height: 64, fit: 'inside' },
+          }).catch(() => undefined);
+          return image ? { token: emoji.token, dataUri: image.dataUri } : undefined;
+        }),
+      )
+    ).filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));
     return {
       sourcePlatform: message.source.platform,
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
@@ -2139,6 +2155,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       primaryText: text,
       ...(!fixedText && message.text ? { originalText: message.text } : {}),
       images: images.map((dataUri) => ({ dataUri })),
+      ...(inlineEmojis.length ? { inlineEmojis } : {}),
       ...(message.replyTo
         ? {
             reply: {
@@ -2199,6 +2216,30 @@ export class CentralMessageProcessor implements MessageProcessor {
       }),
     };
   }
+}
+
+function protectCustomEmojiText(
+  text: string,
+  customEmojis: MessageEnvelope['customEmojis'],
+): { readonly text: string; readonly restore: (translatedText: string) => string } {
+  const replacements = (customEmojis ?? []).map((emoji, index) => ({
+    token: emoji.token,
+    placeholder: `__DISQORD_CUSTOM_EMOJI_${index}__`,
+  }));
+  let protectedText = text;
+  for (const replacement of replacements) {
+    protectedText = protectedText.replaceAll(replacement.token, replacement.placeholder);
+  }
+  return {
+    text: protectedText,
+    restore: (translatedText) => {
+      let restored = translatedText;
+      for (const replacement of replacements) {
+        restored = restored.replaceAll(replacement.placeholder, replacement.token);
+      }
+      return restored;
+    },
+  };
 }
 
 function hasImageContent(message: MessageEnvelope): boolean {

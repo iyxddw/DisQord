@@ -305,7 +305,7 @@ export class NapCatOneBotClient {
         event.message
           .filter((segment) => segment.type === 'at')
           .map((segment) => String(segment.data.qq ?? ''))
-          .filter((id) => id && id !== 'all'),
+          .filter((id) => id && id !== 'all' && id !== String(event.self_id)),
       ),
     ];
     const names = new Map<string, string>();

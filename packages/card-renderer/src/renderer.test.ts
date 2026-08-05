@@ -131,4 +131,41 @@ describe('message card renderer', () => {
     expect(metadata.width).toBe(1_000);
     expect(png.byteLength).toBeGreaterThan(1_000);
   });
+
+  it('renders custom Discord emojis inline while keeping ordinary images as blocks', async () => {
+    const image = `data:image/png;base64,${(
+      await sharp({
+        create: {
+          width: 12,
+          height: 12,
+          channels: 4,
+          background: '#ffb347',
+        },
+      })
+        .png()
+        .toBuffer()
+    ).toString('base64')}`;
+
+    const [png] = await renderMessageCards({
+      sourcePlatform: 'discord',
+      targetLanguage: 'zh',
+      sourceName: 'general',
+      senderName: 'Alice',
+      sentAt: '2026-08-06 12:00',
+      primaryText: '前 <:phigros:1094607105127891054> 后',
+      originalText: '原文 <:phigros:1094607105127891054>',
+      inlineEmojis: [
+        {
+          token: '<:phigros:1094607105127891054>',
+          dataUri: image,
+        },
+      ],
+      images: [image],
+    });
+
+    const metadata = await sharp(png).metadata();
+    expect(metadata.format).toBe('png');
+    expect(metadata.width).toBe(1_000);
+    expect(png.byteLength).toBeGreaterThan(1_000);
+  });
 });

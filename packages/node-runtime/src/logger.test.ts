@@ -35,4 +35,19 @@ describe('NodeLogger', () => {
       items: [expect.objectContaining({ event: 'delivery_failed', level: 'error' })],
     });
   });
+
+  it('keeps at most 16 * 1024 records in the readable log window', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'disqord-node-log-limit-'));
+    directories.push(directory);
+    const logger = new NodeLogger(join(directory, 'node.jsonl'));
+    const limit = 16 * 1024;
+
+    for (let index = 0; index <= limit; index += 1) {
+      logger.write('info', `event-${index}`);
+    }
+
+    expect(logger.list()).toMatchObject({ total: limit });
+    expect(logger.list({ search: 'event-0' }).total).toBe(0);
+    expect(logger.list({ search: `event-${limit}` }).total).toBe(1);
+  });
 });

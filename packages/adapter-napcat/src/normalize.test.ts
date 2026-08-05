@@ -80,6 +80,34 @@ describe('normalizeNapCatGroupMessage', () => {
     expect(message?.text).toBe('@萝卜 撤回啥了');
   });
 
+  it('removes a QQ mention of the logged-in account from the message body', () => {
+    const message = normalizeNapCatGroupMessage(
+      {
+        ...baseEvent,
+        message: [
+          { type: 'text', data: { text: '是这样的啊' } },
+          { type: 'at', data: { qq: baseEvent.self_id } },
+          { type: 'text', data: { text: ' ' } },
+        ],
+      },
+      randomUUID(),
+    );
+
+    expect(message?.text).toBe('是这样的啊');
+  });
+
+  it('ignores a QQ message that only mentions the logged-in account', () => {
+    expect(
+      normalizeNapCatGroupMessage(
+        {
+          ...baseEvent,
+          message: [{ type: 'at', data: { qq: baseEvent.self_id } }],
+        },
+        randomUUID(),
+      ),
+    ).toBeUndefined();
+  });
+
   it('uses resolved QQ reply details when NapCat can retrieve the referenced message', () => {
     const message = normalizeNapCatGroupMessage(
       {

@@ -54,6 +54,7 @@ export function normalizeNapCatGroupMessage(
       textParts.push(String(segment.data.text ?? ''));
     } else if (segment.type === 'at') {
       const mentionedId = String(segment.data.qq ?? 'unknown');
+      if (mentionedId === String(event.self_id)) continue;
       textParts.push(
         mentionedId === 'all' ? '@全体成员' : `@${mentionNames.get(mentionedId) ?? mentionedId}`,
       );
@@ -95,6 +96,7 @@ export function normalizeNapCatGroupMessage(
   }
 
   const text = textParts.join('').trim();
+  if (!text && attachments.length === 0 && !unsupportedType) return undefined;
   const kind = unsupportedType
     ? 'unsupported'
     : attachments.length > 0 && text

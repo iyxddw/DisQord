@@ -164,8 +164,9 @@ export class FileStateStore implements StateStore {
 }
 
 /** Append-only namespaces and their bounded in-memory/file retention. */
+const TRACE_LOG_ENTRY_LIMIT = 16 * 1024;
 const APPEND_NAMESPACE_CAPS: Record<string, number> = {
-  'trace-log': 2_000,
+  'trace-log': TRACE_LOG_ENTRY_LIMIT,
   'message-history': 5_000,
   'blueprint-activity': 5_000,
 };
@@ -187,6 +188,7 @@ export class AppendLogStore implements StateStore {
   readonly #cap: number;
   readonly #namespace: string | undefined;
   readonly #memory = new Map<string, StoredStateEntry>();
+  #permissionsEnsured = false;
   #lines = 0;
 
   constructor(filePath: string, cap = 0, namespace?: string) {
@@ -194,7 +196,10 @@ export class AppendLogStore implements StateStore {
     this.#cap = cap;
     this.#namespace = namespace;
     mkdirSync(dirname(filePath), { recursive: true });
-    if (existsSync(filePath)) chmodSync(filePath, 0o600);
+    if (existsSync(filePath)) {
+      chmodSync(filePath, 0o600);
+      this.#permissionsEnsured = true;
+    }
     this.#load();
   }
 
@@ -221,6 +226,7 @@ export class AppendLogStore implements StateStore {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
+    if (previous) this.#memory.delete(composite);
     this.#memory.set(composite, entry);
     this.#append(entry);
     this.#trim();
@@ -270,12 +276,23 @@ export class AppendLogStore implements StateStore {
 
   #append(entry: StoredStateEntry | StoredTombstone): void {
     appendFileSync(this.#filePath, `${JSON.stringify(entry)}\n`, 'utf8');
-    chmodSync(this.#filePath, 0o600);
+    if (!this.#permissionsEnsured) {
+      chmodSync(this.#filePath, 0o600);
+      this.#permissionsEnsured = true;
+    }
     this.#lines += 1;
   }
 
   #trim(): void {
     if (this.#cap <= 0) return;
+    if (this.#namespace) {
+      while (this.#memory.size > this.#cap) {
+        const oldestKey = this.#memory.keys().next().value;
+        if (typeof oldestKey !== 'string') break;
+        this.#memory.delete(oldestKey);
+      }
+      return;
+    }
     const entries = [...this.#memory.values()]
       .filter((entry) => !this.#namespace || entry.namespace === this.#namespace)
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
@@ -298,6 +315,7 @@ export class AppendLogStore implements StateStore {
     });
     renameSync(temporaryPath, this.#filePath);
     chmodSync(this.#filePath, 0o600);
+    this.#permissionsEnsured = true;
     this.#lines = lines.length;
   }
 
@@ -314,6 +332,7 @@ export class AppendLogStore implements StateStore {
         const composite = this.#composite(namespace, parsed.key);
         if (parsed.__deleted) this.#memory.delete(composite);
         else if (typeof parsed.createdAt === 'string' && typeof parsed.updatedAt === 'string') {
+          this.#memory.delete(composite);
           this.#memory.set(composite, {
             namespace,
             key: parsed.key,

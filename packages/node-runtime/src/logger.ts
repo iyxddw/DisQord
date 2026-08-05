@@ -42,15 +42,17 @@ export interface NodeLogPage {
 }
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
-const MAX_LOG_LINES = 20_000;
+const MAX_LOG_LINES = 16 * 1024;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
 
 export class NodeLogger {
   readonly #path: string;
+  #bytes: number;
 
   constructor(path: string) {
     this.#path = path;
     mkdirSync(dirname(path), { recursive: true });
+    this.#bytes = existsSync(path) ? statSync(path).size : 0;
   }
 
   get path(): string {
@@ -64,7 +66,9 @@ export class NodeLogger {
       event,
       ...(details && Object.keys(details).length ? { details } : {}),
     };
-    appendFileSync(this.#path, `${JSON.stringify(record)}\n`, 'utf8');
+    const line = `${JSON.stringify(record)}\n`;
+    appendFileSync(this.#path, line, 'utf8');
+    this.#bytes += Buffer.byteLength(line, 'utf8');
     this.#rotateIfNeeded();
   }
 
@@ -133,11 +137,13 @@ export class NodeLogger {
   }
 
   #rotateIfNeeded(): void {
-    if (!existsSync(this.#path) || statSync(this.#path).size <= MAX_LOG_BYTES) return;
+    if (this.#bytes <= MAX_LOG_BYTES) return;
     const lines = readFileSync(this.#path, 'utf8').split(/\r?\n/u).filter(Boolean);
     const retained = lines.slice(-MAX_LOG_LINES);
+    const contents = retained.length ? `${retained.join('\n')}\n` : '';
     const temporaryPath = `${this.#path}.${process.pid}.tmp`;
-    writeFileSync(temporaryPath, retained.length ? `${retained.join('\n')}\n` : '', 'utf8');
+    writeFileSync(temporaryPath, contents, 'utf8');
     renameSync(temporaryPath, this.#path);
+    this.#bytes = Buffer.byteLength(contents, 'utf8');
   }
 }

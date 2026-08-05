@@ -18,6 +18,15 @@ export const mediaReferenceSchema = z.object({
   height: z.number().int().positive().optional(),
 });
 
+export const customEmojiReferenceSchema = z.object({
+  /** The exact Discord token as it appeared in the message body. */
+  token: z.string().trim().min(1).max(128),
+  name: z.string().trim().min(1).max(64),
+  id: externalIdSchema,
+  animated: z.boolean(),
+  sourceUrl: z.url(),
+});
+
 export const replyReferenceSchema = z.object({
   sourceMessageId: externalIdSchema,
   targetMessageId: externalIdSchema.optional(),
@@ -47,6 +56,7 @@ export const messageEnvelopeSchema = z
     kind: messageKindSchema,
     text: z.string().max(20_000).optional(),
     attachments: z.array(mediaReferenceSchema).max(10).default([]),
+    customEmojis: z.array(customEmojiReferenceSchema).max(32).optional(),
     unsupportedType: z.string().trim().min(1).max(128).optional(),
     replyTo: replyReferenceSchema.optional(),
     traceId: internalIdSchema,
@@ -90,6 +100,7 @@ export const messageEnvelopeSchema = z
 export type MessageEnvelope = z.infer<typeof messageEnvelopeSchema>;
 export type ReplyReference = z.infer<typeof replyReferenceSchema>;
 export type MediaReference = z.infer<typeof mediaReferenceSchema>;
+export type CustomEmojiReference = z.infer<typeof customEmojiReferenceSchema>;
 
 /**
  * Upload envelope used by nodes when several messages are coalesced during a

@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { FileStateStore, PlaintextSecretStore, SplitStateStore } from './state-store.js';
+import {
+  AppendLogStore,
+  FileStateStore,
+  PlaintextSecretStore,
+  SplitStateStore,
+} from './state-store.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -57,6 +62,25 @@ describe('file state store', () => {
 });
 
 describe('split append state store', () => {
+  it('retains only the newest entries in a bounded append log', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'disqord-bounded-log-'));
+    temporaryDirectories.push(directory);
+    const filePath = join(directory, 'trace-log.ndjson');
+    const store = new AppendLogStore(filePath, 3, 'trace-log');
+
+    for (let index = 0; index < 5; index += 1) {
+      await store.set('trace-log', `trace-${index}`, { index });
+    }
+
+    expect(await store.get('trace-log', 'trace-0')).toBeUndefined();
+    expect(await store.get('trace-log', 'trace-1')).toBeUndefined();
+    expect(await store.list('trace-log')).toHaveLength(3);
+    await store.close();
+
+    const lines = (await readFile(filePath, 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(3);
+  });
+
   it('keeps namespaces separate and restores them from ndjson files', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'disqord-split-state-'));
     temporaryDirectories.push(directory);

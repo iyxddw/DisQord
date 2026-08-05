@@ -221,22 +221,29 @@ export class DiscordBotAdapter {
           ? { referencedMessageId: message.reference.messageId }
           : {}),
     };
-    const normalized = normalizeDiscordMessage(snapshot, this.#options.nodeId);
+    const normalized = normalizeDiscordMessage(
+      snapshot,
+      this.#options.nodeId,
+      this.#client.user?.id,
+    );
     if (normalized) await this.#options.onMessage(normalized);
   }
 
   async #resolveMentionNames(message: Message): Promise<DiscordMention[]> {
+    const selfUserId = this.#client.user?.id;
     return await Promise.all(
-      [...message.mentions.users.values()].map(async (user) => {
-        let member = message.mentions.members?.get(user.id);
-        if (!member && message.guild) {
-          member = await message.guild.members.fetch(user.id).catch(() => undefined);
-        }
-        return {
-          id: user.id,
-          displayName: member?.displayName ?? user.globalName ?? user.username,
-        };
-      }),
+      [...message.mentions.users.values()]
+        .filter((user) => user.id !== selfUserId)
+        .map(async (user) => {
+          let member = message.mentions.members?.get(user.id);
+          if (!member && message.guild) {
+            member = await message.guild.members.fetch(user.id).catch(() => undefined);
+          }
+          return {
+            id: user.id,
+            displayName: member?.displayName ?? user.globalName ?? user.username,
+          };
+        }),
     );
   }
 }

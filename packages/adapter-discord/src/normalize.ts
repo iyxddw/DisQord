@@ -20,6 +20,8 @@ export const discordMentionSchema = z.object({
 
 export type DiscordMention = z.infer<typeof discordMentionSchema>;
 
+const discordCustomEmojiPattern = /<(a?):([A-Za-z0-9_~]+):(\d+)>/gu;
+
 export const discordMessageSnapshotSchema = z.object({
   id: z.string().min(1),
   guildId: z.string().min(1),
@@ -53,15 +55,45 @@ export type DiscordMessageSnapshot = z.infer<typeof discordMessageSnapshotSchema
 function replaceDiscordUserMentions(
   text: string,
   mentions: readonly DiscordMention[] | undefined,
+  selfUserId?: string,
 ): string {
-  if (!mentions?.length) return text;
+  const withoutSelfMention = selfUserId
+    ? text.replace(new RegExp(`<@!?${escapeRegExp(selfUserId)}>`, 'gu'), ' ')
+    : text;
+  if (!mentions?.length) return withoutSelfMention.trim();
   const names = new Map(mentions.map((mention) => [mention.id, mention.displayName]));
-  return text.replace(/<@!?(\d+)>/gu, (tag, id: string) => `@${names.get(id) ?? id}`);
+  return withoutSelfMention
+    .replace(/<@!?(\d+)>/gu, (tag, id: string) => `@${names.get(id) ?? id}`)
+    .trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function extractDiscordCustomEmojis(text: string): MessageEnvelope['customEmojis'] {
+  const emojis = new Map<string, NonNullable<MessageEnvelope['customEmojis']>[number]>();
+  for (const match of text.matchAll(discordCustomEmojiPattern)) {
+    const animated = match[1] === 'a';
+    const name = match[2]!;
+    const id = match[3]!;
+    const token = match[0];
+    if (emojis.has(token)) continue;
+    emojis.set(token, {
+      token,
+      name,
+      id,
+      animated,
+      sourceUrl: `https://cdn.discordapp.com/emojis/${id}.${animated ? 'gif' : 'png'}?size=64&quality=lossless`,
+    });
+  }
+  return emojis.size ? [...emojis.values()].slice(0, 32) : undefined;
 }
 
 export function normalizeDiscordMessage(
   candidate: DiscordMessageSnapshot,
   nodeId: string,
+  selfUserId?: string,
 ): MessageEnvelope | undefined {
   const message = discordMessageSnapshotSchema.parse(candidate);
   if (message.author.bot) return undefined;
@@ -78,7 +110,8 @@ export function normalizeDiscordMessage(
         : message.type !== 0 && message.type !== 19
           ? `discord-message-${message.type}`
           : undefined;
-  const text = replaceDiscordUserMentions(message.content.trim(), message.mentions);
+  const text = replaceDiscordUserMentions(message.content, message.mentions, selfUserId);
+  const customEmojis = extractDiscordCustomEmojis(message.content);
   const attachments: MessageEnvelope['attachments'][number][] = images.map((attachment) => ({
     id: randomUUID(),
     ...(attachment.name ? { fileName: attachment.name.slice(0, 255) } : {}),
@@ -99,8 +132,10 @@ export function normalizeDiscordMessage(
   const referenced = message.referencedMessage;
   const replyId = referenced?.id ?? message.referencedMessageId;
   const referencedText = referenced
-    ? replaceDiscordUserMentions(referenced.content, referenced.mentions)
+    ? replaceDiscordUserMentions(referenced.content, referenced.mentions, selfUserId)
     : undefined;
+
+  if (!text && attachments.length === 0 && !unsupportedType) return undefined;
 
   return messageEnvelopeSchema.parse({
     schemaVersion: 1,
@@ -121,6 +156,7 @@ export function normalizeDiscordMessage(
     kind,
     ...(text ? { text } : {}),
     attachments,
+    ...(customEmojis ? { customEmojis } : {}),
     ...(unsupportedType ? { unsupportedType } : {}),
     ...(replyId
       ? {

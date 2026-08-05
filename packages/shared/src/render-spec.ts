@@ -47,6 +47,16 @@ export const messageCardMediaSchema = z.object({
   height: z.number().int().positive().optional(),
 });
 
+export const messageCardInlineEmojiSchema = z.object({
+  /** The exact source token that is replaced by the inline image. */
+  token: z.string().trim().min(1).max(128),
+  /** Normalized image data sent with the render request. */
+  dataUri: z
+    .string()
+    .regex(imageDataUriPattern)
+    .max(2 * 1024 * 1024),
+});
+
 export const messageCardRenderSpecSchema = z.object({
   sourcePlatform: platformSchema,
   targetLanguage: z.enum(['zh', 'en']),
@@ -60,6 +70,7 @@ export const messageCardRenderSpecSchema = z.object({
   primaryText: z.string().max(30_000),
   originalText: z.string().max(30_000).optional(),
   images: z.array(messageCardMediaSchema).max(10).default([]),
+  inlineEmojis: z.array(messageCardInlineEmojiSchema).max(32).optional(),
   reply: z
     .object({
       senderName: z.string().trim().min(1).max(256),
@@ -72,4 +83,5 @@ export const messageCardRenderSpecSchema = z.object({
 });
 
 export type MessageCardMedia = z.infer<typeof messageCardMediaSchema>;
+export type MessageCardInlineEmoji = z.infer<typeof messageCardInlineEmojiSchema>;
 export type MessageCardRenderSpec = z.infer<typeof messageCardRenderSpecSchema>;
