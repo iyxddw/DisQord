@@ -8,7 +8,11 @@ import {
   type Message,
 } from 'discord.js';
 
-import { normalizeDiscordMessage, type DiscordMessageSnapshot } from './normalize.js';
+import {
+  normalizeDiscordMessage,
+  type DiscordMention,
+  type DiscordMessageSnapshot,
+} from './normalize.js';
 
 export interface DiscordAdapterOptions {
   readonly token: string;
@@ -172,6 +176,10 @@ export class DiscordBotAdapter {
     const referenced = message.reference?.messageId
       ? await message.fetchReference().catch(() => undefined)
       : undefined;
+    const [mentions, referencedMentions] = await Promise.all([
+      this.#resolveMentionNames(message),
+      referenced ? this.#resolveMentionNames(referenced) : Promise.resolve(undefined),
+    ]);
     const firstReferencedImage = referenced?.attachments.find((attachment) =>
       attachment.contentType?.startsWith('image/'),
     );
@@ -198,12 +206,14 @@ export class DiscordBotAdapter {
         height: attachment.height,
       })),
       stickerCount: message.stickers.size,
+      mentions,
       ...(referenced
         ? {
             referencedMessage: {
               id: referenced.id,
               authorDisplayName: referenced.member?.displayName ?? referenced.author.displayName,
               content: referenced.content,
+              mentions: referencedMentions,
               ...(firstReferencedImage ? { imageUrl: firstReferencedImage.url } : {}),
             },
           }
@@ -213,5 +223,20 @@ export class DiscordBotAdapter {
     };
     const normalized = normalizeDiscordMessage(snapshot, this.#options.nodeId);
     if (normalized) await this.#options.onMessage(normalized);
+  }
+
+  async #resolveMentionNames(message: Message): Promise<DiscordMention[]> {
+    return await Promise.all(
+      [...message.mentions.users.values()].map(async (user) => {
+        let member = message.mentions.members?.get(user.id);
+        if (!member && message.guild) {
+          member = await message.guild.members.fetch(user.id).catch(() => undefined);
+        }
+        return {
+          id: user.id,
+          displayName: member?.displayName ?? user.globalName ?? user.username,
+        };
+      }),
+    );
   }
 }

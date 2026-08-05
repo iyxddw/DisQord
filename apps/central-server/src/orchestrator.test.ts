@@ -910,6 +910,104 @@ describe('blueprint message pipeline', () => {
     );
   });
 
+  it('uses the original text for replies to bridge-generated cards', async () => {
+    const input = randomUUID();
+    const moderation = randomUUID();
+    const renderer = randomUUID();
+    const output = randomUUID();
+    const moderate = vi.fn(async () => ({
+      violationScore: 0,
+      categories: [],
+      reason: '正常',
+      confidence: 1,
+      model: 'moderator',
+    }));
+    const render = vi.fn(async (renderedMessage: MessageEnvelope) => [
+      Buffer.from(renderedMessage.replyTo?.textPreview ?? 'missing-preview'),
+    ]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(moderation, 'llm-moderation', { prompt: '审核', threshold: 0.5 }),
+        node(renderer, 'card-renderer'),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: renderer,
+        },
+        { id: randomUUID(), sourceNodeId: renderer, targetNodeId: output },
+      ],
+      { moderate, render },
+    );
+
+    const original = message(setup.targetSession.nodeId, '原始文本消息');
+    const originalMessage: MessageEnvelope = {
+      ...original,
+      source: {
+        ...original.source,
+        platform: 'discord',
+        spaceId: setup.targetSession.spaceId,
+        channelId: setup.targetSession.externalId,
+        messageId: 'original-discord-message',
+      },
+      sender: { id: 'original-user', displayName: '原消息用户' },
+    };
+    await setup.store.set('message-history', randomUUID(), {
+      sessionId: setup.targetSession.id,
+      message: originalMessage,
+    });
+    await setup.store.set(
+      'reply-mapping',
+      `${setup.sourceSession.id}:bridge-card:${setup.targetSession.id}`,
+      { targetMessageId: originalMessage.source.messageId },
+    );
+
+    const incoming: MessageEnvelope = {
+      ...message(setup.sourceSession.nodeId, '当前回复'),
+      replyTo: {
+        sourceMessageId: 'bridge-card',
+        senderDisplayName: 'DisQord',
+        imagePreview: {
+          id: randomUUID(),
+          mimeType: 'image/png',
+          byteSize: 10,
+          sha256: 'a'.repeat(64),
+          sourceUrl: 'https://example.test/generated-card.png',
+        },
+      },
+    };
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    await waitFor(() => render.mock.calls.length === 1);
+    expect(moderate).toHaveBeenCalledWith('当前回复\n被回复消息原文：原始文本消息', '审核');
+    expect(render).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyTo: expect.objectContaining({
+          sourceMessageId: 'bridge-card',
+          senderDisplayName: '原消息用户',
+          textPreview: '原始文本消息',
+        }),
+      }),
+      setup.targetSession,
+      '当前回复',
+      false,
+    );
+    const renderedMessage = render.mock.calls[0]![0]!;
+    expect(renderedMessage.replyTo?.imagePreview).toBeUndefined();
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+  });
+
   it('routes a high score through fixed text and renders the replacement', async () => {
     const input = randomUUID();
     const moderation = randomUUID();

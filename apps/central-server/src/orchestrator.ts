@@ -1085,6 +1085,27 @@ export class MessageOrchestrator {
     activityBatch?: ActivityBatchContext,
     fastMode = false,
   ): Promise<{ paused: boolean }> {
+    let bridgeReplyOriginalText: string | undefined;
+    let bridgeReplyOriginalAttachments: MessageEnvelope['attachments'] = [];
+    const reply = message.replyTo;
+    const bridgeReplyOriginal = await this.#resolveBridgeReply(sourceSession, sessions, reply);
+    if (reply && bridgeReplyOriginal) {
+      bridgeReplyOriginalText = bridgeReplyOriginal.text?.trim() || undefined;
+      bridgeReplyOriginalAttachments = bridgeReplyOriginal.attachments;
+      message = {
+        ...message,
+        replyTo: {
+          sourceMessageId: reply.sourceMessageId,
+          ...(reply.targetMessageId ? { targetMessageId: reply.targetMessageId } : {}),
+          ...(bridgeReplyOriginal.sender.id ? { senderId: bridgeReplyOriginal.sender.id } : {}),
+          senderDisplayName: bridgeReplyOriginal.sender.displayName,
+          ...(bridgeReplyOriginal.text?.trim()
+            ? { textPreview: bridgeReplyOriginal.text.slice(0, 1000) }
+            : {}),
+        },
+      };
+    }
+
     const nodes = new Map(blueprint.nodes.map((node) => [node.id, node]));
     const outgoing = new Map<string, BlueprintEdge[]>();
     for (const edge of blueprint.edges) {
@@ -1107,6 +1128,7 @@ export class MessageOrchestrator {
     let paused = false;
     const moderationImageRefs = [
       ...message.attachments,
+      ...bridgeReplyOriginalAttachments,
       ...(message.replyTo?.imagePreview ? [message.replyTo.imagePreview] : []),
     ];
     const moderationOptions = moderationImageRefs.length
@@ -1210,7 +1232,12 @@ export class MessageOrchestrator {
       } else if (node.type === 'llm-moderation') {
         const config = moderationConfigSchema.parse(node.config);
         let assessment: ViolationAssessment;
-        if (!state.text.trim() && !moderationOptions?.imageReviewRequested) {
+        const moderationText = bridgeReplyOriginalText
+          ? [state.text.trim(), `被回复消息原文：${bridgeReplyOriginalText}`]
+              .filter(Boolean)
+              .join('\n')
+          : state.text;
+        if (!moderationText.trim() && !moderationOptions?.imageReviewRequested) {
           assessment = {
             violationScore: 0,
             categories: [],
@@ -1224,15 +1251,15 @@ export class MessageOrchestrator {
             nodeId: node.id,
             threshold: config.threshold,
             prompt: config.prompt,
-            inputText: state.text,
+            inputText: moderationText,
             ...(moderationOptions?.imageReviewRequested
               ? { imageCount: moderationOptions.imageCount }
               : {}),
           });
           try {
             assessment = moderationOptions
-              ? await this.#processor.moderate(state.text, config.prompt, moderationOptions)
-              : await this.#processor.moderate(state.text, config.prompt);
+              ? await this.#processor.moderate(moderationText, config.prompt, moderationOptions)
+              : await this.#processor.moderate(moderationText, config.prompt);
           } catch (error) {
             const errorDetails = describeError(error);
             await this.#log(message.traceId, 'error', 'moderation_failed', {
@@ -1848,6 +1875,39 @@ export class MessageOrchestrator {
       });
       await this.#log(String(task.value.traceId), 'error', 'delivery_failed', failed);
     }
+  }
+
+  async #resolveBridgeReply(
+    sourceSession: ChatSession,
+    sessions: readonly ChatSession[],
+    reply: MessageEnvelope['replyTo'],
+  ): Promise<MessageEnvelope | undefined> {
+    if (!reply) return undefined;
+
+    for (const targetSession of sessions) {
+      if (targetSession.id === sourceSession.id) continue;
+      const mapping = await this.#store.get<{ targetMessageId: string }>(
+        'reply-mapping',
+        mappingKey(sourceSession.id, reply.sourceMessageId, targetSession.id),
+      );
+      const originalMessageId = mapping?.value.targetMessageId;
+      if (!originalMessageId) continue;
+
+      const history = await this.#store.list<{
+        sessionId: string;
+        message: MessageEnvelope;
+      }>('message-history');
+      const originalEntry = history.find(
+        (entry) =>
+          entry.value.sessionId === targetSession.id &&
+          entry.value.message.source.messageId === originalMessageId,
+      );
+      if (!originalEntry) continue;
+
+      const parsed = messageEnvelopeSchema.safeParse(originalEntry.value.message);
+      if (parsed.success) return parsed.data;
+    }
+    return undefined;
   }
 
   async #recentMessages(sessionId: string): Promise<readonly MessageEnvelope[]> {

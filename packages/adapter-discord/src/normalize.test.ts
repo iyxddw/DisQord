@@ -73,6 +73,28 @@ describe('normalizeDiscordMessage', () => {
     expect(message).toMatchObject({ kind: 'unsupported', unsupportedType: 'file' });
   });
 
+  it('replaces Discord user mention tags with the resolved display name', () => {
+    const message = normalizeDiscordMessage(
+      {
+        ...baseMessage,
+        content: '<@736128943861661818> 常见问题',
+        mentions: [{ id: '736128943861661818', displayName: '真实昵称' }],
+        referencedMessage: {
+          id: '90',
+          authorDisplayName: 'Bob',
+          content: '<@!736128943861661818> faq',
+          mentions: [{ id: '736128943861661818', displayName: '真实昵称' }],
+        },
+      },
+      randomUUID(),
+    );
+
+    expect(message).toMatchObject({
+      text: '@真实昵称 常见问题',
+      replyTo: { textPreview: '@真实昵称 faq' },
+    });
+  });
+
   it('ignores Discord bot messages to prevent loops', () => {
     expect(
       normalizeDiscordMessage(

@@ -13,6 +13,13 @@ const discordAttachmentSchema = z.object({
   height: z.number().int().positive().nullable().optional(),
 });
 
+export const discordMentionSchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1),
+});
+
+export type DiscordMention = z.infer<typeof discordMentionSchema>;
+
 export const discordMessageSnapshotSchema = z.object({
   id: z.string().min(1),
   guildId: z.string().min(1),
@@ -28,18 +35,29 @@ export const discordMessageSnapshotSchema = z.object({
   }),
   attachments: z.array(discordAttachmentSchema),
   stickerCount: z.number().int().nonnegative().default(0),
+  mentions: z.array(discordMentionSchema).optional(),
   referencedMessage: z
     .object({
       id: z.string().min(1),
       authorDisplayName: z.string().min(1),
       content: z.string(),
       imageUrl: z.url().optional(),
+      mentions: z.array(discordMentionSchema).optional(),
     })
     .optional(),
   referencedMessageId: z.string().min(1).optional(),
 });
 
 export type DiscordMessageSnapshot = z.infer<typeof discordMessageSnapshotSchema>;
+
+function replaceDiscordUserMentions(
+  text: string,
+  mentions: readonly DiscordMention[] | undefined,
+): string {
+  if (!mentions?.length) return text;
+  const names = new Map(mentions.map((mention) => [mention.id, mention.displayName]));
+  return text.replace(/<@!?(\d+)>/gu, (tag, id: string) => `@${names.get(id) ?? id}`);
+}
 
 export function normalizeDiscordMessage(
   candidate: DiscordMessageSnapshot,
@@ -60,7 +78,7 @@ export function normalizeDiscordMessage(
         : message.type !== 0 && message.type !== 19
           ? `discord-message-${message.type}`
           : undefined;
-  const text = message.content.trim();
+  const text = replaceDiscordUserMentions(message.content.trim(), message.mentions);
   const attachments: MessageEnvelope['attachments'][number][] = images.map((attachment) => ({
     id: randomUUID(),
     ...(attachment.name ? { fileName: attachment.name.slice(0, 255) } : {}),
@@ -80,6 +98,9 @@ export function normalizeDiscordMessage(
         : 'text';
   const referenced = message.referencedMessage;
   const replyId = referenced?.id ?? message.referencedMessageId;
+  const referencedText = referenced
+    ? replaceDiscordUserMentions(referenced.content, referenced.mentions)
+    : undefined;
 
   return messageEnvelopeSchema.parse({
     schemaVersion: 1,
@@ -106,7 +127,7 @@ export function normalizeDiscordMessage(
           replyTo: {
             sourceMessageId: replyId,
             senderDisplayName: referenced?.authorDisplayName ?? 'Replied user',
-            ...(referenced?.content ? { textPreview: referenced.content.slice(0, 1_000) } : {}),
+            ...(referencedText ? { textPreview: referencedText.slice(0, 1_000) } : {}),
             ...(referenced?.imageUrl
               ? {
                   imagePreview: {
