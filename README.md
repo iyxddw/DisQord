@@ -91,16 +91,21 @@ pnpm --filter @disqord/qq-node... build
 pnpm --filter @disqord/discord-node... build
 ```
 
-也可以使用交互式更新脚本。它会先检查项目根目录和本地修改，再执行 `git pull --ff-only`、同步依赖，
-最后用方向键移动、空格勾选、回车确认要构建的程序：
+也可以使用更新脚本。它会先检查本地修改，再获取当前分支的上游更新并执行快进合并，随后同步依赖。
+脚本按部署角色选择构建目标：中央端会同时构建中央服务端和中央 Web；节点端会同时构建节点程序和节点 Web，
+避免只更新其中一半导致协议或静态资源版本不一致：
 
 ```bash
 cd /root/DisQord
-bash update.sh
+bash update.sh                         # 交互选择 central / qq / discord / all
+bash update.sh central --yes           # 无交互更新中央端
+bash update.sh qq --yes --restart      # 更新并重启已存在的 QQ PM2 进程
+bash update.sh all --yes --verify      # 全部构建，并执行 typecheck/test
 ```
 
-脚本不会强制覆盖未提交修改，也不会自动重启正在运行的 PM2 进程；构建完成后按需运行对应的
-`pm2-start-central.sh`、`pm2-start-qq.sh` 或 `pm2-start-discord.sh`。
+脚本不会强制覆盖已跟踪的未提交修改；本地构建可使用 `--no-pull`。默认不会重启正在运行的服务，
+只有显式传入 `--restart` 时才会调用对应的 `pm2-start-*.sh`。使用 systemd 部署时，构建完成后请手动重启
+对应的 systemd 服务。
 
 ## 从零启动
 
