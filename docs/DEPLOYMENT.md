@@ -65,9 +65,11 @@ sudo fc-cache -f
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/central
 ```
 
-中央端的配置和运行数据写入 `/var/lib/disqord/central/central.json`，头像缓存写入
-`/var/lib/disqord/central/avatar-cache`。文件和目录首次启动时自动创建，
-包含管理员记录、节点、会话、蓝图、日志、提示词和明文大模型 API Key，权限固定为 `0600`。
+中央端的配置和运行数据写入 `/var/lib/disqord/central/`，头像缓存写入
+`/var/lib/disqord/central/avatar-cache`。新版使用 `state.ndjson`、`trace-log.ndjson`、
+`message-history.ndjson` 和 `blueprint-activity.ndjson`，这些文件首次启动时自动创建，
+权限固定为 `0600`。如果目录里存在旧版 `central.json`，新版会自动拆分并改名为
+`central.json.migrated-时间戳` 保留备份；升级前请备份整个目录。
 
 ### 2.2 创建中央端环境文件
 
@@ -257,8 +259,9 @@ sudo systemctl status disqord-discord --no-pager
 流水线文字并按违规分数从两个出口分流；发送目标会自动读取原消息资料并完成图片合成。
 
 若需要降低延迟，可在“基础设置”打开“疾速模式”。该模式关闭图片下载和 PNG 合成，客户端直接发送
-带昵称的文本；翻译和审核仍然执行，图片审核在无法提供图片时按无法审核处理。客户端不使用 8/6/4/2
-秒上传聚合窗口，同一目标按 5 秒发送槽位处理，失败最多重试 4 次。关闭后恢复普通卡片和批量策略。
+带昵称的文本；翻译和审核仍然执行，图片审核在无法提供图片时按无法审核处理。疾速发送间隔由基础
+设置中的“疾速发送间隔（毫秒）”控制，默认 1500ms，设为 0 可取消间隔；失败最多重试 4 次。关闭后
+恢复普通卡片和 2.5/2/1.5/1 秒的批量策略。
 
 ### 聊天会话
 
@@ -304,4 +307,4 @@ sudo systemctl restart disqord-qq
 sudo systemctl restart disqord-discord
 ```
 
-中央端更新前复制一份 `central.json`。不要同时运行同一数据目录的两个程序副本。
+中央端更新前复制整个 `/var/lib/disqord/central` 目录。不要同时运行同一数据目录的两个程序副本。

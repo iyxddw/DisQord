@@ -65,7 +65,7 @@ const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
 const MESSAGE_UPLOAD_BATCH_NAMESPACE = 'message-upload-batch';
 const MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS = 3;
-const FAST_DELIVERY_INTERVAL_MS = 5_000;
+const FAST_DELIVERY_INTERVAL_MS = 1_500;
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -286,7 +286,7 @@ export class MessageOrchestrator {
   async #sendRuntimeSettings(nodeId: string): Promise<void> {
     await this.#commandBus.sendToNode(nodeId, 'node.runtime.settings', {
       fastMode: await this.#fastMode(),
-      fastDeliveryIntervalMs: FAST_DELIVERY_INTERVAL_MS,
+      fastDeliveryIntervalMs: await this.#fastDeliveryInterval(),
     });
   }
 
@@ -826,6 +826,7 @@ export class MessageOrchestrator {
       batchSize: record.messages.length,
       eventIds: record.messages.map((message) => message.eventId),
     });
+    await this.#store.flush();
     this.#queueMessageUploadBatch(batchId);
   }
 
@@ -896,7 +897,9 @@ export class MessageOrchestrator {
       const failed = {
         ...processing,
         status:
-          processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS ? ('queued' as const) : ('failed' as const),
+          processing.attempts < MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS
+            ? ('queued' as const)
+            : ('failed' as const),
         updatedAt: new Date().toISOString(),
         lastError,
       } satisfies MessageUploadBatchRecord;
@@ -1015,6 +1018,7 @@ export class MessageOrchestrator {
     // will send these tasks one by one.
     const deliveries = collectors.flat();
     if (deliveries.length) await this.#dispatchDeliveryBatch(deliveries);
+    await this.#store.flush();
     await this.#log(messages[0]!.traceId, 'info', 'message_upload_batch_deliveries_queued', {
       batchId: batch.batchId,
       batchSize: messages.length,
@@ -1034,6 +1038,13 @@ export class MessageOrchestrator {
     if (!entry) return false;
     const parsed = llmSettingsSchema.safeParse(entry.value);
     return parsed.success ? parsed.data.fastMode : false;
+  }
+
+  async #fastDeliveryInterval(): Promise<number> {
+    const entry = await this.#store.get('settings', 'llm');
+    if (!entry) return FAST_DELIVERY_INTERVAL_MS;
+    const parsed = llmSettingsSchema.safeParse(entry.value);
+    return parsed.success ? parsed.data.fastDeliveryIntervalMs : FAST_DELIVERY_INTERVAL_MS;
   }
 
   async #executeBlueprint(
@@ -1080,9 +1091,7 @@ export class MessageOrchestrator {
           // instead of silently approving an unreviewed image.
           imageUrls: fastMode
             ? []
-            : moderationImageRefs.flatMap((image) =>
-                image.sourceUrl ? [image.sourceUrl] : [],
-              ),
+            : moderationImageRefs.flatMap((image) => (image.sourceUrl ? [image.sourceUrl] : [])),
         }
       : undefined;
     const recordActivity = (
@@ -1328,15 +1337,16 @@ export class MessageOrchestrator {
           fastMode,
         };
         if (deliveryCollector) deliveryCollector.push(delivery);
-        else await this.#dispatchDelivery(
-          blueprint,
-          sourceSession,
-          target,
-          message,
-          cards,
-          state.text,
-          fastMode,
-        );
+        else
+          await this.#dispatchDelivery(
+            blueprint,
+            sourceSession,
+            target,
+            message,
+            cards,
+            state.text,
+            fastMode,
+          );
         await recordActivity(node, processedSteps, {
           message: `已发送到 ${target.remark?.trim() || target.displayName}`,
           text: state.text,
@@ -1590,7 +1600,10 @@ export class MessageOrchestrator {
         // Chunks for the same node are sent serially so a large batch cannot
         // overtake an earlier chunk on the WebSocket.
         for (const chunk of chunks) {
-          const payload = { batchId: randomUUID(), deliveries: chunk.map(({ command }) => command) };
+          const payload = {
+            batchId: randomUUID(),
+            deliveries: chunk.map(({ command }) => command),
+          };
           try {
             await this.#commandBus.sendToNode(nodeId, 'message.deliver.batch', payload);
             for (const { intent, command } of chunk) {
@@ -1611,7 +1624,8 @@ export class MessageOrchestrator {
             const message = error instanceof Error ? error.message : String(error);
             for (const { intent, command } of chunk) {
               await this.#store.set('delivery-task', command.taskId, {
-                ...(await this.#store.get<Record<string, unknown>>('delivery-task', command.taskId))?.value,
+                ...(await this.#store.get<Record<string, unknown>>('delivery-task', command.taskId))
+                  ?.value,
                 status: 'failed',
                 error: message,
                 updatedAt: new Date().toISOString(),

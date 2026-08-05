@@ -77,6 +77,7 @@ const llmSettingsInputSchema = z.object({
   maxRetries: z.number().int().min(0).max(5).default(2),
   concurrency: z.number().int().min(1).max(100).default(4),
   fastMode: z.boolean().default(false),
+  fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(1_500),
 });
 const promptDraftBodySchema = z.object({ content: z.string().min(1).max(50_000) });
 const blueprintDraftBodySchema = z.object({
@@ -142,6 +143,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   const auth = new CentralAuthService(options.store);
   let gateway: CentralNodeGateway | undefined;
   const pendingNodeLogRequests = new Map<string, PendingNodeLogRequest>();
+  const nodeRuntimeWrites = new Map<string, { lastFrameKind: string; writtenAt: number }>();
 
   void app.register(cookie);
 
@@ -171,12 +173,26 @@ export function createCentralApplication(options: CentralApplicationOptions) {
             }
           }
         }
-        await options.store.set('node-runtime', frame.nodeId, {
-          nodeId: frame.nodeId,
-          nodeType: frame.nodeType,
-          lastFrameKind: frame.kind,
-          lastSeenAt: new Date().toISOString(),
-        });
+        const now = Date.now();
+        const previousWrite = nodeRuntimeWrites.get(frame.nodeId);
+        if (
+          !previousWrite ||
+          previousWrite.lastFrameKind !== frame.kind ||
+          now - previousWrite.writtenAt >= 30_000
+        ) {
+          const previous = await options.store.get<Record<string, unknown>>(
+            'node-runtime',
+            frame.nodeId,
+          );
+          await options.store.set('node-runtime', frame.nodeId, {
+            ...(previous?.value ?? {}),
+            nodeId: frame.nodeId,
+            nodeType: frame.nodeType,
+            lastFrameKind: frame.kind,
+            lastSeenAt: new Date(now).toISOString(),
+          });
+          nodeRuntimeWrites.set(frame.nodeId, { lastFrameKind: frame.kind, writtenAt: now });
+        }
         await options.onNodeFrame?.(frame);
       },
     });
@@ -196,7 +212,10 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     if (!valid) await reply.code(401).send({ error: 'Authentication required.' });
   };
 
-  const broadcastRuntimeSettings = async (fastMode: boolean): Promise<void> => {
+  const broadcastRuntimeSettings = async (
+    fastMode: boolean,
+    fastDeliveryIntervalMs: number,
+  ): Promise<void> => {
     if (!gateway) return;
     const nodes = await options.store.list<NodeSession>('node-session');
     const online = nodes.filter(
@@ -207,13 +226,16 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         try {
           await gateway!.sendToNode(entry.value.nodeId, 'node.runtime.settings', {
             fastMode,
-            fastDeliveryIntervalMs: 5_000,
+            fastDeliveryIntervalMs,
           });
         } catch (error) {
           // A node may disconnect while settings are being saved.  It will
           // request the current value again after its next reconnect.
           app.log.warn(
-            { nodeId: entry.value.nodeId, error: error instanceof Error ? error.message : String(error) },
+            {
+              nodeId: entry.value.nodeId,
+              error: error instanceof Error ? error.message : String(error),
+            },
             'runtime settings broadcast failed',
           );
         }
@@ -318,7 +340,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       const { apiKey, ...settings } = input;
       if (apiKey) await options.secrets.set('llm-api-key', apiKey);
       await options.store.set('settings', 'llm', settings);
-      void broadcastRuntimeSettings(settings.fastMode);
+      void broadcastRuntimeSettings(settings.fastMode, settings.fastDeliveryIntervalMs);
       return { ...settings, apiKeyConfigured: await options.secrets.has('llm-api-key') };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
@@ -470,13 +492,12 @@ export function createCentralApplication(options: CentralApplicationOptions) {
           item.externalId === candidate.externalId &&
           (candidate.platform === 'qq' || item.spaceId === candidate.spaceId),
       );
-      if (!match) {
-        return await reply.code(409).send({
-          error: '客户端尚未上报这个会话，请确认机器人已加入目标会话后刷新列表。',
-        });
-      }
       const displayName =
-        candidate.platform === 'qq' ? `QQ ${match.displayName}` : `Discord ${match.displayName}`;
+        candidate.displayName?.trim() ||
+        match?.displayName ||
+        (candidate.platform === 'qq'
+          ? `QQ ${candidate.externalId}`
+          : `Discord ${candidate.spaceId} / ${candidate.externalId}`);
       const now = new Date().toISOString();
       const session = chatSessionSchema.parse({
         id: randomUUID(),

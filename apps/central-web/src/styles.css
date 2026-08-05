@@ -1166,6 +1166,11 @@ button.fit {
   padding-top: 14px;
   border-top: 1px solid var(--line);
 }
+.binding-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
 .binding-form small {
   color: var(--muted);
   line-height: 1.5;
@@ -1859,6 +1864,9 @@ code {
   }
   .node-grid,
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .binding-fields {
     grid-template-columns: 1fr;
   }
   .overview-summary {

@@ -61,7 +61,6 @@ import {
   type BlueprintVersion,
   type ChatSession,
   type NodeRuntime,
-  type SessionCandidate,
   type LogPage,
 } from './api';
 
@@ -164,7 +163,6 @@ function App() {
     const paths = [
       '/nodes',
       '/chat-sessions',
-      '/chat-sessions/candidates',
       '/blueprints',
       '/settings/llm',
       '/settings/simulation',
@@ -536,15 +534,15 @@ type FlowData = {
   onCancelSaveSimulation?: () => void;
   onSimulate?: (nodeId: string, text: string) => Promise<void>;
   simulation?:
-      | {
-          state: 'active' | 'done' | 'error';
-          message?: string;
-          activeMessageId?: string;
-          progress?: number;
-          /** Completed messages are kept as a small stack for coalesced runs. */
-          messages?: FlowSimulationNote[];
-          outputs?: string[];
-        }
+    | {
+        state: 'active' | 'done' | 'error';
+        message?: string;
+        activeMessageId?: string;
+        progress?: number;
+        /** Completed messages are kept as a small stack for coalesced runs. */
+        messages?: FlowSimulationNote[];
+        outputs?: string[];
+      }
     | undefined;
 };
 
@@ -672,11 +670,13 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
       {data.kind === 'simulated-output' &&
         ((data.simulation?.outputs?.length ?? 0) > 0 || data.outputText) && (
           <div className="simulated-output-values nodrag nopan">
-            {(data.simulation?.outputs ?? [data.outputText]).filter(Boolean).map((output, index) => (
-              <div className="simulated-output-value" key={`${index}-${output}`}>
-                {output}
-              </div>
-            ))}
+            {(data.simulation?.outputs ?? [data.outputText])
+              .filter(Boolean)
+              .map((output, index) => (
+                <div className="simulated-output-value" key={`${index}-${output}`}>
+                  {output}
+                </div>
+              ))}
           </div>
         )}
       {data.kind === 'translation' && (
@@ -916,11 +916,13 @@ function MobileFlowCard({
       {data.kind === 'simulated-output' &&
         ((data.simulation?.outputs?.length ?? 0) > 0 || data.outputText) && (
           <div className="mobile-flow-output-stack">
-            {(data.simulation?.outputs ?? [data.outputText]).filter(Boolean).map((output, index) => (
-              <div className="mobile-flow-output" key={`${index}-${output}`}>
-                {output}
-              </div>
-            ))}
+            {(data.simulation?.outputs ?? [data.outputText])
+              .filter(Boolean)
+              .map((output, index) => (
+                <div className="mobile-flow-output" key={`${index}-${output}`}>
+                  {output}
+                </div>
+              ))}
           </div>
         )}
       {data.kind === 'translation' && (
@@ -1201,7 +1203,9 @@ function BlueprintEditor() {
           const delay = Math.max(0, simulationSettings.data.delayMs ?? 1_000);
           const entered = group.filter((activity) => (activity.phase ?? 'completed') === 'entered');
           const failed = group.filter((activity) => activity.phase === 'failed');
-          const completed = group.filter((activity) => (activity.phase ?? 'completed') === 'completed');
+          const completed = group.filter(
+            (activity) => (activity.phase ?? 'completed') === 'completed',
+          );
 
           const enteredNodeIds = [...new Set(entered.map((activity) => activity.nodeId))];
           if (enteredNodeIds.length) {
@@ -1276,10 +1280,9 @@ function BlueprintEditor() {
                   text: activity.message,
                   kind: 'done',
                 }));
-                const messages = [
-                  ...(node.data.simulation?.messages ?? []),
-                  ...notes,
-                ].slice(-FLOW_ACTIVITY_NOTE_LIMIT);
+                const messages = [...(node.data.simulation?.messages ?? []), ...notes].slice(
+                  -FLOW_ACTIVITY_NOTE_LIMIT,
+                );
                 const output = activities.find(
                   (activity) => activity.nodeType === 'simulated-output' && activity.text,
                 );
@@ -2028,8 +2031,7 @@ function BlueprintEditor() {
 function Nodes() {
   const nodes = useLoad<NodeRuntime[]>('/nodes', []);
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
-  const candidates = useLoad<SessionCandidate[]>('/chat-sessions/candidates', []);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, { externalId: string; spaceId: string }>>({});
   const [adding, setAdding] = useState<Record<string, boolean>>({});
   const [verificationCodes, setVerificationCodes] = useState<Record<string, string>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
@@ -2043,18 +2045,27 @@ function Nodes() {
   }, []);
 
   const configure = async (node: NodeRuntime) => {
-    const candidate = candidates.data.find(
-      (item) => item.nodeId === node.nodeId && candidateKey(item) === drafts[node.nodeId],
-    );
-    if (!candidate) {
-      setNotices((current) => ({ ...current, [node.nodeId]: '请先选择一个会话。' }));
+    const draft = drafts[node.nodeId] ?? { externalId: '', spaceId: '' };
+    const externalId = draft.externalId.trim();
+    const spaceId = (node.nodeType === 'qq' ? externalId : draft.spaceId).trim();
+    if (!externalId || !spaceId) {
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]:
+          node.nodeType === 'qq' ? '请填写 QQ 群号。' : '请填写 Discord 服务器 ID 和频道 ID。',
+      }));
       return;
     }
     setSending((current) => ({ ...current, [node.nodeId]: true }));
     try {
       const session = await api<ChatSession>('/chat-sessions', {
         method: 'POST',
-        json: candidate,
+        json: {
+          nodeId: node.nodeId,
+          platform: node.nodeType,
+          externalId,
+          spaceId,
+        },
       });
       const verification = await api<{ expiresAt: string }>(
         `/chat-sessions/${session.id}/send-code`,
@@ -2065,7 +2076,7 @@ function Nodes() {
         { ...session, verificationExpiresAt: verification.expiresAt },
       ]);
       setAdding((current) => ({ ...current, [node.nodeId]: false }));
-      setDrafts((current) => ({ ...current, [node.nodeId]: '' }));
+      setDrafts((current) => ({ ...current, [node.nodeId]: { externalId: '', spaceId: '' } }));
       setNotices((current) => ({
         ...current,
         [node.nodeId]: '验证码已发送，请从目标群或频道读取后回填。',
@@ -2131,18 +2142,18 @@ function Nodes() {
   };
 
   const reload = async () => {
-    await Promise.all([nodes.reload(), sessions.reload(), candidates.reload()]);
+    await Promise.all([nodes.reload(), sessions.reload()]);
   };
 
-  if (nodes.loading || sessions.loading || candidates.loading) {
-    return <LoadingState text="正在同步客户端和可绑定会话" />;
+  if (nodes.loading || sessions.loading) {
+    return <LoadingState text="正在同步客户端和已绑定会话" />;
   }
 
   return (
     <div className="panel binding-panel">
       <PanelTitle
         title="客户端与会话"
-        subtitle="这里只负责绑定新会话；已绑定会话请在“聊天会话”页面查看和管理"
+        subtitle="填写目标会话 ID 后发送验证码；已绑定会话请在“聊天会话”页面查看和管理"
         action={
           <button className="icon-button" title="刷新" onClick={() => void reload()}>
             <RefreshCw size={16} />
@@ -2154,18 +2165,7 @@ function Nodes() {
           const pending = sessions.data.filter(
             (session) => session.nodeId === node.nodeId && session.status === 'pending',
           );
-          const used = new Set(
-            sessions.data
-              .filter(
-                (session) =>
-                  session.nodeId === node.nodeId &&
-                  ['verified', 'pending'].includes(session.status),
-              )
-              .map((session) => session.externalId),
-          );
-          const available = candidates.data.filter(
-            (candidate) => candidate.nodeId === node.nodeId && !used.has(candidate.externalId),
-          );
+          const draft = drafts[node.nodeId] ?? { externalId: '', spaceId: '' };
           return (
             <section className="node-setup" key={node.nodeId}>
               <div className="binding-head">
@@ -2224,31 +2224,73 @@ function Nodes() {
 
               {adding[node.nodeId] ? (
                 <div className="binding-form">
-                  <label>
-                    选择客户端可见的会话
-                    <select
-                      value={drafts[node.nodeId] ?? ''}
-                      onChange={(event) =>
-                        setDrafts((current) => ({ ...current, [node.nodeId]: event.target.value }))
-                      }
-                    >
-                      <option value="">请选择</option>
-                      {available.map((candidate) => (
-                        <option key={candidateKey(candidate)} value={candidateKey(candidate)}>
-                          {node.nodeType === 'qq'
-                            ? `QQ ${candidate.displayName}`
-                            : `Discord ${candidate.displayName}`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {!available.length && (
-                    <small>没有新的可绑定会话，请确认客户端已加入目标会话后刷新。</small>
+                  {node.nodeType === 'qq' ? (
+                    <label>
+                      QQ 群号
+                      <input
+                        inputMode="numeric"
+                        autoComplete="off"
+                        placeholder="例如 736770364"
+                        value={draft.externalId}
+                        onChange={(event) =>
+                          setDrafts((current) => ({
+                            ...current,
+                            [node.nodeId]: {
+                              externalId: event.target.value,
+                              spaceId: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </label>
+                  ) : (
+                    <div className="binding-fields">
+                      <label>
+                        Discord 服务器 ID
+                        <input
+                          inputMode="numeric"
+                          autoComplete="off"
+                          placeholder="例如 1108054453749301268"
+                          value={draft.spaceId}
+                          onChange={(event) =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [node.nodeId]: { ...draft, spaceId: event.target.value },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Discord 频道 ID
+                        <input
+                          inputMode="numeric"
+                          autoComplete="off"
+                          placeholder="例如 1108054453749301271"
+                          value={draft.externalId}
+                          onChange={(event) =>
+                            setDrafts((current) => ({
+                              ...current,
+                              [node.nodeId]: { ...draft, externalId: event.target.value },
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
                   )}
+                  <small>
+                    {node.nodeType === 'qq'
+                      ? '验证码会发送到这个 QQ 群。'
+                      : '机器人必须已加入服务器，并拥有该频道的查看和发送消息权限；验证码发送失败时会显示具体原因。'}
+                  </small>
                   <div className="binding-actions">
                     <button
                       className="primary"
-                      disabled={!node.online || !available.length || Boolean(sending[node.nodeId])}
+                      disabled={
+                        !node.online ||
+                        !draft.externalId.trim() ||
+                        (node.nodeType === 'discord' && !draft.spaceId.trim()) ||
+                        Boolean(sending[node.nodeId])
+                      }
                       onClick={() => void configure(node)}
                     >
                       {sending[node.nodeId] && <LoaderCircle className="spin" size={15} />}
@@ -2281,10 +2323,6 @@ function Nodes() {
   );
 }
 
-function candidateKey(candidate: SessionCandidate): string {
-  return `${candidate.spaceId}\u001f${candidate.externalId}`;
-}
-
 function LlmSettings() {
   const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
   const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
@@ -2301,6 +2339,7 @@ function LlmSettings() {
     maxRetries: 2,
     concurrency: 4,
     fastMode: false,
+    fastDeliveryIntervalMs: 1500,
   });
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [notice, setNotice] = useState('');
@@ -2462,8 +2501,23 @@ function LlmSettings() {
             疾速模式
           </span>
           <small className="field-hint">
-            关闭图片下载与合成，直接发送文本；客户端不等待打组，立即入队并发处理，发送固定间隔 5 秒，失败最多重试 4 次。翻译和审核仍会执行；图片审核无法读取图片时按未通过处理。
+            关闭图片下载与合成，直接发送文本；客户端不等待打组，立即入队并发处理，发送间隔由下方设置控制，失败最多重试
+            4 次。翻译和审核仍会执行；图片审核无法读取图片时按未通过处理。
           </small>
+        </label>
+        <label>
+          疾速发送间隔（毫秒）
+          <input
+            type="number"
+            min="0"
+            max="60000"
+            step="100"
+            value={form.fastDeliveryIntervalMs}
+            onChange={(event) =>
+              setForm({ ...form, fastDeliveryIntervalMs: Number(event.target.value) })
+            }
+          />
+          <small className="field-hint">只限制同一目标会话的连续发送；填 0 表示不额外等待。</small>
         </label>
         <label>
           蓝图模拟节点间隔（毫秒）

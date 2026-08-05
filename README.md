@@ -148,8 +148,10 @@ curl http://127.0.0.1:18080/api/health
 http://中央服务器地址:18080
 ```
 
-首次进入时创建管理员密码。`central.json` 中保存管理员数据、客户端、会话、蓝图、日志、提示词
-以及明文大模型 API Key，不要提交到 Git 或公开发送。
+首次进入时创建管理员密码。中央数据目录会保存 `state.ndjson`、`trace-log.ndjson`、
+`message-history.ndjson` 和 `blueprint-activity.ndjson`；首次启动新版时会自动把旧的
+`central.json` 拆分并改名为 `central.json.migrated-时间戳` 备份。目录中仍可能包含明文大模型
+API Key，不要提交到 Git 或公开发送。升级前请备份整个 `data` 目录。
 
 ### 2. Discord 客户端
 
@@ -297,10 +299,10 @@ pnpm --filter @disqord/qq-node start
 中。推荐提示词和结构化输出约束见 [`docs/PROMPTS.md`](docs/PROMPTS.md)。
 
 如果消息需要尽快到达，可以在基础设置打开“疾速模式”。它会关闭头像和附件下载、图片合成以及
-客户端的 8/6/4/2 秒聚合窗口，中央仍然执行翻译和审核，但节点改为发送纯文本（保留发送者昵称）。
-同一目标的发送槽位固定为每 5 秒一个，单条发送失败最多重试 4 次；不同目标可以并行处理。图片在疾速
-模式下无法交给识图模型，审核会按“无法审核”处理并走拦截分支。关闭疾速模式后恢复 PNG 卡片和正常
-批量聚合策略。
+客户端的批量上传窗口，中央仍然执行翻译和审核，但节点改为发送纯文本（保留发送者昵称）。同一
+目标的发送间隔由基础设置中的“疾速发送间隔（毫秒）”控制，默认 1500ms，设为 0 可取消间隔；
+单条发送失败最多重试 4 次，不同目标可以并行处理。图片在疾速模式下无法交给识图模型，审核会按
+“无法审核”处理并走拦截分支。关闭疾速模式后恢复 PNG 卡片和 2.5/2/1.5/1 秒的批量聚合窗口。
 
 “运行日志”可以按设备、Debug、Info、Warn 和 Error 筛选，并记录入口消息、蓝图和节点、翻译原始
 返回、审核原始评分、渲染结果、发送排队、平台发送成功与失败。选择 QQ 或 Discord 客户端时，中央服务
@@ -348,11 +350,14 @@ pnpm --filter @disqord/central-server... build
 pnpm --filter @disqord/central-web build
 ```
 
-更新中央端前建议备份：
+更新中央端前建议备份整个数据目录（新版包含多个 ndjson 文件）：
 
 ```bash
-cp data/central.json "data/central-$(date +%F-%H%M%S).json"
+cp -a data "data-backup-$(date +%F-%H%M%S)"
 ```
+
+如果需要手动提前拆分旧文件，可在停止 Central 后运行 `node split-central.js data/central.json`；
+新版 Central 也会在首次启动时自动迁移，通常不需要手动执行。
 
 ## 常见问题
 

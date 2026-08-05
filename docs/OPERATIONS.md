@@ -58,11 +58,12 @@ curl https://你的中央域名/api/health
 
 ```bash
 sudo journalctl -u disqord-central -n 100 --no-pager
-sudo ls -l /var/lib/disqord/central/central.json
+sudo ls -lh /var/lib/disqord/central
 ```
 
-重点检查 `/etc/disqord/central.env` 中数据文件路径、`PAIRING_PEPPER` 长度和端口，以及
-`/var/lib/disqord/central` 是否由 `disqord` 用户拥有。
+重点检查 `/etc/disqord/central.env` 中数据目录路径、`PAIRING_PEPPER` 长度和端口，以及
+`/var/lib/disqord/central` 是否由 `disqord` 用户拥有。首次迁移后应能看到带时间戳的
+`central.json.migrated-*` 备份和拆分后的 ndjson 文件。
 
 ### 节点一直重连
 
@@ -100,21 +101,22 @@ sudo systemctl restart disqord-central
 
 ### 中央数据
 
-备份：
+备份（新版需要备份整个中央数据目录）：
 
 ```bash
 sudo install -d -m 0700 /var/backups/disqord
-sudo cp /var/lib/disqord/central/central.json \
-  /var/backups/disqord/central-$(date +%F-%H%M%S).json
+sudo cp -a /var/lib/disqord/central \
+  /var/backups/disqord/central-$(date +%F-%H%M%S)
 ```
 
 恢复时先停止中央服务，避免覆盖正在写入的数据：
 
 ```bash
 sudo systemctl stop disqord-central
-sudo cp /备份路径/central.json /var/lib/disqord/central/central.json
-sudo chown disqord:disqord /var/lib/disqord/central/central.json
-sudo chmod 0600 /var/lib/disqord/central/central.json
+sudo mv /var/lib/disqord/central /var/lib/disqord/central.before-restore-$(date +%s)
+sudo cp -a /备份路径/central-时间戳 /var/lib/disqord/central
+sudo chown -R disqord:disqord /var/lib/disqord/central
+sudo find /var/lib/disqord/central -type f -exec chmod 0600 {} \;
 sudo systemctl start disqord-central
 ```
 
@@ -125,7 +127,7 @@ sudo systemctl start disqord-central
 - `/var/lib/disqord/qq`
 - `/var/lib/disqord/discord`
 
-`central.json` 包含明文大模型 API Key；节点目录包含身份私钥、长期会话 Token 和未完成队列，
+中央 ndjson 文件可能包含明文大模型 API Key；节点目录包含身份私钥、长期会话 Token 和未完成队列，
 均按敏感数据处理。恢复同一节点目录时，不要同时运行两个副本。
 
 ## 回滚代码
@@ -149,5 +151,6 @@ sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
 sudo systemctl restart disqord-central
 ```
 
-中央数据格式发生变化时，旧代码不一定能够读取新文件，因此中央端升级前必须备份
-`central.json`。
+中央数据格式发生变化时，旧代码不一定能够读取新文件，因此中央端升级前必须备份整个
+`/var/lib/disqord/central` 目录。回滚旧代码时，使用备份目录恢复旧版 `central.json`，不要
+让旧代码直接读取 ndjson 文件。

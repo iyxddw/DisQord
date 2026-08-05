@@ -73,15 +73,30 @@ export class DiscordBotAdapter {
   async listChannels(): Promise<DiscordChatChannel[]> {
     if (!this.#client.user) return [];
     const result: DiscordChatChannel[] = [];
+    let visibleTextChannels = 0;
+    let deniedTextChannels = 0;
+    let guildFetchErrors = 0;
     for (const guild of this.#client.guilds.cache.values()) {
-      const channels = await guild.channels.fetch();
+      const channels = await guild.channels.fetch().catch((error: unknown) => {
+        guildFetchErrors += 1;
+        console.warn(
+          `[DisQord/Discord] failed to inspect guild ${guild.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return undefined;
+      });
+      if (!channels) continue;
       for (const channel of channels.values()) {
-        if (!channel?.isTextBased() || !channel.isSendable()) continue;
+        if (!channel?.isTextBased()) continue;
+        visibleTextChannels += 1;
         const permissions = channel.permissionsFor(this.#client.user);
         if (
+          !channel.isSendable() ||
           !permissions?.has(PermissionFlagsBits.ViewChannel) ||
           !permissions.has(PermissionFlagsBits.SendMessages)
         ) {
+          deniedTextChannels += 1;
           continue;
         }
         result.push({
@@ -92,9 +107,18 @@ export class DiscordBotAdapter {
         });
       }
     }
-    return result.sort((left, right) =>
+    const sorted = result.sort((left, right) =>
       `${left.guildName}/${left.name}`.localeCompare(`${right.guildName}/${right.name}`),
     );
+    if (!sorted.length) {
+      console.warn(
+        `[DisQord/Discord] no bindable channels discovered (guilds=${this.#client.guilds.cache.size}, ` +
+          `visibleTextChannels=${visibleTextChannels}, denied=${deniedTextChannels}, ` +
+          `guildFetchErrors=${guildFetchErrors}); ` +
+          'check bot membership and View Channel/Send Messages permissions',
+      );
+    }
+    return sorted;
   }
 
   async sendVerificationCode(channelId: string, code: string, expiresAt: string): Promise<string> {

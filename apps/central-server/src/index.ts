@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
@@ -9,7 +9,7 @@ import { z } from 'zod';
 
 import { createCentralApplication } from './api.js';
 import { CentralMessageProcessor, MessageOrchestrator } from './orchestrator.js';
-import { FileStateStore, PlaintextSecretStore, type StateStore } from './state-store.js';
+import { PlaintextSecretStore, SplitStateStore, type StateStore } from './state-store.js';
 
 export * from './api.js';
 export * from './auth.js';
@@ -33,7 +33,7 @@ const environmentSchema = z.object({
 
 export async function startCentralServer(environment: NodeJS.ProcessEnv = process.env) {
   const config = environmentSchema.parse(environment);
-  const store = new FileStateStore(resolve(config.CENTRAL_DATA_PATH));
+  const store = new SplitStateStore(dirname(resolve(config.CENTRAL_DATA_PATH)));
   const secrets = new PlaintextSecretStore(store);
   await ensureDefaultPrompts(store);
   const pairingAuthority = new PairingAuthority(config.PAIRING_PEPPER);
@@ -67,6 +67,7 @@ export async function startCentralServer(environment: NodeJS.ProcessEnv = proces
 
   const stop = async () => {
     await central.app.close();
+    await store.close();
   };
   process.once('SIGINT', () => void stop());
   process.once('SIGTERM', () => void stop());

@@ -1,4 +1,15 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 
 import { z } from 'zod';
@@ -30,6 +41,10 @@ export interface NodeLogPage {
   readonly totalPages: number;
 }
 
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+const MAX_LOG_LINES = 20_000;
+const MAX_READ_BYTES = 4 * 1024 * 1024;
+
 export class NodeLogger {
   readonly #path: string;
 
@@ -50,6 +65,7 @@ export class NodeLogger {
       ...(details && Object.keys(details).length ? { details } : {}),
     };
     appendFileSync(this.#path, `${JSON.stringify(record)}\n`, 'utf8');
+    this.#rotateIfNeeded();
   }
 
   list(query: NodeLogQuery = {}): NodeLogPage {
@@ -83,9 +99,10 @@ export class NodeLogger {
 
   #read(): NodeLogRecord[] {
     if (!existsSync(this.#path)) return [];
-    return readFileSync(this.#path, 'utf8')
+    return this.#readTail()
       .split(/\r?\n/u)
       .filter(Boolean)
+      .slice(-MAX_LOG_LINES)
       .flatMap((line) => {
         try {
           const value = JSON.parse(line) as NodeLogRecord;
@@ -97,5 +114,30 @@ export class NodeLogger {
           return [];
         }
       });
+  }
+
+  #readTail(): string {
+    const stats = statSync(this.#path);
+    if (stats.size <= MAX_READ_BYTES) return readFileSync(this.#path, 'utf8');
+    const start = Math.max(0, stats.size - MAX_READ_BYTES);
+    const descriptor = openSync(this.#path, 'r');
+    try {
+      const buffer = Buffer.allocUnsafe(stats.size - start);
+      const bytes = readSync(descriptor, buffer, 0, buffer.length, start);
+      const text = buffer.subarray(0, bytes).toString('utf8');
+      const firstBreak = text.indexOf('\n');
+      return firstBreak === -1 ? '' : text.slice(firstBreak + 1);
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+
+  #rotateIfNeeded(): void {
+    if (!existsSync(this.#path) || statSync(this.#path).size <= MAX_LOG_BYTES) return;
+    const lines = readFileSync(this.#path, 'utf8').split(/\r?\n/u).filter(Boolean);
+    const retained = lines.slice(-MAX_LOG_LINES);
+    const temporaryPath = `${this.#path}.${process.pid}.tmp`;
+    writeFileSync(temporaryPath, retained.length ? `${retained.join('\n')}\n` : '', 'utf8');
+    renameSync(temporaryPath, this.#path);
   }
 }

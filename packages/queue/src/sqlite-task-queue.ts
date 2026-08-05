@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -63,12 +64,16 @@ const MAX_COMPLETED_ITEMS = 1_000;
  */
 export class FileTaskQueue {
   readonly #path: string;
+  readonly #journalPath: string;
   readonly #items = new Map<string, StoredItem>();
+  #journalLines = 0;
 
   constructor(path: string) {
     this.#path = path;
+    this.#journalPath = `${path}.journal`;
     mkdirSync(dirname(path), { recursive: true });
     this.#load();
+    this.#replayJournal();
   }
 
   enqueue(item: EnqueueItem): boolean {
@@ -83,7 +88,7 @@ export class FileTaskQueue {
       createdAt: now,
       updatedAt: now,
     });
-    this.#flush();
+    this.#commit(item.id);
     return true;
   }
 
@@ -100,7 +105,7 @@ export class FileTaskQueue {
       payload,
       updatedAt: new Date().toISOString(),
     });
-    this.#flush();
+    this.#commit(id);
   }
 
   listRecoverable<T = unknown>(limit = 100): QueueItem<T>[] {
@@ -129,7 +134,7 @@ export class FileTaskQueue {
   }
 
   close(): void {
-    this.#flush();
+    this.#compact(true);
   }
 
   #load(): void {
@@ -156,8 +161,52 @@ export class FileTaskQueue {
     }
   }
 
-  #flush(): void {
+  #replayJournal(): void {
+    if (!existsSync(this.#journalPath)) return;
+    for (const line of readFileSync(this.#journalPath, 'utf8').split(/\r?\n/u)) {
+      if (!line.trim()) continue;
+      this.#journalLines += 1;
+      try {
+        const entry = JSON.parse(line) as {
+          op?: string;
+          item?: StoredItem;
+          id?: string;
+        };
+        if (entry.op === 'upsert' && entry.item) {
+          this.#items.set(entry.item.id, storedItemSchema.parse(entry.item));
+        } else if (entry.op === 'delete' && typeof entry.id === 'string') {
+          this.#items.delete(entry.id);
+        }
+      } catch {
+        // Ignore a partial final line left by a process crash.
+      }
+    }
     this.#pruneCompleted();
+  }
+
+  #commit(id: string): void {
+    const removed = this.#pruneCompleted();
+    const item = this.#items.get(id);
+    if (item) this.#appendJournal({ op: 'upsert', item });
+    for (const removedId of removed) this.#appendJournal({ op: 'delete', id: removedId });
+    this.#maybeCompact();
+  }
+
+  #appendJournal(entry: { op: 'upsert'; item: StoredItem } | { op: 'delete'; id: string }): void {
+    writeFileSync(this.#journalPath, `${JSON.stringify(entry)}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+    this.#journalLines += 1;
+  }
+
+  #maybeCompact(): void {
+    if (this.#journalLines <= Math.max(100, this.#items.size * 2)) return;
+    this.#compact();
+  }
+
+  #compact(force = false): void {
+    if (!force && this.#journalLines === 0) return;
     const temporaryPath = `${this.#path}.tmp`;
     writeFileSync(
       temporaryPath,
@@ -165,9 +214,15 @@ export class FileTaskQueue {
       'utf8',
     );
     renameSync(temporaryPath, this.#path);
+    try {
+      unlinkSync(this.#journalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    this.#journalLines = 0;
   }
 
-  #pruneCompleted(): void {
+  #pruneCompleted(): string[] {
     const now = Date.now();
     const completed = [...this.#items.values()]
       .filter((item) => item.status === 'acknowledged' || item.status === 'dead_letter')
@@ -184,6 +239,7 @@ export class FileTaskQueue {
       }
     }
     for (const id of removable) this.#items.delete(id);
+    return [...removable];
   }
 
   #transition(
@@ -202,7 +258,7 @@ export class FileTaskQueue {
       attempts: incrementAttempts ? current.attempts + 1 : current.attempts,
       updatedAt: new Date().toISOString(),
     });
-    this.#flush();
+    this.#commit(id);
   }
 
   #mapItem<T>(item: StoredItem): QueueItem<T> {

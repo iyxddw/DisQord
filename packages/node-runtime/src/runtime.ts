@@ -10,11 +10,11 @@ import { z } from 'zod';
 import { NodeConfigStore } from './config.js';
 import { NodeLogger, type NodeLogPage, type NodeLogQuery } from './logger.js';
 
-const UPLOAD_BATCH_DELAYS_MS = [8_000, 6_000, 4_000, 2_000, 0] as const;
+const UPLOAD_BATCH_DELAYS_MS = [2_500, 2_000, 1_500, 1_000, 0] as const;
 const MAX_UPLOAD_BATCH_SIZE = 25;
 const DELIVERY_MIN_GAP_MS = 0;
 const DELIVERY_MAX_GAP_MS = 3_000;
-const FAST_DELIVERY_INTERVAL_MS = 5_000;
+const FAST_DELIVERY_INTERVAL_MS = 1_500;
 const FAST_UPLOAD_RETRY_DELAY_MS = 250;
 
 export interface PlatformSessionCandidate {
@@ -38,27 +38,37 @@ const verifyCommandSchema = z.object({
   expiresAt: z.iso.datetime({ offset: true }),
 });
 
-const deliverCommandSchema = z.object({
-  taskId: z.uuid(),
-  sourceSessionId: z.uuid(),
-  sourceMessageId: z.string().min(1),
-  targetSessionId: z.uuid(),
-  externalId: z.string().min(1),
-  mode: z.enum(['card', 'text']).default('card'),
-  cards: z.array(z.string().min(1)).max(20).default([]),
-  text: z.string().max(30_000).optional(),
-  senderName: z.string().trim().min(1).max(256).optional(),
-  fastMode: z.boolean().default(false),
-  replyMessageId: z.string().min(1).optional(),
-  targetMessageId: z.string().min(1).optional(),
-}).superRefine((command, context) => {
-  if (command.mode === 'card' && command.cards.length === 0) {
-    context.addIssue({ code: 'custom', path: ['cards'], message: 'Card deliveries require at least one image.' });
-  }
-  if (command.mode === 'text' && !command.text?.trim()) {
-    context.addIssue({ code: 'custom', path: ['text'], message: 'Text deliveries require text.' });
-  }
-});
+const deliverCommandSchema = z
+  .object({
+    taskId: z.uuid(),
+    sourceSessionId: z.uuid(),
+    sourceMessageId: z.string().min(1),
+    targetSessionId: z.uuid(),
+    externalId: z.string().min(1),
+    mode: z.enum(['card', 'text']).default('card'),
+    cards: z.array(z.string().min(1)).max(20).default([]),
+    text: z.string().max(30_000).optional(),
+    senderName: z.string().trim().min(1).max(256).optional(),
+    fastMode: z.boolean().default(false),
+    replyMessageId: z.string().min(1).optional(),
+    targetMessageId: z.string().min(1).optional(),
+  })
+  .superRefine((command, context) => {
+    if (command.mode === 'card' && command.cards.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['cards'],
+        message: 'Card deliveries require at least one image.',
+      });
+    }
+    if (command.mode === 'text' && !command.text?.trim()) {
+      context.addIssue({
+        code: 'custom',
+        path: ['text'],
+        message: 'Text deliveries require text.',
+      });
+    }
+  });
 
 const deliverBatchCommandSchema = z.object({
   batchId: z.uuid(),
@@ -574,9 +584,7 @@ export class NodeBridgeRuntime {
       this.#log(
         'info',
         items.length === 1 ? 'message_upload_acknowledged' : 'message_upload_batch_acknowledged',
-        items.length === 1
-          ? { eventId: eventIds[0] }
-          : { eventIds, batchSize: items.length },
+        items.length === 1 ? { eventId: eventIds[0] } : { eventIds, batchSize: items.length },
       );
       return true;
     } catch (error) {
@@ -595,13 +603,17 @@ export class NodeBridgeRuntime {
           }
         }
       }
-      this.#log(deadLettered ? 'error' : 'warn', deadLettered ? 'message_upload_dead_letter' : 'message_upload_retry_scheduled', {
-        eventIds,
-        batchSize: items.length,
-        attempts: maxAttempts,
-        error: message,
-        ...(deadLettered ? {} : { nextDelayMs: retryDelay(maxAttempts) }),
-      });
+      this.#log(
+        deadLettered ? 'error' : 'warn',
+        deadLettered ? 'message_upload_dead_letter' : 'message_upload_retry_scheduled',
+        {
+          eventIds,
+          batchSize: items.length,
+          attempts: maxAttempts,
+          error: message,
+          ...(deadLettered ? {} : { nextDelayMs: retryDelay(maxAttempts) }),
+        },
+      );
       if (!deadLettered) this.#scheduleDrain(retryDelay(maxAttempts));
       this.#setRetrying(error);
       return false;
@@ -617,7 +629,8 @@ export class NodeBridgeRuntime {
     }
     if (this.#uploadBatchTimer || this.#retryTimer || this.#draining) return;
     const delayMs =
-      delayOverride ?? UPLOAD_BATCH_DELAYS_MS[Math.min(this.#uploadBatchStage, UPLOAD_BATCH_DELAYS_MS.length - 1)]!;
+      delayOverride ??
+      UPLOAD_BATCH_DELAYS_MS[Math.min(this.#uploadBatchStage, UPLOAD_BATCH_DELAYS_MS.length - 1)]!;
     if (delayOverride === undefined) {
       this.#uploadBatchStage = Math.min(
         this.#uploadBatchStage + 1,
@@ -666,12 +679,15 @@ export class NodeBridgeRuntime {
 
   #scheduleDrain(delayMs: number): void {
     if (this.#retryTimer) return;
-    this.#retryTimer = setTimeout(() => {
-      this.#retryTimer = undefined;
-      void this.#drainQueue().catch((error: unknown) => {
-        this.#log('error', 'queue_drain_failed', { error: describeError(error) });
-      });
-    }, this.#fastMode ? Math.min(delayMs, FAST_UPLOAD_RETRY_DELAY_MS) : delayMs);
+    this.#retryTimer = setTimeout(
+      () => {
+        this.#retryTimer = undefined;
+        void this.#drainQueue().catch((error: unknown) => {
+          this.#log('error', 'queue_drain_failed', { error: describeError(error) });
+        });
+      },
+      this.#fastMode ? Math.min(delayMs, FAST_UPLOAD_RETRY_DELAY_MS) : delayMs,
+    );
     this.#retryTimer.unref();
   }
 

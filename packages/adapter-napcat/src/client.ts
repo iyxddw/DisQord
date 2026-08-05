@@ -48,6 +48,9 @@ const replyMessageSchema = z.object({
     .optional(),
 });
 
+const MESSAGE_METADATA_BUDGET_MS = 750;
+const REPLY_PREVIEW_CACHE_MS = 60_000;
+
 interface PendingAction {
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: Error) => void;
@@ -74,6 +77,10 @@ export class NapCatOneBotClient {
   readonly #options: NapCatClientOptions;
   readonly #pending = new Map<string, PendingAction>();
   readonly #memberNameCache = new Map<string, { name: string; expiresAt: number }>();
+  readonly #replyPreviewCache = new Map<
+    string,
+    { preview: NapCatReplyPreview; expiresAt: number }
+  >();
   #socket: WebSocket | undefined;
   #manualClose = false;
   #reconnectTimer: NodeJS.Timeout | undefined;
@@ -212,9 +219,13 @@ export class NapCatOneBotClient {
 
     const event = napCatGroupMessageEventSchema.safeParse(raw);
     if (event.success) {
+      // NapCat metadata lookups are helpful for display names and reply cards,
+      // but they must not hold the message queue hostage when the local API is
+      // slow.  Use the result when it arrives quickly and fall back to IDs or
+      // the renderer's unavailable-preview label after a short budget.
       const [mentionNames, replyPreviews] = await Promise.all([
-        this.#resolveMentionNames(event.data),
-        this.#resolveReplyPreviews(event.data),
+        withTimeout(this.#resolveMentionNames(event.data), new Map(), MESSAGE_METADATA_BUDGET_MS),
+        withTimeout(this.#resolveReplyPreviews(event.data), new Map(), MESSAGE_METADATA_BUDGET_MS),
       ]);
       const message = normalizeNapCatGroupMessage(
         event.data,
@@ -241,6 +252,12 @@ export class NapCatOneBotClient {
     await Promise.all(
       replyIds.map(async (messageId) => {
         try {
+          const cached = this.#replyPreviewCache.get(messageId);
+          if (cached && cached.expiresAt > Date.now()) {
+            previews.set(messageId, cached.preview);
+            return;
+          }
+          if (cached) this.#replyPreviewCache.delete(messageId);
           const replied = replyMessageSchema.parse(
             await this.call('get_msg', { message_id: messageId }),
           );
@@ -259,11 +276,16 @@ export class NapCatOneBotClient {
           const fallbackSender = replied.sender?.user_id
             ? String(replied.sender.user_id)
             : '被回复用户';
-          previews.set(messageId, {
+          const preview: NapCatReplyPreview = {
             senderDisplayName:
               replied.sender?.card?.trim() || replied.sender?.nickname?.trim() || fallbackSender,
             ...(text ? { textPreview: text.slice(0, 1_000) } : {}),
             ...(typeof image?.data.url === 'string' ? { imageUrl: image.data.url } : {}),
+          };
+          previews.set(messageId, preview);
+          this.#replyPreviewCache.set(messageId, {
+            preview,
+            expiresAt: Date.now() + REPLY_PREVIEW_CACHE_MS,
           });
         } catch {
           // NapCat may no longer retain the referenced message; the renderer will
@@ -295,6 +317,7 @@ export class NapCatOneBotClient {
           names.set(userId, cached.name);
           return;
         }
+        if (cached) this.#memberNameCache.delete(cacheKey);
         try {
           const member = groupMemberInfoSchema.parse(
             await this.call('get_group_member_info', {
@@ -315,5 +338,20 @@ export class NapCatOneBotClient {
       }),
     );
     return names;
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
