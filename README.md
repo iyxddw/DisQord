@@ -1,437 +1,204 @@
 # DisQord
 
-DisQord 是一个自托管的 QQ ↔ Discord 消息互通项目。QQ、Discord 和中央控制端是三个固定程序，
-可以分别运行在不同服务器上；两个客户端只主动连接中央端，不直接连接彼此。
+DisQord 是一个自托管的 QQ ↔ Discord 消息桥。它把 QQ 群和 Discord 频道接入同一个中央服务，支持双向转发、翻译、内容审核、回复映射和消息卡片渲染。
 
-项目面向个人或小规模群组使用，不依赖 MySQL、PostgreSQL、Redis，也不需要 Docker。中央端把
-配置和运行状态保存到一个 JSON 文件；客户端身份与重试队列保存在各自的 `data` 目录中。
+项目由三个固定角色组成：中央服务端、QQ 节点和 Discord 节点。节点只主动连接中央服务端，QQ 节点和 Discord 节点之间不直接通信。
 
-## 功能
-
-- QQ 端使用 NapCat / OneBot 11，Discord 端使用 Discord Bot Gateway。
-- 中央 Web 面板管理客户端、聊天会话、转发蓝图、大模型和分级追踪日志。
-- 通过向目标群或频道发送验证码来验证聊天会话；更改群或频道需要重新验证。
-- 使用蓝图连接任意已验证会话，支持单向或双向转发，以及多个蓝图同时运行。
-- 翻译、审核和固定文本都是可自由连线的蓝图模块，审核按 0～1 违规分数和阈值分流。
-- 翻译模块支持“记忆模式”，可携带同一会话前 5 条文字和被回复消息原文。
-- QQ 目标卡片使用中文界面，Discord 目标卡片使用英文界面。
-- 所有转发结果都是渲染后的 PNG 图片，包含头像、昵称、译文、半透明原文和回复预览。
-- 支持文字、图片和图文混合消息；其余类型显示“不支持的消息”。
-- 支持 Discord 原生回复、QQ 回复、QQ 群成员昵称解析和 `@昵称`。
-- 节点掉线后自动重连，本地队列负责失败重试，中央端负责去重和回复映射。
+> QQ 接入依赖 NapCat / OneBot 11，使用普通 QQ 账号时请自行评估账号风控和协议变动风险。
 
 ## 架构
 
 ```text
-NapCat ←→ QQ Node ─────┐
-                       │ WebSocket
-                       ▼
-                  Central Server ←→ Web 控制面板
-                       ▲
-                       │ WebSocket
-Discord API ←→ Discord Node
+                         ┌────────────────────┐
+                         │ Central Server     │
+                         │ API + Web + 流程编排 │
+                         └─────────┬──────────┘
+                                   │ WebSocket
+                    ┌──────────────┴──────────────┐
+                    │                             │
+             ┌──────▼──────┐               ┌──────▼────────┐
+             │ QQ Node     │               │ Discord Node  │
+             │ NapCat      │               │ Discord Bot   │
+             └─────────────┘               └───────────────┘
 ```
 
-中央服务器需要能被两个客户端访问。最简单的部署方式是给中央端开放一个高位 TCP 端口，例如
-`18080`。公网明文 HTTP/WS 会暴露管理登录和节点流量；长期公网运行建议再配置 HTTPS/WSS。
+| 组件           | 作用                                                                |
+| -------------- | ------------------------------------------------------------------- |
+| Central Server | 节点管理、会话验证、蓝图执行、翻译、审核、投递、日志和中央 Web 面板 |
+| QQ Node        | 连接 NapCat，负责 QQ 消息收发、规范化和本地队列                     |
+| Discord Node   | 连接 Discord Gateway，负责 Discord 消息收发、规范化和本地队列       |
+| Node Web       | 查看节点连接、队列和诊断信息                                        |
 
-## 系统要求
+## 功能
 
-- Node.js `22.22.0` 以上、`25` 以下；推荐 Node.js 24。
+- QQ 群和 Discord 频道双向转发，也支持一对多、多对一路由。
+- 在 Web 面板中用蓝图配置消息入口、翻译、审核、人工审核、固定文本和发送目标。
+- 翻译和审核使用 OpenAI 兼容接口；审核按 0～1 的违规分数和阈值分流。
+- 识别 QQ / Discord 原生回复，并把跨平台回复映射回另一端的原消息。
+- 支持文本、图片和图文消息；不支持的消息类型会以提示卡片转发。
+- 节点断线自动重连，中央端负责去重、投递确认和回复 ID 映射，节点本地保存失败重试队列。
+- 不依赖 MySQL、PostgreSQL、Redis 或 Docker；中央状态和节点数据写入各自的数据目录。
+
+## 消息渲染和审核
+
+### 文本消息
+
+纯文本消息不会把头像图片反复传给中央端。中央端发送包含头像引用的渲染规格，引用格式是平台和用户代号；目标节点先查本地头像缓存，缓存未命中时向中央端请求一次头像，然后在本地合成最终 PNG 卡片。
+
+### 含图片的消息
+
+消息本身包含图片，或者回复引用中包含普通图片时，由中央端下载并合成卡片，再把最终 PNG 下发给目标节点。普通图片无法完成审核时会按失败处理，不会直接放行。
+
+### 回复机器人卡片
+
+如果被回复的是 DisQord 自己发送的卡片，中央端可以通过投递映射找到原始消息。这种情况下：
+
+- 审核使用原始消息文本，不再把机器人生成的卡片图送给图片模型；
+- 卡片中的“被回复消息”显示原始文本，而不是再次嵌入机器人卡片；
+- 原始消息中如果还有真实图片，这些图片仍然按普通图片流程审核；
+- 回复发送时使用目标平台的原生 reply，并指向另一端对应的原消息。
+
+## 环境要求
+
+- Node.js `>=22.22.0 <25`，推荐 Node.js 24。
 - pnpm `10.14.0`。
-- Linux QQ/Discord 客户端服务器需要中文和 Emoji 字体；中央端只负责下载并规范化媒体。
-- QQ 服务器需要已登录的 NapCat。
-- Discord 服务器需要 Discord Bot Token。
+- 使用项目自带启动脚本需要 PM2；使用 systemd 部署时不需要 PM2。
+- QQ 节点：已登录的 NapCat，并启用 OneBot 11 WebSocket 服务端。
+- Discord 节点：Discord Bot Token、Message Content Intent，以及读取和发送消息的权限。
+- 实际发送卡片的 QQ / Discord 节点需要安装中文字体和彩色 Emoji 字体：
 
-Debian / Ubuntu 两台客户端服务器都安装字体（中央端不需要文字字体）：
+  ```bash
+  sudo apt update
+  sudo apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
+  sudo fc-cache -f
+  ```
 
-```bash
-apt update
-apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
-fc-cache -f
-fc-match 'Noto Sans CJK SC'
-fc-match 'Noto Color Emoji'
-```
-
-## 下载与构建
-
-三台服务器都从同一个仓库安装。使用 GitHub 传输和更新代码是标准做法：
+## 安装和构建
 
 ```bash
 git clone https://github.com/iyxddw/DisQord.git
 cd DisQord
-pnpm install --frozen-lockfile
-pnpm build
-```
 
-项目根目录的 `.npmrc` 已使用 npmmirror。若机器上没有 pnpm，可以使用 Node 自带的 Corepack：
-
-```bash
 corepack enable
 corepack prepare pnpm@10.14.0 --activate
-```
-
-所有启动命令都必须在项目根目录执行，否则程序可能找不到已经构建的网页文件。
-
-### PM2 启动脚本
-
-仓库根目录提供三个带前置检查的 PM2 脚本。它们不会自动切换目录，必须在 DisQord 项目根目录执行；
-脚本会检查对应环境文件、构建产物和 `pm2`，已存在的进程会重启，不会重复创建：
-
-```bash
-cd /root/DisQord
-bash pm2-start-central.sh   # 中央端
-bash pm2-start-qq.sh        # QQ 节点
-bash pm2-start-discord.sh   # Discord 节点
-```
-
-首次使用前先构建对应程序，例如：
-
-```bash
-pnpm --filter @disqord/central-server... build
-pnpm --filter @disqord/qq-node... build
-pnpm --filter @disqord/discord-node... build
-```
-
-也可以使用更新脚本。它会先检查本地修改，再获取当前分支的上游更新并执行快进合并，随后同步依赖。
-脚本按部署角色选择构建目标：中央端会同时构建中央服务端和中央 Web；节点端会同时构建节点程序和节点 Web，
-避免只更新其中一半导致协议或静态资源版本不一致：
-
-```bash
-cd /root/DisQord
-bash update.sh                         # 空格多选，回车确认；完成后自动执行对应 start 脚本
-bash update.sh central --yes           # 无交互更新中央端
-bash update.sh qq --yes                # 更新并启动/重启 QQ 节点
-bash update.sh all --yes --verify      # 全部构建，并执行 typecheck/test
-```
-
-脚本不会强制覆盖已跟踪的未提交修改；本地构建可使用 `--no-pull`。默认会在构建成功后直接调用所选角色的
-`pm2-start-*.sh`（该脚本会启动或重启对应 PM2 进程）。如果只想构建，加上 `--no-restart`。使用 systemd
-部署时请加 `--no-restart`，构建完成后手动重启对应的 systemd 服务。
-
-## 从零启动
-
-以下是“不使用 Docker、不使用 Caddy、不配置自启动”的最短流程。环境变量只在当前终端有效，
-关闭终端前请使用 `screen`、`tmux` 或其他进程管理方式保持程序运行。
-
-### 1. 中央服务器
-
-中央端直接监听 `18080`：
-
-```bash
-cd ~/DisQord
-mkdir -p data logs
-
-export CENTRAL_HOST=0.0.0.0
-export CENTRAL_PORT=18080
-export CENTRAL_DATA_PATH=./data/central.json
-export CENTRAL_AVATAR_CACHE_PATH=./data/avatar-cache
-export PAIRING_PEPPER="$(openssl rand -hex 48)"
-export COOKIE_SECURE=false
-
-pnpm --filter @disqord/central-server start
-```
-
-第一次生成的 `PAIRING_PEPPER` 必须长期保存。后续启动如果换成别的值，已登记客户端将无法继续
-认证。建议把环境变量保存到仅 root 可读的文件，例如 `central.env`：
-
-```bash
-chmod 600 central.env
-set -a
-. ./central.env
-set +a
-pnpm --filter @disqord/central-server start
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:18080/api/health
-```
-
-返回 `{"status":"ok",...}` 后，在浏览器打开：
-
-```text
-http://中央服务器地址:18080
-```
-
-首次进入时创建管理员密码。中央数据目录会保存 `state.ndjson`、`trace-log.ndjson`、
-`message-history.ndjson` 和 `blueprint-activity.ndjson`；首次启动新版时会自动把旧的
-`central.json` 拆分并改名为 `central.json.migrated-时间戳` 备份。目录中仍可能包含明文大模型
-API Key，不要提交到 Git 或公开发送。升级前请备份整个 `data` 目录。
-
-### 2. Discord 客户端
-
-在 Discord Developer Portal 创建应用和 Bot：
-
-1. 打开 **Message Content Intent**。
-2. 邀请 Bot 加入服务器。
-3. 至少授予 View Channel、Read Message History、Send Messages 和 Attach Files。
-4. 复制 Bot Token。
-
-如果 Discord Node 与 Central 在同一台机器，可使用 `127.0.0.1`：
-
-```bash
-cd ~/DisQord
-mkdir -p data logs
-
-export CENTRAL_WSS_URL=ws://127.0.0.1:18080/node
-export ALLOW_INSECURE_CENTRAL=true
-export DISCORD_BOT_TOKEN='你的 Bot Token'
-export NODE_CONFIG_PATH=./data/discord-node.json
-export NODE_QUEUE_PATH=./data/discord-queue.json
-export NODE_LOG_PATH=./logs/discord-node.jsonl
-export NODE_WEB_HOST=127.0.0.1
-export NODE_WEB_PORT=8091
-export NODE_WEB_TOKEN='至少16位的管理口令'
-export NODE_WEB_ROOT=./apps/node-web/dist
-
-pnpm --filter @disqord/discord-node start
-```
-
-如果 Discord Node 在另一台服务器，把 `127.0.0.1` 换成中央服务器公网 IP 或域名，并确保云
-安全组、防火墙和路由允许访问 `18080`。
-
-### 3. QQ 客户端
-
-先在 NapCat WebUI 启用 OneBot 11 WebSocket 服务端：
-
-- 监听地址：`127.0.0.1`
-- 端口：`3001`
-- Access Token：设置一个随机口令
-
-然后在同一台 QQ 服务器启动 QQ Node：
-
-```bash
-cd ~/DisQord
-mkdir -p data
-
-export CENTRAL_WSS_URL=ws://中央服务器地址:18080/node
-export ALLOW_INSECURE_CENTRAL=true
-export NAPCAT_ONEBOT_WS_URL=ws://127.0.0.1:3001
-export NAPCAT_ACCESS_TOKEN='NapCat 中设置的 Token'
-export NODE_CONFIG_PATH=./data/qq-node.json
-export NODE_QUEUE_PATH=./data/qq-queue.json
-export NODE_LOG_PATH=./logs/qq-node.jsonl
-export NODE_WEB_HOST=127.0.0.1
-export NODE_WEB_PORT=8090
-export NODE_WEB_TOKEN='至少16位的管理口令'
-export NODE_WEB_ROOT=./apps/node-web/dist
-
-pnpm --filter @disqord/qq-node start
-```
-
-不要把 NapCat 的 OneBot 端口开放到公网。中央服务器只需要访问 QQ Node 主动建立的连接。
-
-节点队列现在以可读的 JSON 文件保存，客户端日志以 JSONL 写入 `~/DisQord/logs/`，也可以在节点控制
-面板按等级和关键词查看。升级旧版本时，请把仍指向 `*.sqlite` 的 `NODE_QUEUE_PATH` 改成上面的
-`*.json` 路径；旧队列文件不会自动迁移，建议先停掉节点并备份后再切换。若启动时发现旧文件内容
-不是 JSON（例如曾经误创建的 `queue.sqlite`），节点会把它改名为带 `.invalid-时间戳` 的备份文件并
-从空队列继续启动，不会因为队列损坏退出。
-
-## 控制面板配置顺序
-
-### 客户端和聊天会话
-
-1. 启动 QQ Node 或 Discord Node。
-2. 打开中央面板的“绑定会话”，客户端会自动出现并列出机器人可见的群或频道；这个页面只负责新增绑定，已绑定会话在“聊天会话”页面管理。
-3. 选择目标会话。QQ 会自动显示群名，Discord 会自动显示服务器名和频道名。
-4. 点击发送验证码，程序会向指定频道或群发送一条验证码。
-5. 将验证码回填到中央面板，点击“完成验证”后等待按钮完成校验，成功后才会显示绑定成功。验证码过期时可点击“重新发送验证码”，不需要删除会话。
-
-一个客户端可以绑定多个会话。验证后的会话会出现在“聊天会话”页面；悬停会话可添加备注或
-删除。要更换频道或群，删除旧会话后在“绑定会话”重新完成验证码流程。
-
-### 转发蓝图
-
-1. 打开“转发蓝图”，选择一个已验证会话并添加“消息入口”。
-2. 按需添加“翻译”“审核”“人工审核”和“固定文本”模块。
-3. 再选择目标会话并添加“发送目标”。
-4. 从左到右连接模块。审核和人工审核节点右侧上方是“通过”，下方是“拦截”；点击已有连线可删除。
-5. 填写蓝图名称并点击“保存并发布”。双向互通需要建立两条独立流水线。
-
-推荐的常规路径：
-
-```text
-消息入口 → 翻译 → 审核 ──通过──→ 人工审核 ──通过──→ 发送目标
-                       └─拦截──→ 固定文本 → 发送目标
-                                      人工审核 └─拦截──→ 固定文本 → 发送目标
-```
-
-审核模块的滑块表示允许的最高违规分数：模型分数小于或等于阈值时走“通过”，高于阈值时走
-“拦截”。提示词直接填写在翻译或审核模块下方，不再使用单独的全局提示词页面。固定文本模块会
-替换当前处理文本，适合输出“内容未通过审核”等提示。
-
-翻译、审核和固定文本只修改流水线中的文字。每个发送目标都会自动读取消息入口收到的头像、昵称、
-附件、时间和回复信息。纯文本渲染规格只携带“平台:用户代号”的头像引用；目标客户端先查本地
-头像缓存，未命中时再向中央端请求一次规范化头像并落盘，然后使用 Skia Canvas 本地渲染 PNG。
-含图片或回复图片的消息仍由中央端合成 PNG 后直接下发，无需额外添加图片合成节点。旧蓝图中的图片合成节点仍然兼容。固定文本不会在半透明区域泄露原文字，
-但原消息携带的图片附件仍会按“只处理文字”的规则保留。
-
-手机或窄屏打开蓝图时会自动切换成纵向只读卡片，可以查看模块配置、当前连接、分支路径和运行状态，
-但不能编辑、改线、发布或发送模拟消息。页面顶部会提示前往桌面端完成这些操作。新模块在桌面端添加时
-会自动连接到当前流程末尾。
-
-模拟输入运行时，节点先显示浅绿色运行底层；更亮的绿色附层会快速推进到 50%，之后每隔随机 0.5～2 秒
-继续向前移动，并在接近 100% 时逐渐减速。只有当前节点真实完成时才显示 100%，随后立即熄灭当前节点，
-并以 50% 的附层点亮实际选中的下一节点。模拟输入点击“发送”后也直接显示 50%。“保存并运行”和
-“发布新版本”在请求期间会锁定并显示加载动画，避免重复提交。真实消息不会因为模拟间隔设置而增加延迟。
-蓝图活动使用长轮询读取，页面保持打开时通常只会有一条等待中的活动请求，而不会持续高频刷新接口。
-
-删除节点有两种方法：
-
-- 点击节点右侧的垃圾桶按钮。
-- 选中节点后按 `Delete` 或 `Backspace`。
-
-点击一条已有连线会立即取消这条连接。人工审核节点会暂停该分支，并把消息放入“人工审核”页面；
-管理员选择批准或拦截后，流水线从对应出口继续。“一键清除”会删除审核记录，仍在等待的消息不会
-继续转发。
-
-发布后的版本不会被原地覆盖。再次编辑并发布会创建新版本，旧版本保留归档。左侧“已保存蓝图”
-可以切换运行状态、重新打开或删除整个蓝图。多个处于“运行中”的蓝图会同时处理消息。
-
-### 大模型与审核
-
-在“基础设置”填写：
-
-- API 基础地址，例如 `https://api.deepseek.com/v1`
-- API Key
-- 翻译模型
-- 文字审核模型
-- 超时、重试和并发数
-
-此外可以在基础设置中调整“蓝图模拟节点间隔”。它只影响模拟输入的逐节点播放速度，不会给真实消息
-增加延迟。
-
-基础设置只管理 API 连接和模型名称。所有生产提示词、记忆模式和审核阈值均保存在对应蓝图版本
-中。推荐提示词和结构化输出约束见 [`docs/PROMPTS.md`](docs/PROMPTS.md)。
-
-如果消息需要尽快到达，可以在基础设置打开“疾速模式”。它会关闭头像和附件下载、图片合成以及
-客户端的批量上传窗口，中央仍然执行翻译和审核，但节点改为发送纯文本（保留发送者昵称）。同一
-目标的发送间隔由基础设置中的“疾速发送间隔（毫秒）”控制，默认 1500ms，设为 0 可取消间隔；
-单条发送失败最多重试 4 次，不同目标可以并行处理。图片在疾速模式下无法交给识图模型，审核会按
-“无法审核”处理并走拦截分支。关闭疾速模式后恢复 PNG 卡片和 2.5/2/1.5/1 秒的批量聚合窗口。
-
-“运行日志”可以按设备、Debug、Info、Warn 和 Error 筛选，并记录入口消息、蓝图和节点、翻译原始
-返回、审核原始评分、渲染结果、发送排队、平台发送成功与失败。选择 QQ 或 Discord 客户端时，中央服务
-会通过加密节点通道只拉取 Warn 和 Error 日志；事件名称会显示为中文，日志不会记录 API Key。
-
-## 消息渲染规则
-
-- 发往 QQ 的卡片界面文字全部为中文。
-- 发往 Discord 的卡片界面文字全部为英文。
-- 翻译结果显示在正文，原文显示在下方半透明区域。
-- 回复文字或回复图片显示在正文上方；平台无法提供历史预览时明确显示“无可用预览”。
-- Emoji 由目标客户端的 `@napi-rs/canvas`（Skia）渲染；请在实际发送图片的 QQ/Discord 服务器安装
-  `fonts-noto-cjk` 和 `fonts-noto-color-emoji`，修改字体后重启对应客户端。
-- 每张卡片保留短 Trace ID，可以在“运行日志”中定位处理过程。
-
-## 节点诊断面板
-
-节点面板默认只监听 `127.0.0.1`。从自己的电脑通过 SSH 隧道访问：
-
-```bash
-ssh -L 8090:127.0.0.1:8090 用户名@QQ服务器
-```
-
-浏览器打开 `http://127.0.0.1:8090`，使用 `NODE_WEB_TOKEN` 登录。Discord 节点如果使用
-`8091`，隧道两端端口也相应改为 `8091`。
-
-## 更新
-
-在对应服务器执行：
-
-```bash
-cd ~/DisQord
-git pull --ff-only
 pnpm install --frozen-lockfile
 pnpm build
 ```
 
-然后停止并重新启动该服务器上的程序。只修改中央端功能时通常只需更新 Central；修改 NapCat
-适配器时必须更新 QQ Node；修改 Discord 适配器时必须更新 Discord Node。
+如果机器已经安装对应版本的 pnpm，可以跳过 Corepack 步骤。
 
-如果为了节省时间采用筛选构建，中央端必须同时构建它依赖的共享包。命令中的 `...` 不能省略，
-否则可能出现网页已经支持新蓝图节点、运行中的后端却仍使用旧枚举的情况：
+## 配置和启动
 
-```bash
-pnpm --filter @disqord/central-server... build
-pnpm --filter @disqord/central-web build
+生产环境建议使用 `systemd + Caddy`，完整步骤见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。快速测试或使用 PM2 时，项目根目录的启动脚本会读取三个环境文件：
+
+```text
+central.env    # Central Server
+qq.env         # QQ Node
+discord.env    # Discord Node
 ```
 
-更新中央端前建议备份整个数据目录（新版包含多个 ndjson 文件）：
+环境变量示例见 [`.env.example`](.env.example) 和 [`deploy/native/`](deploy/native/)。至少需要配置：
+
+- Central：监听地址、数据路径、`PAIRING_PEPPER` 和 Cookie 安全选项；
+- QQ Node：Central WebSocket 地址、NapCat OneBot 地址和 Access Token；
+- Discord Node：Central WebSocket 地址和 Discord Bot Token。
+
+不要把填入真实 Token、API Key 或 `PAIRING_PEPPER` 的环境文件提交到 Git。
+
+构建完成并准备好环境文件后，可以分别启动：
 
 ```bash
-cp -a data "data-backup-$(date +%F-%H%M%S)"
+bash start-central.sh
+bash start-qq.sh
+bash start-discord.sh
 ```
 
-如果需要手动提前拆分旧文件，可在停止 Central 后运行 `node split-central.js data/central.json`；
-新版 Central 也会在首次启动时自动迁移，通常不需要手动执行。
-
-## 常见问题
-
-### 页面能打开，但客户端不在线
-
-- 检查 `CENTRAL_WSS_URL` 是否以 `/node` 结尾。
-- 使用明文 `ws://` 时必须设置 `ALLOW_INSECURE_CENTRAL=true`。
-- 确认中央服务器端口已在云安全组和防火墙放行。
-- 不要删除节点的 `node.json`，其中保存长期身份。
-
-### QQ Node 连不上 NapCat
-
-- NapCat 必须已经登录 QQ。
-- 启用的是 WebSocket 服务端，不是反向 WebSocket 客户端。
-- URL、端口和 Access Token 必须完全一致。
-- NapCat 与 QQ Node 在同一台机器时使用 `ws://127.0.0.1:3001`。
-
-### Discord 能上线但读不到消息正文
-
-- 打开 Message Content Intent。
-- 检查服务器和具体频道的权限覆盖。
-- Bot 需要 View Channel 和 Read Message History。
-
-### 卡片中文或 Emoji 显示方框
-
-在实际发送图片的 QQ 或 Discord 客户端服务器执行：
-
-```bash
-apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
-fc-cache -f
-```
-
-然后重启对应节点。含图片消息才会传输中央端合成后的 PNG；纯文本只传输头像引用，节点按需获取头像并
-负责最终绘制文字，因此只在中央端安装字体不会修复彩色 Emoji。
-
-### `pnpm install` 忽略 esbuild 构建脚本
-
-执行：
-
-```bash
-pnpm approve-builds
-```
-
-选择 `esbuild` 后重新运行 `pnpm install` 和 `pnpm build`。
-
-更多排障和备份说明见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。更完整的 systemd、HTTPS/WSS
-部署方案见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
-
-## 开发
-
-```bash
-pnpm install
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-```
-
-常用开发命令：
+这些脚本使用 PM2，并会启动或重启对应进程。开发时也可以使用：
 
 ```bash
 pnpm dev:central
 pnpm dev:central-web
 pnpm dev:qq
 pnpm dev:discord
+pnpm dev:node-web
 ```
 
-项目需求和安全边界见 [`PROJECT_REQUIREMENTS.md`](PROJECT_REQUIREMENTS.md)。
+## 第一次使用
+
+1. 启动 Central Server，以及至少一个平台节点。
+2. 打开中央 Web 面板，第一次进入时设置管理员密码。
+3. 在“绑定会话”中选择节点上报的 QQ 群或 Discord 频道。
+4. 发送验证码，并把验证码回填到面板完成验证。
+5. 在“转发蓝图”中添加消息入口、处理模块和发送目标，然后保存并发布。
+6. 双向转发需要为两个方向分别创建一条蓝图。
+
+蓝图只能使用已经验证的会话。更换 QQ 群或 Discord 频道时，需要重新绑定并验证。
+
+## 更新
+
+交互式更新：
+
+```bash
+bash update.sh
+```
+
+菜单使用方向键移动、空格选择、回车确认。构建成功后会自动执行所选角色对应的启动脚本，重启对应的 PM2 进程。
+
+也可以直接指定目标：
+
+```bash
+bash update.sh central --yes
+bash update.sh qq --yes
+bash update.sh discord --yes
+bash update.sh all --yes --verify
+```
+
+常用选项：
+
+```bash
+bash update.sh qq --no-pull       # 不拉取远端，只构建当前工作区
+bash update.sh central --no-restart
+bash update.sh all --yes --verify # 更新后运行完整 typecheck 和 test
+```
+
+默认更新流程是：检查工作区 → 快进拉取当前分支 → 安装锁定依赖 → 构建选中角色 → 重启选中角色。检测到未提交的跟踪文件修改时会停止拉取，避免覆盖本地代码；需要先提交、暂存或使用 `--no-pull`。
+
+## 开发
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+仓库采用 pnpm workspace，主要目录如下：
+
+```text
+apps/
+  central-server/   中央服务端
+  central-web/      中央 Web 面板
+  qq-node/          QQ 节点
+  discord-node/     Discord 节点
+  node-web/         节点诊断面板
+packages/
+  adapter-*         平台适配器
+  blueprint/        蓝图执行引擎
+  card-renderer/    卡片渲染和媒体处理
+  llm/              翻译与审核服务
+  node-runtime/     节点运行时
+  queue/            本地队列
+  shared/           共享类型和协议
+  transport/        节点通信和认证
+```
+
+## 文档
+
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)：systemd、Caddy、HTTPS/WSS 和三台服务器部署。
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md)：日志、备份、恢复、回滚和故障排查。
+- [`docs/PROMPTS.md`](docs/PROMPTS.md)：翻译和审核模块的提示词建议。
+- [`PROJECT_REQUIREMENTS.md`](PROJECT_REQUIREMENTS.md)：项目范围、约束和实现要求。
+
+## 许可
+
+Apache License 2.0，见 [`LICENSE`](LICENSE)。
