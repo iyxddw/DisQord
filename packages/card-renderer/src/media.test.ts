@@ -37,4 +37,32 @@ describe('downloadExternalImage', () => {
     expect(image.dataUri).toMatch(/^data:image\/png;base64,/u);
     expect((await sharp(image.bytes).metadata()).format).toBe('png');
   });
+
+  it('resizes normalized media when the central render contract requests it', async () => {
+    const source = await sharp({
+      create: {
+        width: 640,
+        height: 360,
+        channels: 4,
+        background: '#5865f2',
+      },
+    })
+      .jpeg()
+      .toBuffer();
+    const fetchImplementation = vi.fn(async () => {
+      return new Response(source, {
+        headers: { 'content-type': 'image/jpeg' },
+      });
+    }) as unknown as typeof fetch;
+
+    const image = await downloadExternalImage('https://1.1.1.1/message.jpg', {
+      fetchImplementation,
+      resize: { width: 128, height: 128, fit: 'cover' },
+    });
+    const metadata = await sharp(image.bytes).metadata();
+
+    expect(metadata.format).toBe('png');
+    expect(metadata.width).toBe(128);
+    expect(metadata.height).toBe(128);
+  });
 });

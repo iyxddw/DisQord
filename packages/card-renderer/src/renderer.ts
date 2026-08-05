@@ -1,4 +1,8 @@
-import sharp from 'sharp';
+import { createCanvas, loadImage, type Image, type SKRSContext2D } from '@napi-rs/canvas';
+import {
+  messageCardRenderSpecSchema,
+  type MessageCardRenderSpec,
+} from '@disqord/shared';
 import { z } from 'zod';
 
 const dataImageSchema = z.string().regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u);
@@ -31,8 +35,10 @@ const horizontalPadding = 56;
 const contentWidth = width - horizontalPadding * 2;
 const lineHeight = 48;
 
-export async function renderMessageCards(candidate: MessageCardInput): Promise<Buffer[]> {
-  const input = messageCardInputSchema.parse(candidate);
+export async function renderMessageCards(
+  candidate: MessageCardInput | MessageCardRenderSpec,
+): Promise<Buffer[]> {
+  const input = await normalizeCanvasInput(candidate);
   const displayText = input.unsupportedType
     ? unsupportedMessage(input.unsupportedType, input.targetLanguage ?? 'en')
     : input.primaryText;
@@ -42,20 +48,299 @@ export async function renderMessageCards(candidate: MessageCardInput): Promise<B
   const cards: Buffer[] = [];
 
   for (let page = 0; page < pageCount; page += 1) {
-    const svg = buildMessageCardSvg({
-      ...input,
-      primaryText: (primaryPages[page] ?? []).join('\n'),
-      ...(input.originalText ? { originalText: (originalPages[page] ?? []).join('\n') } : {}),
-      images: page === 0 ? input.images : [],
-      ...(pageCount > 1
-        ? { traceLabel: `${input.traceLabel ?? ''} ${page + 1}/${pageCount}`.trim() }
-        : {}),
-    });
-    cards.push(await sharp(Buffer.from(svg)).png({ compressionLevel: 9 }).toBuffer());
+    cards.push(
+      await renderMessageCardCanvas({
+        ...input,
+        primaryText: (primaryPages[page] ?? []).join('\n'),
+        ...(input.originalText ? { originalText: (originalPages[page] ?? []).join('\n') } : {}),
+        images: page === 0 ? input.images : [],
+        ...(pageCount > 1
+          ? { traceLabel: `${input.traceLabel ?? ''} ${page + 1}/${pageCount}`.trim() }
+          : {}),
+      }),
+    );
   }
   return cards;
 }
 
+type CanvasCardInput = MessageCardInput;
+
+async function normalizeCanvasInput(
+  candidate: MessageCardInput | MessageCardRenderSpec,
+): Promise<CanvasCardInput> {
+  const legacy = messageCardInputSchema.safeParse(candidate);
+  if (legacy.success) return legacy.data;
+
+  const spec = messageCardRenderSpecSchema.parse(candidate);
+  const images = spec.images.map((media) => media.dataUri);
+  const replyImage = spec.reply?.imagePreview?.dataUri;
+  return {
+    sourcePlatform: spec.sourcePlatform,
+    targetLanguage: spec.targetLanguage,
+    sourceName: spec.sourceName,
+    senderName: spec.senderName,
+    ...(spec.senderAvatar ? { senderAvatar: spec.senderAvatar } : {}),
+    sentAt: spec.sentAt,
+    primaryText: spec.primaryText,
+    ...(spec.originalText ? { originalText: spec.originalText } : {}),
+    images,
+    ...(spec.reply
+      ? {
+          reply: {
+            senderName: spec.reply.senderName,
+            ...(spec.reply.textPreview ? { textPreview: spec.reply.textPreview } : {}),
+            ...(replyImage ? { imagePreview: replyImage } : {}),
+          },
+        }
+      : {}),
+    ...(spec.unsupportedType ? { unsupportedType: spec.unsupportedType } : {}),
+    ...(spec.traceLabel ? { traceLabel: spec.traceLabel } : {}),
+  };
+}
+
+async function renderMessageCardCanvas(input: CanvasCardInput): Promise<Buffer> {
+  const language = input.targetLanguage ?? 'en';
+  const primaryLines = wrapText(
+    input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
+    42,
+  );
+  const replyLines = input.reply
+    ? wrapText(
+        input.reply.textPreview ||
+          (input.reply.imagePreview
+            ? ''
+            : language === 'zh'
+              ? '无可用预览'
+              : 'Preview unavailable'),
+        52,
+      ).slice(0, 4)
+    : [];
+  const replyImageHeight = input.reply?.imagePreview ? 180 : 0;
+  const originalLines = input.originalText ? wrapText(input.originalText, 52) : [];
+  const replyHeight = input.reply
+    ? 64 + replyLines.length * 32 + replyImageHeight + (replyImageHeight ? 16 : 0)
+    : 0;
+  const primaryHeight = Math.max(1, primaryLines.length) * lineHeight;
+  const imageHeight = input.images.length * 420;
+  const originalHeight = input.originalText ? 88 + Math.max(1, originalLines.length) * 36 : 0;
+  const height = Math.min(
+    8_192,
+    208 + replyHeight + primaryHeight + imageHeight + originalHeight + 96,
+  );
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  const fontFamily = '"Noto Color Emoji", "Noto Sans CJK SC", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif';
+  ctx.textBaseline = 'alphabetic';
+
+  const background = ctx.createLinearGradient(0, 0, width, height);
+  background.addColorStop(0, '#151925');
+  background.addColorStop(0.55, '#11131a');
+  background.addColorStop(1, '#1c1730');
+  ctx.fillStyle = background;
+  roundedRect(ctx, 0, 0, width, height, 28);
+  ctx.fill();
+
+  const avatar = input.senderAvatar ? await loadDataImage(input.senderAvatar) : undefined;
+  if (avatar) {
+    ctx.save();
+    circleClip(ctx, horizontalPadding + 38, 86, 38);
+    drawCover(ctx, avatar, horizontalPadding, 48, 76, 76);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = '#5262a8';
+    ctx.beginPath();
+    ctx.arc(horizontalPadding + 38, 86, 38, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = `700 32px ${fontFamily}`;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.fillText(input.senderName.slice(0, 1).toUpperCase(), horizontalPadding + 38, 98);
+    ctx.textAlign = 'start';
+  }
+
+  ctx.font = `700 30px ${fontFamily}`;
+  ctx.fillStyle = '#f7f8ff';
+  ctx.fillText(input.senderName, horizontalPadding + 98, 78);
+  ctx.font = `20px ${fontFamily}`;
+  ctx.fillStyle = '#aeb6cc';
+  ctx.fillText(`${input.sourceName} · ${input.sentAt}`, horizontalPadding + 98, 112);
+  ctx.font = `700 19px ${fontFamily}`;
+  ctx.fillStyle = '#91a7ff';
+  ctx.textAlign = 'right';
+  ctx.fillText(input.sourcePlatform.toUpperCase(), width - horizontalPadding, 76);
+  ctx.textAlign = 'start';
+
+  let cursorY = 170;
+  if (input.reply) {
+    const top = cursorY;
+    cursorY += replyHeight + 24;
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    roundedRect(ctx, horizontalPadding, top, contentWidth, replyHeight, 18);
+    ctx.fill();
+    ctx.fillStyle = '#91a7ff';
+    roundedRect(ctx, horizontalPadding, top, 5, replyHeight, 3);
+    ctx.fill();
+    ctx.font = `700 24px ${fontFamily}`;
+    ctx.fillStyle = '#aab8ff';
+    ctx.fillText(input.reply.senderName, horizontalPadding + 24, top + 34);
+    drawLines(ctx, replyLines, horizontalPadding + 24, top + 70, 30, `25px ${fontFamily}`, '#c8cede');
+    if (input.reply.imagePreview) {
+      const image = await loadDataImage(input.reply.imagePreview);
+      if (image) {
+        drawContain(
+          ctx,
+          image,
+          horizontalPadding + 24,
+          top + 54 + replyLines.length * 32,
+          contentWidth - 48,
+          replyImageHeight,
+        );
+      }
+    }
+  }
+
+  const primaryTop = cursorY;
+  cursorY += primaryHeight + 32;
+  drawLines(
+    ctx,
+    primaryLines.length ? primaryLines : [' '],
+    horizontalPadding,
+    primaryTop + 38,
+    lineHeight,
+    `500 34px ${fontFamily}`,
+    '#f7f8ff',
+  );
+
+  for (const [index, imageData] of input.images.entries()) {
+    const y = cursorY + index * 420;
+    ctx.fillStyle = '#0b0d13';
+    roundedRect(ctx, horizontalPadding, y, contentWidth, 396, 22);
+    ctx.fill();
+    const image = await loadDataImage(imageData);
+    if (image) {
+      ctx.save();
+      roundedRect(ctx, horizontalPadding, y, contentWidth, 396, 22);
+      ctx.clip();
+      drawContain(ctx, image, horizontalPadding, y, contentWidth, 396);
+      ctx.restore();
+    }
+  }
+  cursorY += imageHeight;
+
+  if (input.originalText) {
+    const top = cursorY + 8;
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    roundedRect(ctx, horizontalPadding, top, contentWidth, originalHeight, 22);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.font = `700 18px ${fontFamily}`;
+    ctx.fillStyle = '#aeb6cc';
+    ctx.fillText(language === 'zh' ? '原文' : 'ORIGINAL', horizontalPadding + 28, top + 38);
+    drawLines(
+      ctx,
+      originalLines,
+      horizontalPadding + 28,
+      top + 80,
+      36,
+      `26px ${fontFamily}`,
+      '#e2e5ef',
+    );
+  }
+
+  ctx.font = `17px ${fontFamily}`;
+  ctx.fillStyle = '#737c92';
+  ctx.fillText(`DisQord · ${input.traceLabel ?? ''}`, horizontalPadding, height - 38);
+  return canvas.toBuffer('image/png');
+}
+
+async function loadDataImage(dataUri: string): Promise<Image | undefined> {
+  try {
+    const match = /^data:image\/[\w.+-]+;base64,(.+)$/u.exec(dataUri);
+    return match ? await loadImage(Buffer.from(match[1]!, 'base64')) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function roundedRect(
+  ctx: SKRSContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+): void {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, radius);
+}
+
+function circleClip(ctx: SKRSContext2D, x: number, y: number, radius: number): void {
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.clip();
+}
+
+function drawCover(
+  ctx: SKRSContext2D,
+  image: Image,
+  x: number,
+  y: number,
+  widthValue: number,
+  heightValue: number,
+): void {
+  const scale = Math.max(widthValue / image.width, heightValue / image.height);
+  const widthScaled = image.width * scale;
+  const heightScaled = image.height * scale;
+  ctx.drawImage(
+    image,
+    x + (widthValue - widthScaled) / 2,
+    y + (heightValue - heightScaled) / 2,
+    widthScaled,
+    heightScaled,
+  );
+}
+
+function drawContain(
+  ctx: SKRSContext2D,
+  image: Image,
+  x: number,
+  y: number,
+  widthValue: number,
+  heightValue: number,
+): void {
+  const scale = Math.min(widthValue / image.width, heightValue / image.height);
+  const widthScaled = image.width * scale;
+  const heightScaled = image.height * scale;
+  ctx.drawImage(
+    image,
+    x + (widthValue - widthScaled) / 2,
+    y + (heightValue - heightScaled) / 2,
+    widthScaled,
+    heightScaled,
+  );
+}
+
+function drawLines(
+  ctx: SKRSContext2D,
+  lines: readonly string[],
+  x: number,
+  y: number,
+  spacing: number,
+  font: string,
+  color: string,
+): void {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  for (const [index, line] of lines.entries()) ctx.fillText(line || ' ', x, y + index * spacing);
+}
+
+/**
+ * @deprecated Kept for old integrations and snapshot tests. Production
+ * deliveries use renderMessageCards(), which is Canvas/Skia based and runs on
+ * the target platform node.
+ */
 export function buildMessageCardSvg(candidate: MessageCardInput): string {
   const input = messageCardInputSchema.parse(candidate);
   const language = input.targetLanguage ?? 'en';
@@ -167,7 +452,7 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
           )
           .join('')}
         <style>
-          text { font-family: "Noto Sans CJK SC", "Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif; }
+          text { font-family: "Noto Color Emoji", "Noto Sans CJK SC", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif; }
           .sender { fill: #f7f8ff; font-size: 30px; font-weight: 700; }
           .meta { fill: #aeb6cc; font-size: 20px; }
           .platform { fill: #91a7ff; font-size: 19px; font-weight: 700; letter-spacing: 1px; }

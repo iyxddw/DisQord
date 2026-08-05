@@ -60,8 +60,6 @@ sudo -u disqord env npm_config_registry=https://registry.npmmirror.com \
 ### 2.1 准备中央数据目录
 
 ```bash
-sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
-sudo fc-cache -f
 sudo install -d -m 0750 -o disqord -g disqord /var/lib/disqord/central
 ```
 
@@ -168,6 +166,15 @@ Caddy 自动申请、续期证书并支持 WebSocket。浏览器打开 `https://
 
 先按第 1 节安装 Node、pnpm、代码并完成构建。
 
+客户端节点负责把中央下发的渲染规范合成为最终 PNG。纯文本规格只携带头像引用，节点在本地缓存未命中时
+向中央端按需请求头像；含图片消息由中央端直接下发合成后的 PNG。请在 QQ、Discord 两台客户端服务器
+都安装中文字体和彩色 Emoji 字体；中央服务器不需要安装这些字体：
+
+```bash
+sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
+sudo fc-cache -f
+```
+
 ### 3.1 NapCat
 
 在 NapCat WebUI 中启用 OneBot 11 WebSocket 服务端：
@@ -256,7 +263,9 @@ sudo systemctl status disqord-discord --no-pager
 
 中央面板“基础设置”填写 OpenAI Chat Completions 兼容 API 地址、密钥、翻译模型和审核模型。
 翻译与审核提示词、记忆模式和审核阈值直接在“转发蓝图”的相应模块中配置。审核仅处理当前
-流水线文字并按违规分数从两个出口分流；发送目标会自动读取原消息资料并完成图片合成。
+流水线文字并按违规分数从两个出口分流；纯文本消息的渲染规格只包含平台和用户头像代号，发送目标的
+客户端优先使用本地头像缓存，未命中时向中央端请求一次头像；含图片消息由中央端合成后再发送。最终
+文字卡片仍由发送目标的客户端使用 Skia Canvas 完成。
 
 若需要降低延迟，可在“基础设置”打开“疾速模式”。该模式关闭图片下载和 PNG 合成，客户端直接发送
 带昵称的文本；翻译和审核仍然执行，图片审核在无法提供图片时按无法审核处理。疾速发送间隔由基础

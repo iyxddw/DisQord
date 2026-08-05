@@ -14,6 +14,11 @@ export async function downloadExternalImage(
   options: {
     readonly maxBytes?: number;
     readonly maxRedirects?: number;
+    readonly resize?: {
+      readonly width: number;
+      readonly height: number;
+      readonly fit?: 'cover' | 'contain' | 'fill' | 'inside' | 'outside';
+    };
     readonly fetchImplementation?: typeof fetch;
   } = {},
 ): Promise<DownloadedImage> {
@@ -45,10 +50,17 @@ export async function downloadExternalImage(
     if (declaredLength > maximumBytes) throw new Error('Image exceeds the configured size limit.');
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > maximumBytes) throw new Error('Image exceeds the configured size limit.');
-    // librsvg does not reliably decode embedded WebP/GIF data URIs on every Linux
-    // distribution. Normalizing remote media to PNG keeps avatars and attachments
-    // portable when the final SVG is rasterized by sharp.
-    const normalizedBytes = await sharp(bytes, { animated: false }).rotate().png().toBuffer();
+    // Normalize remote media to PNG so every client-side Canvas build receives a
+    // predictable format, regardless of whether the source was WebP or GIF.
+    const image = sharp(bytes, { animated: false }).rotate();
+    const normalizedBytes = await (options.resize
+      ? image.resize(options.resize.width, options.resize.height, {
+          fit: options.resize.fit ?? 'inside',
+        })
+      : image
+    )
+      .png()
+      .toBuffer();
     return {
       bytes: normalizedBytes,
       mimeType: 'image/png',

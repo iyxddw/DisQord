@@ -79,6 +79,7 @@ describe('message card renderer', () => {
       images: [],
     });
     expect(withImage).toContain('Noto Color Emoji');
+    expect(withImage).toContain('font-family: "Noto Color Emoji", "Noto Sans CJK SC"');
     expect(withImage).toContain('data:image/png;base64,aGVsbG8=');
     expect(withImage).not.toContain('Preview unavailable');
 
@@ -93,5 +94,38 @@ describe('message card renderer', () => {
       images: [],
     });
     expect(withoutPreview).toContain('无可用预览');
+  });
+
+  it('renders a central Base64 spec locally with avatar and attachments', async () => {
+    const image = `data:image/png;base64,${(
+      await sharp({
+        create: {
+          width: 12,
+          height: 8,
+          channels: 4,
+          background: '#43d3c4',
+        },
+      })
+        .png()
+        .toBuffer()
+    ).toString('base64')}`;
+
+    const [png] = await renderMessageCards({
+      sourcePlatform: 'qq',
+      targetLanguage: 'zh',
+      sourceName: '测试群',
+      senderName: '彩色 🐎',
+      senderAvatar: image,
+      sentAt: '2026-08-05 12:00',
+      primaryText: '本地合成 🐎',
+      originalText: 'original',
+      images: [{ dataUri: image, width: 12, height: 8 }],
+      traceLabel: 'local-render',
+    });
+
+    const metadata = await sharp(png).metadata();
+    expect(metadata.format).toBe('png');
+    expect(metadata.width).toBe(1_000);
+    expect(png.byteLength).toBeGreaterThan(1_000);
   });
 });

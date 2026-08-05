@@ -9,8 +9,12 @@ import {
 } from '@disqord/shared';
 import { describe, expect, it, vi } from 'vitest';
 
-import { MessageOrchestrator, type MessageProcessor } from './orchestrator.js';
-import { InMemoryStateStore } from './state-store.js';
+import {
+  CentralMessageProcessor,
+  MessageOrchestrator,
+  type MessageProcessor,
+} from './orchestrator.js';
+import { InMemorySecretStore, InMemoryStateStore } from './state-store.js';
 
 function message(nodeId: string, text = '你好'): MessageEnvelope {
   return {
@@ -251,9 +255,9 @@ describe('blueprint message pipeline', () => {
     // Upload acknowledgement is intentionally fast.  The LLM work and the
     // single grouped delivery command continue in the background.
     await waitFor(() => setup.sendToNode.mock.calls.length === 1);
-    expect((await setup.store.get<{ status: string }>('message-upload-batch', batchId))?.value.status).toBe(
-      'completed',
-    );
+    expect(
+      (await setup.store.get<{ status: string }>('message-upload-batch', batchId))?.value.status,
+    ).toBe('completed');
     expect(peakTranslations).toBe(2);
     expect(setup.sendToNode).toHaveBeenCalledTimes(1);
     expect(setup.sendToNode).toHaveBeenCalledWith(
@@ -278,7 +282,256 @@ describe('blueprint message pipeline', () => {
     const batchActivities = activities.filter((activity) => activity.batchId === batchId);
     expect(batchActivities.length).toBeGreaterThan(0);
     expect(new Set(batchActivities.map((activity) => activity.batchSize))).toEqual(new Set([2]));
-    expect(new Set(batchActivities.map((activity) => activity.batchIndex))).toEqual(new Set([0, 1]));
+    expect(new Set(batchActivities.map((activity) => activity.batchIndex))).toEqual(
+      new Set([0, 1]),
+    );
+  });
+
+  it('sends a client render spec instead of central PNG bytes', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const setup = await fixture(
+      [node(input, 'simulated-input'), node(output, 'chat-output', { sessionRole: 'target' })],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      {
+        prepareRender: vi.fn(async (message, target, text) => ({
+          sourcePlatform: message.source.platform,
+          targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
+          sourceName: message.source.channelId,
+          senderName: message.sender.displayName,
+          sentAt: message.sentAt,
+          primaryText: text,
+          images: [],
+          traceLabel: message.traceId.slice(0, 8),
+        })),
+      },
+    );
+
+    await setup.orchestrator.handleSimulatedInput(setup.blueprint.id, input, '你好');
+
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver',
+      expect.objectContaining({
+        mode: 'card',
+        cards: [],
+        render: expect.objectContaining({
+          targetLanguage: 'en',
+          primaryText: '你好',
+          images: [],
+        }),
+      }),
+    );
+  });
+
+  it('uses a stable avatar key in client render specs', async () => {
+    const setup = await fixture([], [], {});
+    const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
+    const incoming = {
+      ...message(setup.sourceSession.nodeId),
+      sender: {
+        id: '12345',
+        displayName: 'Sender',
+        avatarUrl: 'https://q1.qlogo.cn/g?b=qq&nk=12345&s=640',
+      },
+    };
+
+    const spec = await processor.prepareRender(incoming, setup.targetSession, '你好', false);
+
+    expect(spec.senderAvatarKey).toBe('qq:12345');
+    expect(spec.senderAvatar).toBeUndefined();
+    expect(
+      (await setup.store.get<{ sourceUrl: string }>('avatar-source', 'qq:12345'))?.value,
+    ).toEqual({ sourceUrl: 'https://q1.qlogo.cn/g?b=qq&nk=12345&s=640' });
+  });
+
+  it('serves an avatar response for a node cache miss', async () => {
+    const avatar = 'data:image/png;base64,aGVsbG8=';
+    const resolveAvatar = vi.fn(async (avatarKey: string) =>
+      avatarKey === 'qq:12345' ? avatar : undefined,
+    );
+    const setup = await fixture([], [], { resolveAvatar });
+    const requestId = randomUUID();
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'avatar.request',
+      payload: { requestId, avatarKey: 'qq:12345' },
+      frameId: randomUUID(),
+    });
+
+    expect(resolveAvatar).toHaveBeenCalledWith('qq:12345');
+    expect(setup.sendToNode).toHaveBeenCalledWith(setup.targetSession.nodeId, 'avatar.response', {
+      requestId,
+      avatarKey: 'qq:12345',
+      dataUri: avatar,
+    });
+  });
+
+  it('renders messages with media centrally instead of sending the render spec', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const prepareRender = vi.fn(async () => ({
+      sourcePlatform: 'qq' as const,
+      targetLanguage: 'en' as const,
+      sourceName: 'qq-group',
+      senderName: 'Sender',
+      sentAt: new Date().toISOString(),
+      primaryText: 'should not be sent',
+      images: [],
+    }));
+    const render = vi.fn(async () => [Buffer.from('central-card')]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { prepareRender, render },
+    );
+    const incoming = {
+      ...message(setup.sourceSession.nodeId),
+      kind: 'image' as const,
+      text: undefined,
+      attachments: [
+        {
+          id: randomUUID(),
+          mimeType: 'image/png',
+          byteSize: 4,
+          sha256: 'a'.repeat(64),
+          sourceUrl: 'https://images.example.test/image.png',
+        },
+      ],
+    };
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    await waitFor(() => render.mock.calls.length === 1);
+    expect(prepareRender).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, '', false);
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    const batch = setup.sendToNode.mock.calls[0]![2] as {
+      deliveries: Record<string, unknown>[];
+    };
+    const command = batch.deliveries[0]!;
+    expect(command).toEqual(
+      expect.objectContaining({
+        mode: 'card',
+        cards: [Buffer.from('central-card').toString('base64')],
+      }),
+    );
+    expect(command).not.toHaveProperty('render');
+  });
+
+  it('uses the inverse delivery mapping for a native reply in the opposite session', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const render = vi.fn(async () => [Buffer.from('card')]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { render },
+    );
+    const original = {
+      ...message(setup.sourceSession.nodeId),
+      source: {
+        ...message(setup.sourceSession.nodeId).source,
+        messageId: '100',
+      },
+    };
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: original,
+      frameId: randomUUID(),
+    });
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    const forwardBatch = setup.sendToNode.mock.calls[0]![2] as {
+      deliveries: Record<string, unknown>[];
+    };
+    const forwardCommand = forwardBatch.deliveries[0]!;
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'message.delivered',
+      payload: { ...forwardCommand, targetMessageId: 'aaa' },
+      frameId: randomUUID(),
+    });
+
+    const reverseInput = randomUUID();
+    const reverseOutput = randomUUID();
+    const reverseBlueprintId = randomUUID();
+    const now = new Date().toISOString();
+    const reverseBlueprint: Blueprint = {
+      id: reverseBlueprintId,
+      name: 'Reverse pipeline',
+      enabled: true,
+      activeVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const reverseVersion: BlueprintVersion = {
+      id: randomUUID(),
+      blueprintId: reverseBlueprintId,
+      version: 1,
+      status: 'published',
+      nodes: [
+        node(reverseInput, 'chat-input', { sessionId: setup.targetSession.id }),
+        node(reverseOutput, 'chat-output', { sessionId: setup.sourceSession.id }),
+      ],
+      edges: [{ id: randomUUID(), sourceNodeId: reverseInput, targetNodeId: reverseOutput }],
+      createdBy: randomUUID(),
+      createdAt: now,
+      publishedAt: now,
+    };
+    await setup.store.set('blueprint', reverseBlueprintId, reverseBlueprint);
+    await setup.store.set('blueprint-version', `${reverseBlueprintId}:1`, reverseVersion);
+
+    const reply = {
+      ...message(setup.targetSession.nodeId, '反向回复'),
+      source: {
+        nodeId: setup.targetSession.nodeId,
+        platform: 'discord' as const,
+        spaceId: setup.targetSession.spaceId,
+        channelId: setup.targetSession.externalId,
+        messageId: 'bbb',
+      },
+      replyTo: {
+        sourceMessageId: 'aaa',
+        senderDisplayName: 'Sender',
+        textPreview: '你好',
+      },
+    };
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'message.upload',
+      payload: reply,
+      frameId: randomUUID(),
+    });
+    await waitFor(() => setup.sendToNode.mock.calls.length === 2);
+    const reverseBatch = setup.sendToNode.mock.calls[1]![2] as {
+      deliveries: Record<string, unknown>[];
+    };
+    expect(reverseBatch.deliveries[0]).toEqual(
+      expect.objectContaining({
+        sourceMessageId: 'bbb',
+        targetSessionId: setup.sourceSession.id,
+        replyMessageId: '100',
+      }),
+    );
   });
 
   it('records the full LLM failure for a simulated run', async () => {
@@ -309,7 +562,11 @@ describe('blueprint message pipeline', () => {
         { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
         { id: randomUUID(), sourceNodeId: translation, targetNodeId: output },
       ],
-      { translate: vi.fn(async () => { throw failure; }) },
+      {
+        translate: vi.fn(async () => {
+          throw failure;
+        }),
+      },
     );
 
     await expect(
@@ -445,7 +702,9 @@ describe('blueprint message pipeline', () => {
       setup.targetSession.nodeId,
       'message.deliver.batch',
       expect.objectContaining({
-        deliveries: [expect.objectContaining({ cards: [Buffer.from('legacy-card').toString('base64')] })],
+        deliveries: [
+          expect.objectContaining({ cards: [Buffer.from('legacy-card').toString('base64')] }),
+        ],
       }),
     );
   });
@@ -544,6 +803,22 @@ describe('blueprint message pipeline', () => {
       payload: { ...sentCommand, targetMessageId: 'discord-message-id' },
       frameId: randomUUID(),
     });
+    expect(
+      (
+        await setup.store.get<{ targetMessageId: string }>(
+          'reply-mapping',
+          `${setup.sourceSession.id}:${incoming.source.messageId}:${setup.targetSession.id}`,
+        )
+      )?.value.targetMessageId,
+    ).toBe('discord-message-id');
+    expect(
+      (
+        await setup.store.get<{ targetMessageId: string }>(
+          'reply-mapping',
+          `${setup.targetSession.id}:discord-message-id:${setup.sourceSession.id}`,
+        )
+      )?.value.targetMessageId,
+    ).toBe(incoming.source.messageId);
     const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
       (entry) => entry.value,
     );

@@ -1,12 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { validateBlueprint } from '@disqord/blueprint';
-import {
-  AvatarCache,
-  downloadExternalImage,
-  renderMessageCards,
-  type MessageCardInput,
-} from '@disqord/card-renderer';
+import { AvatarCache, downloadExternalImage, renderMessageCards } from '@disqord/card-renderer';
 import {
   LlmModerationService,
   LlmTranslationService,
@@ -16,11 +11,15 @@ import {
   type ViolationAssessment,
 } from '@disqord/llm';
 import {
+  avatarKeySchema,
+  avatarRequestSchema,
   blueprintVersionSchema,
   blueprintSchema,
   chatSessionSchema,
+  createAvatarKey,
   createMessageIdempotencyKey,
   messageEnvelopeSchema,
+  type MessageCardRenderSpec,
   messageUploadBatchSchema,
   type Blueprint,
   type BlueprintEdge,
@@ -64,8 +63,11 @@ const moderationConfigSchema = z.object({
 const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
 const MESSAGE_UPLOAD_BATCH_NAMESPACE = 'message-upload-batch';
+const AVATAR_SOURCE_NAMESPACE = 'avatar-source';
 const MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS = 3;
 const FAST_DELIVERY_INTERVAL_MS = 1_500;
+
+const avatarSourceRecordSchema = z.object({ sourceUrl: z.url() });
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -117,12 +119,21 @@ export interface MessageProcessor {
     text: string,
     fixedText: boolean,
   ): Promise<readonly Buffer[]>;
+  /** Build a compact client-side render request. No final PNG is produced. */
+  prepareRender?(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+  ): Promise<MessageCardRenderSpec>;
+  resolveAvatar?(avatarKey: string): Promise<string | undefined>;
 }
 
 interface PipelineState {
   readonly text: string;
   readonly fixedText: boolean;
   readonly cards?: readonly Buffer[];
+  readonly renderSpec?: MessageCardRenderSpec;
   readonly renderedForSessionId?: string;
 }
 
@@ -136,7 +147,8 @@ interface DeliveryIntent {
   readonly sourceSession: ChatSession;
   readonly target: ChatSession;
   readonly message: MessageEnvelope;
-  readonly cards: readonly Buffer[];
+  readonly cards?: readonly Buffer[];
+  readonly renderSpec?: MessageCardRenderSpec;
   readonly processedText: string;
   readonly fastMode: boolean;
 }
@@ -149,6 +161,7 @@ interface OutboundDeliveryCommand {
   readonly externalId: string;
   readonly mode: 'card' | 'text';
   readonly cards: readonly string[];
+  readonly render?: MessageCardRenderSpec;
   readonly text?: string;
   readonly senderName?: string;
   readonly fastMode?: boolean;
@@ -274,6 +287,8 @@ export class MessageOrchestrator {
       await this.#acceptMessageUploadBatch(frame);
     } else if (frame.kind === 'node.runtime.settings.request') {
       await this.#sendRuntimeSettings(frame.nodeId);
+    } else if (frame.kind === 'avatar.request') {
+      await this.#handleAvatarRequest(frame);
     } else if (frame.kind === 'message.delivered') {
       await this.#handleDelivered(frame.payload);
     } else if (frame.kind === 'message.delivery_failed') {
@@ -287,6 +302,18 @@ export class MessageOrchestrator {
     await this.#commandBus.sendToNode(nodeId, 'node.runtime.settings', {
       fastMode: await this.#fastMode(),
       fastDeliveryIntervalMs: await this.#fastDeliveryInterval(),
+    });
+  }
+
+  async #handleAvatarRequest(frame: ReceivedNodeFrame): Promise<void> {
+    const request = avatarRequestSchema.parse(frame.payload);
+    const dataUri = this.#processor.resolveAvatar
+      ? await this.#processor.resolveAvatar(request.avatarKey)
+      : undefined;
+    await this.#commandBus.sendToNode(frame.nodeId, 'avatar.response', {
+      requestId: request.requestId,
+      avatarKey: request.avatarKey,
+      ...(dataUri ? { dataUri } : {}),
     });
   }
 
@@ -1305,16 +1332,29 @@ export class MessageOrchestrator {
             text: state.text,
           });
         } else {
-          const cards = await this.#render(message, target, state.text, state.fixedText);
-          state = { ...state, cards, renderedForSessionId: target.id };
+          const prepared = await this.#prepareRender(message, target, state.text, state.fixedText);
+          state = {
+            ...state,
+            ...(prepared.renderSpec ? { renderSpec: prepared.renderSpec } : {}),
+            ...(prepared.cards ? { cards: prepared.cards } : {}),
+            renderedForSessionId: target.id,
+          };
           await this.#log(message.traceId, 'info', 'render_succeeded', {
             nodeId: node.id,
             targetSessionId: target.id,
-            cardCount: cards.length,
-            byteSizes: cards.map((card) => card.byteLength),
+            renderMode: prepared.renderSpec ? 'client' : 'legacy',
+            mediaCount: prepared.renderSpec
+              ? prepared.renderSpec.images.length +
+                (prepared.renderSpec.reply?.imagePreview ? 1 : 0) +
+                (prepared.renderSpec.senderAvatar ? 1 : 0)
+              : undefined,
+            cardCount: prepared.cards?.length,
+            byteSizes: prepared.cards?.map((card) => card.byteLength),
           });
           await recordActivity(node, processedSteps, {
-            message: `已合成 ${cards.length} 张消息图片`,
+            message: prepared.renderSpec
+              ? '已提交客户端合成图片'
+              : `已合成 ${prepared.cards?.length ?? 0} 张消息图片`,
             text: state.text,
           });
         }
@@ -1322,17 +1362,28 @@ export class MessageOrchestrator {
         const targetId = chatConfigSchema.parse(node.config).sessionId;
         const target = sessions.find((session) => session.id === targetId);
         if (!target) throw new Error(`Target session ${targetId} is unavailable.`);
-        const cards = fastMode
-          ? []
+        let renderSpec = fastMode
+          ? undefined
+          : state.renderSpec && state.renderedForSessionId === target.id
+            ? state.renderSpec
+            : undefined;
+        let cards = fastMode
+          ? undefined
           : state.cards && state.renderedForSessionId === target.id
             ? state.cards
-            : await this.#render(message, target, state.text, state.fixedText);
+            : undefined;
+        if (!fastMode && !renderSpec && !cards) {
+          const prepared = await this.#prepareRender(message, target, state.text, state.fixedText);
+          renderSpec = prepared.renderSpec;
+          cards = prepared.cards;
+        }
         const delivery: DeliveryIntent = {
           blueprint,
           sourceSession,
           target,
           message,
-          cards,
+          ...(cards ? { cards } : {}),
+          ...(renderSpec ? { renderSpec } : {}),
           processedText: state.text,
           fastMode,
         };
@@ -1344,6 +1395,7 @@ export class MessageOrchestrator {
             target,
             message,
             cards,
+            renderSpec,
             state.text,
             fastMode,
           );
@@ -1469,12 +1521,34 @@ export class MessageOrchestrator {
     throw new Error('Card renderer is unavailable.');
   }
 
+  async #prepareRender(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+  ): Promise<{ readonly renderSpec?: MessageCardRenderSpec; readonly cards?: readonly Buffer[] }> {
+    // Media is deliberately rendered centrally.  Sending the original image
+    // bytes inside a client render spec would cost more bandwidth than sending
+    // the already-composited card, especially when the same image is retried.
+    if (hasImageContent(message) && this.#processor.render) {
+      return { cards: await this.#render(message, target, text, fixedText) };
+    }
+    if (this.#processor.prepareRender) {
+      return { renderSpec: await this.#processor.prepareRender(message, target, text, fixedText) };
+    }
+    // Keep old custom processors working while they are upgraded.  New
+    // central processors never take this branch, so PNG bytes stay local to
+    // the target node in the normal path.
+    return { cards: await this.#render(message, target, text, fixedText) };
+  }
+
   async #dispatchDelivery(
     blueprint: BlueprintVersion,
     sourceSession: ChatSession,
     target: ChatSession,
     message: MessageEnvelope,
-    cards: readonly Buffer[],
+    cards: readonly Buffer[] | undefined,
+    renderSpec: MessageCardRenderSpec | undefined,
     processedText: string,
     fastMode: boolean,
   ): Promise<void> {
@@ -1483,7 +1557,8 @@ export class MessageOrchestrator {
       sourceSession,
       target,
       message,
-      cards,
+      ...(cards ? { cards } : {}),
+      ...(renderSpec ? { renderSpec } : {}),
       processedText,
       fastMode,
     });
@@ -1491,7 +1566,16 @@ export class MessageOrchestrator {
   }
 
   async #prepareDelivery(intent: DeliveryIntent): Promise<PreparedDelivery> {
-    const { blueprint, sourceSession, target, message, cards, processedText, fastMode } = intent;
+    const {
+      blueprint,
+      sourceSession,
+      target,
+      message,
+      cards,
+      renderSpec,
+      processedText,
+      fastMode,
+    } = intent;
     const taskId = randomUUID();
     const now = new Date().toISOString();
     await this.#store.set('delivery-task', taskId, {
@@ -1503,7 +1587,16 @@ export class MessageOrchestrator {
       targetSessionId: target.id,
       status: 'queued',
       processedText,
-      cardCount: cards.length,
+      ...(cards ? { cardCount: cards.length } : {}),
+      ...(renderSpec
+        ? {
+            renderMode: 'client',
+            mediaCount:
+              renderSpec.images.length +
+              (renderSpec.reply?.imagePreview ? 1 : 0) +
+              (renderSpec.senderAvatar ? 1 : 0),
+          }
+        : {}),
       createdAt: now,
       updatedAt: now,
     });
@@ -1522,7 +1615,8 @@ export class MessageOrchestrator {
       targetSessionId: target.id,
       externalId: target.externalId,
       mode: fastMode ? 'text' : 'card',
-      cards: fastMode ? [] : cards.map((card) => card.toString('base64')),
+      cards: fastMode || !cards ? [] : cards.map((card) => card.toString('base64')),
+      ...(renderSpec ? { render: renderSpec } : {}),
       ...(fastMode
         ? {
             // Images/attachments have no rendered card in speed mode.  Keep a
@@ -1540,7 +1634,7 @@ export class MessageOrchestrator {
 
   async #sendPreparedDelivery(prepared: PreparedDelivery): Promise<void> {
     const { intent, command } = prepared;
-    const { message, target, cards } = intent;
+    const { message, target, cards, renderSpec } = intent;
     try {
       await this.#commandBus.sendToNode(target.nodeId, 'message.deliver', command);
       await this.#log(message.traceId, 'info', 'delivery_queued', {
@@ -1551,7 +1645,8 @@ export class MessageOrchestrator {
           sessionId: target.id,
           externalId: target.externalId,
         },
-        cardCount: cards.length,
+        ...(cards ? { cardCount: cards.length } : {}),
+        ...(renderSpec ? { renderMode: 'client', mediaCount: renderSpec.images.length } : {}),
         replyMessageId: command.replyMessageId,
       });
     } catch (error) {
@@ -1616,7 +1711,10 @@ export class MessageOrchestrator {
                   sessionId: intent.target.id,
                   externalId: intent.target.externalId,
                 },
-                cardCount: intent.cards.length,
+                ...(intent.cards ? { cardCount: intent.cards.length } : {}),
+                ...(intent.renderSpec
+                  ? { renderMode: 'client', mediaCount: intent.renderSpec.images.length }
+                  : {}),
                 replyMessageId: command.replyMessageId,
               });
             }
@@ -1710,10 +1808,19 @@ export class MessageOrchestrator {
 
   async #handleDelivered(payload: unknown): Promise<void> {
     const delivered = deliveredFrameSchema.parse(payload);
+    const createdAt = new Date().toISOString();
     await this.#store.set(
       'reply-mapping',
       mappingKey(delivered.sourceSessionId, delivered.sourceMessageId, delivered.targetSessionId),
-      { targetMessageId: delivered.targetMessageId, createdAt: new Date().toISOString() },
+      { targetMessageId: delivered.targetMessageId, createdAt },
+    );
+    // Keep the inverse relation as well.  A reply arriving from the target
+    // session uses the target platform's message ID as its source ID, so the
+    // normal lookup must be able to translate it back to the source message.
+    await this.#store.set(
+      'reply-mapping',
+      mappingKey(delivered.targetSessionId, delivered.targetMessageId, delivered.sourceSessionId),
+      { targetMessageId: delivered.sourceMessageId, createdAt },
     );
     const task = await this.#store.get<Record<string, unknown>>('delivery-task', delivered.taskId);
     if (task) {
@@ -1906,45 +2013,78 @@ export class CentralMessageProcessor implements MessageProcessor {
     }
   }
 
-  async render(
+  async resolveAvatar(avatarKey: string): Promise<string | undefined> {
+    const parsedKey = avatarKeySchema.safeParse(avatarKey);
+    if (!parsedKey.success) return undefined;
+    const entry = await this.#store.get<unknown>(AVATAR_SOURCE_NAMESPACE, parsedKey.data);
+    if (!entry) return undefined;
+    const source = avatarSourceRecordSchema.safeParse(entry.value);
+    if (!source.success) return undefined;
+    const avatar = await this.#avatarCache.get(source.data.sourceUrl);
+    return avatar?.dataUri;
+  }
+
+  async prepareRender(
     message: MessageEnvelope,
     target: ChatSession,
     text: string,
     fixedText: boolean,
-  ): Promise<readonly Buffer[]> {
-    const avatar = message.sender.avatarUrl
-      ? await this.#avatarCache.get(message.sender.avatarUrl)
+  ): Promise<MessageCardRenderSpec> {
+    return await this.#buildRenderSpec(message, target, text, fixedText, false);
+  }
+
+  /** Build the full central-render input, including downloaded media. */
+  async #buildRenderSpec(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+    includeImages: boolean,
+  ): Promise<MessageCardRenderSpec> {
+    const senderAvatarKey = message.sender.avatarUrl
+      ? createAvatarKey(message.source.platform, message.sender.id)
       : undefined;
-    const replyImage = message.replyTo?.imagePreview?.sourceUrl
-      ? await downloadExternalImage(message.replyTo.imagePreview.sourceUrl).catch(() => undefined)
-      : undefined;
-    const images = (
-      await Promise.all(
-        message.attachments.map(async (attachment) =>
-          attachment.sourceUrl
-            ? await downloadExternalImage(attachment.sourceUrl).catch(() => undefined)
-            : undefined,
-        ),
-      )
-    )
-      .filter((image): image is NonNullable<typeof image> => Boolean(image))
-      .map((image) => image.dataUri);
-    const input: MessageCardInput = {
+    if (senderAvatarKey && message.sender.avatarUrl) {
+      await this.#rememberAvatarSource(senderAvatarKey, message.sender.avatarUrl);
+    }
+    const avatar =
+      includeImages && message.sender.avatarUrl
+        ? await this.#avatarCache.get(message.sender.avatarUrl)
+        : undefined;
+    const replyImage =
+      includeImages && message.replyTo?.imagePreview?.sourceUrl
+        ? await downloadExternalImage(message.replyTo.imagePreview.sourceUrl).catch(() => undefined)
+        : undefined;
+    const images = includeImages
+      ? (
+          await Promise.all(
+            message.attachments.map(async (attachment) =>
+              attachment.sourceUrl
+                ? await downloadExternalImage(attachment.sourceUrl).catch(() => undefined)
+                : undefined,
+            ),
+          )
+        )
+          .filter((image): image is NonNullable<typeof image> => Boolean(image))
+          .map((image) => image.dataUri)
+      : [];
+    return {
       sourcePlatform: message.source.platform,
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
       sourceName: message.source.channelId,
       senderName: message.sender.displayName,
+      ...(senderAvatarKey ? { senderAvatarKey } : {}),
       ...(avatar ? { senderAvatar: avatar.dataUri } : {}),
       sentAt: message.sentAt,
       primaryText: text,
       ...(!fixedText && message.text ? { originalText: message.text } : {}),
-      images,
+      images: images.map((dataUri) => ({ dataUri })),
       ...(message.replyTo
         ? {
             reply: {
               senderName: message.replyTo.senderDisplayName,
               ...(message.replyTo.textPreview ? { textPreview: message.replyTo.textPreview } : {}),
-              ...(replyImage ? { imagePreview: replyImage.dataUri } : {}),
+              ...(replyImage ? { imagePreview: { dataUri: replyImage.dataUri } } : {}),
             },
           }
         : {}),
@@ -1952,8 +2092,31 @@ export class CentralMessageProcessor implements MessageProcessor {
         ? { unsupportedType: message.unsupportedType }
         : {}),
       traceLabel: message.traceId.slice(0, 8),
-    };
-    return await renderMessageCards(input);
+    } satisfies MessageCardRenderSpec;
+  }
+
+  async #rememberAvatarSource(avatarKey: string, sourceUrl: string): Promise<void> {
+    const existing = await this.#store.get<{ sourceUrl: string }>(
+      AVATAR_SOURCE_NAMESPACE,
+      avatarKey,
+    );
+    if (existing?.value.sourceUrl === sourceUrl) return;
+    await this.#store.set(AVATAR_SOURCE_NAMESPACE, avatarKey, { sourceUrl });
+  }
+
+  /**
+   * Legacy escape hatch for custom processors. The normal orchestrator path
+   * calls prepareRender and sends the render spec to the target node instead.
+   */
+  async render(
+    message: MessageEnvelope,
+    target: ChatSession,
+    text: string,
+    fixedText: boolean,
+  ): Promise<readonly Buffer[]> {
+    return await renderMessageCards(
+      await this.#buildRenderSpec(message, target, text, fixedText, true),
+    );
   }
 
   async #client(): Promise<{
@@ -1976,6 +2139,10 @@ export class CentralMessageProcessor implements MessageProcessor {
       }),
     };
   }
+}
+
+function hasImageContent(message: MessageEnvelope): boolean {
+  return message.attachments.length > 0 || Boolean(message.replyTo?.imagePreview);
 }
 
 function mappingKey(

@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
+import { AvatarCache, renderMessageCards } from '@disqord/card-renderer';
 import { FileTaskQueue, type QueueItem } from '@disqord/queue';
-import { messageEnvelopeSchema, type MessageEnvelope } from '@disqord/shared';
+import {
+  avatarRequestSchema,
+  avatarResponseSchema,
+  messageCardRenderSpecSchema,
+  messageEnvelopeSchema,
+  type MessageEnvelope,
+} from '@disqord/shared';
 import { AuthenticatedNodeClient, type NodeIdentity } from '@disqord/transport';
 import { z } from 'zod';
 
@@ -16,6 +23,7 @@ const DELIVERY_MIN_GAP_MS = 0;
 const DELIVERY_MAX_GAP_MS = 3_000;
 const FAST_DELIVERY_INTERVAL_MS = 1_500;
 const FAST_UPLOAD_RETRY_DELAY_MS = 250;
+const AVATAR_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface PlatformSessionCandidate {
   readonly externalId: string;
@@ -47,6 +55,7 @@ const deliverCommandSchema = z
     externalId: z.string().min(1),
     mode: z.enum(['card', 'text']).default('card'),
     cards: z.array(z.string().min(1)).max(20).default([]),
+    render: messageCardRenderSpecSchema.optional(),
     text: z.string().max(30_000).optional(),
     senderName: z.string().trim().min(1).max(256).optional(),
     fastMode: z.boolean().default(false),
@@ -54,7 +63,7 @@ const deliverCommandSchema = z
     targetMessageId: z.string().min(1).optional(),
   })
   .superRefine((command, context) => {
-    if (command.mode === 'card' && command.cards.length === 0) {
+    if (command.mode === 'card' && command.cards.length === 0 && !command.render) {
       context.addIssue({
         code: 'custom',
         path: ['cards'],
@@ -89,11 +98,19 @@ const runtimeSettingsSchema = z.object({
 
 type DeliveryCommand = z.infer<typeof deliverCommandSchema>;
 
+interface PendingAvatarRequest {
+  readonly avatarKey: string;
+  readonly resolve: (dataUri: string | undefined) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: NodeJS.Timeout;
+}
+
 export interface NodeBridgeRuntimeOptions {
   readonly nodeType: NodeIdentity['nodeType'];
   readonly centralUrl: string;
   readonly configPath: string;
   readonly queuePath: string;
+  readonly avatarCachePath?: string;
   readonly logPath?: string;
   readonly allowInsecureCentral?: boolean;
   readonly createAdapter: (identity: NodeIdentity) => PlatformAdapter;
@@ -109,6 +126,7 @@ export class NodeBridgeRuntime {
   readonly #options: NodeBridgeRuntimeOptions;
   readonly #configStore: NodeConfigStore;
   readonly #logger: NodeLogger;
+  readonly #avatarCache: AvatarCache;
   #queue: FileTaskQueue | undefined;
   #client: AuthenticatedNodeClient | undefined;
   #adapter: PlatformAdapter | undefined;
@@ -123,11 +141,16 @@ export class NodeBridgeRuntime {
   readonly #deliveryTasks = new Map<string, Promise<void>>();
   readonly #lastDeliveryAt = new Map<string, number>();
   readonly #nextFastDeliveryAt = new Map<string, number>();
+  readonly #avatarRequests = new Map<string, PendingAvatarRequest>();
+  readonly #avatarFetches = new Map<string, Promise<string | undefined>>();
 
   constructor(options: NodeBridgeRuntimeOptions) {
     this.#options = options;
     this.#configStore = new NodeConfigStore(options.configPath);
     this.#logger = new NodeLogger(options.logPath ?? `${options.queuePath}.log`);
+    this.#avatarCache = new AvatarCache(
+      options.avatarCachePath ?? join(dirname(options.queuePath), 'avatar-cache'),
+    );
   }
 
   async start(): Promise<void> {
@@ -216,6 +239,12 @@ export class NodeBridgeRuntime {
     if (this.#uploadBatchTimer) clearTimeout(this.#uploadBatchTimer);
     this.#retryTimer = undefined;
     this.#uploadBatchTimer = undefined;
+    for (const pending of this.#avatarRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Node runtime stopped before the avatar response arrived.'));
+    }
+    this.#avatarRequests.clear();
+    this.#avatarFetches.clear();
     this.#client?.disconnect();
     await this.#adapter?.stop();
     this.#queue?.close();
@@ -244,6 +273,18 @@ export class NodeBridgeRuntime {
   }
 
   async #handleCommand(kind: string, payload: unknown): Promise<void> {
+    if (kind === 'avatar.response') {
+      const response = avatarResponseSchema.parse(payload);
+      const pending = this.#avatarRequests.get(response.requestId);
+      if (!pending) return;
+      if (pending.avatarKey !== response.avatarKey) {
+        throw new Error('Avatar response key does not match the pending request.');
+      }
+      clearTimeout(pending.timer);
+      this.#avatarRequests.delete(response.requestId);
+      pending.resolve(response.dataUri);
+      return;
+    }
     if (kind === 'node.runtime.settings') {
       const settings = runtimeSettingsSchema.parse(payload);
       const wasFast = this.#fastMode;
@@ -307,7 +348,15 @@ export class NodeBridgeRuntime {
         taskId: command.taskId,
         targetSessionId: command.targetSessionId,
         externalId: command.externalId,
-        cardCount: command.cards.length,
+        ...(command.render
+          ? {
+              renderMode: 'client',
+              mediaCount:
+                command.render.images.length +
+                (command.render.reply?.imagePreview ? 1 : 0) +
+                (command.render.senderAvatar ? 1 : 0),
+            }
+          : { cardCount: command.cards.length }),
         mode: command.mode,
       });
       // Persist and schedule in the background.  The command acknowledgement
@@ -415,7 +464,44 @@ export class NodeBridgeRuntime {
             item.payload.replyMessageId,
           );
         } else {
-          for (const [index, card] of item.payload.cards.entries()) {
+          let cards = item.payload.cards;
+          if (!cards.length && item.payload.render) {
+            let renderSpec = item.payload.render;
+            this.#log('debug', 'client_card_render_started', {
+              taskId,
+              targetSessionId: item.payload.targetSessionId,
+              imageCount: renderSpec.images.length,
+              hasAvatar: Boolean(renderSpec.senderAvatarKey || renderSpec.senderAvatar),
+              hasReplyImage: Boolean(renderSpec.reply?.imagePreview),
+            });
+            if (renderSpec.senderAvatarKey) {
+              const avatarDataUri = await this.#getAvatarDataUri(renderSpec.senderAvatarKey);
+              if (avatarDataUri) {
+                renderSpec = { ...renderSpec, senderAvatar: avatarDataUri };
+              }
+            } else if (renderSpec.senderAvatar) {
+              // Accept queued commands created by the previous protocol while
+              // they drain, but never use this form for new central messages.
+              const cachedAvatar = await this.#avatarCache.cacheDataUri(renderSpec.senderAvatar);
+              if (cachedAvatar) {
+                renderSpec = { ...renderSpec, senderAvatar: cachedAvatar.dataUri };
+              }
+            }
+            const rendered = await renderMessageCards(renderSpec);
+            cards = rendered.map((card) => card.toString('base64'));
+            // Once rendered, retain the PNGs in the local queue so a network
+            // retry never downloads media or renders the same message twice.
+            const { render: _render, ...withoutRender } = item.payload;
+            const renderedPayload: DeliveryCommand = { ...withoutRender, cards };
+            queue.updatePayload(taskId, renderedPayload);
+            item = { ...item, payload: renderedPayload };
+            this.#log('info', 'client_card_render_succeeded', {
+              taskId,
+              cardCount: cards.length,
+              byteSizes: rendered.map((card) => card.byteLength),
+            });
+          }
+          for (const [index, card] of cards.entries()) {
             const messageId = await this.#adapter.sendCard(
               item.payload.externalId,
               Buffer.from(card, 'base64'),
@@ -458,6 +544,66 @@ export class NodeBridgeRuntime {
           error: message,
         });
         await delay(retryDelay(current.attempts));
+      }
+    }
+  }
+
+  async #getAvatarDataUri(avatarKey: string): Promise<string | undefined> {
+    const cached = await this.#avatarCache.getCached(avatarKey);
+    if (cached) return cached.dataUri;
+
+    const existing = this.#avatarFetches.get(avatarKey);
+    if (existing) return await existing;
+    const task = this.#fetchAvatarDataUri(avatarKey);
+    this.#avatarFetches.set(avatarKey, task);
+    try {
+      return await task;
+    } finally {
+      if (this.#avatarFetches.get(avatarKey) === task) this.#avatarFetches.delete(avatarKey);
+    }
+  }
+
+  async #fetchAvatarDataUri(avatarKey: string): Promise<string | undefined> {
+    const dataUri = await this.#requestAvatarDataUri(avatarKey);
+    if (!dataUri) return undefined;
+    const cached = await this.#avatarCache.cacheDataUri(dataUri, avatarKey);
+    return cached?.dataUri ?? dataUri;
+  }
+
+  async #requestAvatarDataUri(avatarKey: string): Promise<string | undefined> {
+    if (!this.#client) return undefined;
+    const requestId = randomUUID();
+    let responseResolve: (dataUri: string | undefined) => void = () => undefined;
+    let responseReject: (error: Error) => void = () => undefined;
+    const response = new Promise<string | undefined>((resolve, reject) => {
+      responseResolve = resolve;
+      responseReject = reject;
+    });
+    const timer = setTimeout(() => {
+      this.#avatarRequests.delete(requestId);
+      responseReject(new Error(`Avatar response timed out for ${avatarKey}.`));
+    }, AVATAR_REQUEST_TIMEOUT_MS);
+    timer.unref();
+    this.#avatarRequests.set(requestId, {
+      avatarKey,
+      resolve: responseResolve,
+      reject: responseReject,
+      timer,
+    });
+    try {
+      await this.#client.send('avatar.request', { requestId, avatarKey });
+      return await response;
+    } catch (error) {
+      this.#log('warn', 'avatar_fetch_failed', {
+        avatarKey,
+        error: describeError(error),
+      });
+      return undefined;
+    } finally {
+      const pending = this.#avatarRequests.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.#avatarRequests.delete(requestId);
       }
     }
   }

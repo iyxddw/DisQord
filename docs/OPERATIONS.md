@@ -91,11 +91,14 @@ sudo ls -lh /var/lib/disqord/central
 ```bash
 sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
 sudo fc-cache -f
-sudo systemctl restart disqord-central
+# 重启实际发送图片的节点，例如：
+bash pm2-start-qq.sh
+# 或
+bash pm2-start-discord.sh
 ```
 
-如果没有使用 systemd，停止当前 Central 进程后重新运行
-`pnpm --filter @disqord/central-server start`。字体只需安装在负责生成卡片的中央服务器。
+如果没有使用 PM2，停止对应节点后重新运行它的启动脚本。当前渲染器是客户端 Skia Canvas；中央端不会
+再用 librsvg 绘制文字，因此只重启中央端或只在中央端安装字体都不能修复彩色 Emoji。
 
 ## 备份与恢复
 
