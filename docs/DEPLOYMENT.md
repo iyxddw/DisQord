@@ -171,7 +171,7 @@ Caddy 自动申请、续期证书并支持 WebSocket。浏览器打开 `https://
 都安装中文字体和彩色 Emoji 字体；中央服务器不需要安装这些字体：
 
 ```bash
-sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
+sudo apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
 sudo fc-cache -f
 ```
 

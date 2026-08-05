@@ -79,7 +79,10 @@ describe('message card renderer', () => {
       images: [],
     });
     expect(withImage).toContain('Noto Color Emoji');
-    expect(withImage).toContain('font-family: "Noto Color Emoji", "Noto Sans CJK SC"');
+    expect(withImage).toContain(
+      'font-family: "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei"',
+    );
+    expect(withImage.indexOf('Noto Sans SC')).toBeLessThan(withImage.indexOf('Noto Color Emoji'));
     expect(withImage).toContain('data:image/png;base64,aGVsbG8=');
     expect(withImage).not.toContain('Preview unavailable');
 

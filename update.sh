@@ -6,8 +6,8 @@
 #
 # 服务器使用：
 #   bash update.sh central --yes
-#   bash update.sh qq --yes --restart
-#   bash update.sh discord --yes --restart
+#   bash update.sh qq --yes
+#   bash update.sh discord --yes
 #   bash update.sh all --yes
 #
 # 只构建本地代码、不拉取远端：
@@ -31,7 +31,7 @@ usage() {
 选项：
   --no-pull     不从 Git 远端拉取，只同步依赖并构建本地代码
   --no-install  不执行 pnpm install
-  --restart     构建成功后重启已存在的对应 PM2 进程
+  --no-restart  构建成功后不执行对应的 pm2-start-*.sh
   --verify      构建后执行完整 typecheck 和 test
   --yes         跳过确认，适合脚本或 CI 调用
   -h, --help    显示帮助
@@ -39,9 +39,9 @@ usage() {
 示例：
   bash update.sh                       # 交互选择部署角色
   bash update.sh central --yes         # 更新中央服务器
-  bash update.sh qq --yes --restart    # 更新并重启 QQ 节点
+  bash update.sh qq --yes              # 更新并启动/重启 QQ 节点
   bash update.sh all --yes --verify    # 更新全部并验证
-  bash update.sh central --no-pull      # 只构建当前工作区
+  bash update.sh central --no-pull --no-restart  # 只构建当前工作区
 EOF
 }
 
@@ -80,9 +80,10 @@ qq_selected=false
 discord_selected=false
 should_pull=true
 should_install=true
-should_restart=false
+should_restart=true
 should_verify=false
 assume_yes=false
+selection_confirmed=false
 
 select_all() {
   central_selected=true
@@ -111,7 +112,8 @@ parse_arguments() {
         ;;
       --no-pull) should_pull=false ;;
       --no-install) should_install=false ;;
-      --restart) should_restart=true ;;
+      --no-restart) should_restart=false ;;
+      --restart) should_restart=true ;; # backwards-compatible alias
       --verify) should_verify=true ;;
       --yes) assume_yes=true ;;
       -h|--help)
@@ -138,27 +140,76 @@ parse_arguments() {
 }
 
 choose_interactively() {
-  local choice
+  local key index marker pointer has_selection
+  local cursor=0
+  local -a labels=(
+    '中央端（中央服务端 + 中央 Web）'
+    'QQ 节点（QQ Node + 节点 Web）'
+    'Discord 节点（Discord Node + 节点 Web）'
+  )
+  local -a selected=(false false false)
 
   while true; do
-    printf '\n'
-    printf '请选择要更新的部署角色：\n'
-    printf '  1) 中央端（中央服务端 + 中央 Web）\n'
-    printf '  2) QQ 节点（QQ Node + 节点 Web）\n'
-    printf '  3) Discord 节点（Discord Node + 节点 Web）\n'
-    printf '  4) 全部\n'
-    printf '  q) 取消\n'
-    read -r -p '请输入编号：' choice
+    printf '\033[H\033[2J'
+    printf '请选择要更新的部署角色（↑/↓移动，空格选中，回车确认，a 全选，n 清空，q 取消）\n\n'
+    for index in "${!labels[@]}"; do
+      marker=' '
+      [[ "${selected[$index]}" == true ]] && marker='x'
+      pointer=' '
+      [[ "$index" -eq "$cursor" ]] && pointer='>'
+      printf '%s [%s] %s\n' "$pointer" "$marker" "${labels[$index]}"
+    done
+    printf '\n当前至少选择一个角色后按回车继续。\n'
 
-    case "$choice" in
-      1) central_selected=true; break ;;
-      2) qq_selected=true; break ;;
-      3) discord_selected=true; break ;;
-      4) select_all; break ;;
-      q|Q) info '已取消更新。'; exit 0 ;;
-      *) warn '请输入 1、2、3、4 或 q。' ;;
+    IFS= read -r -s -n 1 key
+
+    case "$key" in
+      $'\x1b')
+        # 方向键会在 ESC 后发送 [A / [B。
+        IFS= read -r -s -n 2 key
+        case "$key" in
+          '[A') cursor=$(( (cursor + ${#labels[@]} - 1) % ${#labels[@]} )) ;;
+          '[B') cursor=$(( (cursor + 1) % ${#labels[@]} )) ;;
+        esac
+        ;;
+      ' ')
+        if [[ "${selected[$cursor]}" == true ]]; then
+          selected[$cursor]=false
+        else
+          selected[$cursor]=true
+        fi
+        ;;
+      a|A)
+        selected=(true true true)
+        ;;
+      n|N)
+        selected=(false false false)
+        ;;
+      q|Q)
+        printf '\033[H\033[2J'
+        info '已取消更新。'
+        exit 0
+        ;;
+      $'\r'|$'\n'|'')
+        has_selection=false
+        for index in "${!selected[@]}"; do
+          if [[ "${selected[$index]}" == true ]]; then
+            has_selection=true
+            break
+          fi
+        done
+        if [[ "$has_selection" == true ]]; then
+          break
+        fi
+        ;;
     esac
   done
+
+  central_selected="${selected[0]}"
+  qq_selected="${selected[1]}"
+  discord_selected="${selected[2]}"
+  selection_confirmed=true
+  printf '\033[H\033[2J'
 }
 
 show_selection() {
@@ -169,14 +220,14 @@ show_selection() {
   [[ "$discord_selected" == true ]] && printf '  - Discord 节点（Discord Node + 节点 Web）\n'
   [[ "$should_pull" == true ]] && info '代码：拉取当前分支的上游更新（仅快进）' || info '代码：不拉取，使用当前工作区'
   [[ "$should_install" == true ]] && info '依赖：pnpm install --frozen-lockfile' || info '依赖：跳过安装'
-  [[ "$should_restart" == true ]] && info '服务：构建成功后重启已存在的 PM2 进程' || info '服务：不自动重启'
+  [[ "$should_restart" == true ]] && info '服务：构建成功后直接执行对应的 pm2-start-*.sh' || info '服务：不自动重启'
   [[ "$should_verify" == true ]] && info '验证：执行完整 typecheck 和 test' || info '验证：跳过完整 typecheck/test'
 }
 
 confirm_plan() {
   local answer
 
-  [[ "$assume_yes" == true ]] && return
+  [[ "$assume_yes" == true || "$selection_confirmed" == true ]] && return
   [[ -t 0 && -t 1 ]] || die '非交互运行需要加 --yes。'
 
   read -r -p '确认执行？[y/N] ' answer
@@ -274,26 +325,20 @@ verify_build() {
   pnpm test
 }
 
-restart_pm2_process() {
-  local role="$1"
-  local process_name="$2"
-  local start_script="$project_root/pm2-start-$role.sh"
-
-  if ! pm2 describe "$process_name" >/dev/null 2>&1; then
-    warn "PM2 中没有运行 $process_name，跳过重启。"
-    return
-  fi
-
-  info "正在重启 $process_name……"
-  bash "$start_script"
-}
-
 restart_selected_services() {
-  require_command pm2
 
-  [[ "$central_selected" == true ]] && restart_pm2_process central disqord-central
-  [[ "$qq_selected" == true ]] && restart_pm2_process qq disqord-qq
-  [[ "$discord_selected" == true ]] && restart_pm2_process discord disqord-discord
+  if [[ "$central_selected" == true ]]; then
+    info '正在执行 pm2-start-central.sh……'
+    bash "$project_root/pm2-start-central.sh"
+  fi
+  if [[ "$qq_selected" == true ]]; then
+    info '正在执行 pm2-start-qq.sh……'
+    bash "$project_root/pm2-start-qq.sh"
+  fi
+  if [[ "$discord_selected" == true ]]; then
+    info '正在执行 pm2-start-discord.sh……'
+    bash "$project_root/pm2-start-discord.sh"
+  fi
 }
 
 validate_restart_scripts() {
@@ -339,7 +384,7 @@ main() {
   if [[ "$should_restart" == true ]]; then
     restart_selected_services
   else
-    info '构建完成；运行中的服务未自动重启。需要重启时可再次加上 --restart。'
+    info '构建完成；由于使用了 --no-restart，运行中的服务未重启。'
   fi
 
   info '更新完成。'

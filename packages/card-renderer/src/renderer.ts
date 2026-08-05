@@ -34,6 +34,12 @@ const width = 1_000;
 const horizontalPadding = 56;
 const contentWidth = width - horizontalPadding * 2;
 const lineHeight = 48;
+// Keep a real CJK/Latin font first.  Skia can otherwise select Noto Color
+// Emoji for the whole run on Linux, which turns Chinese into tofu boxes and
+// gives ASCII text emoji-sized advances.  Emoji remains in the fallback tail
+// so emoji glyphs still render when the target machine has the font installed.
+const fontFamily =
+  '"Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", "PingFang SC", "WenQuanYi Micro Hei", "Noto Sans", "Segoe UI", "Noto Color Emoji", "Segoe UI Emoji", sans-serif';
 
 export async function renderMessageCards(
   candidate: MessageCardInput | MessageCardRenderSpec,
@@ -129,7 +135,6 @@ async function renderMessageCardCanvas(input: CanvasCardInput): Promise<Buffer> 
   );
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
-  const fontFamily = '"Noto Color Emoji", "Noto Sans CJK SC", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif';
   ctx.textBaseline = 'alphabetic';
 
   const background = ctx.createLinearGradient(0, 0, width, height);
@@ -452,7 +457,7 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
           )
           .join('')}
         <style>
-          text { font-family: "Noto Color Emoji", "Noto Sans CJK SC", "Segoe UI Emoji", "Apple Color Emoji", "Microsoft YaHei", sans-serif; }
+          text { font-family: ${fontFamily}; }
           .sender { fill: #f7f8ff; font-size: 30px; font-weight: 700; }
           .meta { fill: #aeb6cc; font-size: 20px; }
           .platform { fill: #91a7ff; font-size: 19px; font-weight: 700; letter-spacing: 1px; }

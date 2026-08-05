@@ -47,8 +47,10 @@ Debian / Ubuntu 两台客户端服务器都安装字体（中央端不需要文�
 
 ```bash
 apt update
-apt install -y fonts-noto-cjk fonts-noto-color-emoji
+apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
 fc-cache -f
+fc-match 'Noto Sans CJK SC'
+fc-match 'Noto Color Emoji'
 ```
 
 ## 下载与构建
@@ -97,15 +99,15 @@ pnpm --filter @disqord/discord-node... build
 
 ```bash
 cd /root/DisQord
-bash update.sh                         # 交互选择 central / qq / discord / all
+bash update.sh                         # 空格多选，回车确认；完成后自动执行对应 start 脚本
 bash update.sh central --yes           # 无交互更新中央端
-bash update.sh qq --yes --restart      # 更新并重启已存在的 QQ PM2 进程
+bash update.sh qq --yes                # 更新并启动/重启 QQ 节点
 bash update.sh all --yes --verify      # 全部构建，并执行 typecheck/test
 ```
 
-脚本不会强制覆盖已跟踪的未提交修改；本地构建可使用 `--no-pull`。默认不会重启正在运行的服务，
-只有显式传入 `--restart` 时才会调用对应的 `pm2-start-*.sh`。使用 systemd 部署时，构建完成后请手动重启
-对应的 systemd 服务。
+脚本不会强制覆盖已跟踪的未提交修改；本地构建可使用 `--no-pull`。默认会在构建成功后直接调用所选角色的
+`pm2-start-*.sh`（该脚本会启动或重启对应 PM2 进程）。如果只想构建，加上 `--no-restart`。使用 systemd
+部署时请加 `--no-restart`，构建完成后手动重启对应的 systemd 服务。
 
 ## 从零启动
 
@@ -393,7 +395,7 @@ cp -a data "data-backup-$(date +%F-%H%M%S)"
 在实际发送图片的 QQ 或 Discord 客户端服务器执行：
 
 ```bash
-apt install -y fonts-noto-cjk fonts-noto-color-emoji
+apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
 fc-cache -f
 ```
 

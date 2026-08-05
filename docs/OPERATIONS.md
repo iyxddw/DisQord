@@ -89,7 +89,7 @@ sudo ls -lh /var/lib/disqord/central
 ### 中文或 Emoji 卡片变成方框
 
 ```bash
-sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
+sudo apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
 sudo fc-cache -f
 # 重启实际发送图片的节点，例如：
 bash pm2-start-qq.sh
