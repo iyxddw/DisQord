@@ -50,11 +50,16 @@ export const messageCardMediaSchema = z.object({
 export const messageCardInlineEmojiSchema = z.object({
   /** The exact source token that is replaced by the inline image. */
   token: z.string().trim().min(1).max(128),
+  /** Local asset identifier, resolved by the target node when available. */
+  id: z.string().trim().min(1).max(128).optional(),
   /** Normalized image data sent with the render request. */
   dataUri: z
     .string()
     .regex(imageDataUriPattern)
-    .max(2 * 1024 * 1024),
+    .max(2 * 1024 * 1024)
+    .optional(),
+}).refine((emoji) => Boolean(emoji.id || emoji.dataUri), {
+  message: 'Inline emojis require either an id or image data.',
 });
 
 export const messageCardRenderSpecSchema = z.object({

@@ -374,8 +374,8 @@ describe('blueprint message pipeline', () => {
       false,
     );
 
-    expect(spec.inlineEmojis).toEqual([{ token: emoji.token, dataUri }]);
-    expect(spec.reply?.inlineEmojis).toEqual([{ token: emoji.token, dataUri }]);
+    expect(spec.inlineEmojis).toEqual([{ token: emoji.token, id: emoji.id, dataUri }]);
+    expect(spec.reply?.inlineEmojis).toEqual([{ token: emoji.token, id: emoji.id, dataUri }]);
   });
 
   it('serves an avatar response for a node cache miss', async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { AvatarCache, renderMessageCards } from '@disqord/card-renderer';
@@ -9,6 +9,7 @@ import {
   avatarResponseSchema,
   messageCardRenderSpecSchema,
   messageEnvelopeSchema,
+  type MessageCardRenderSpec,
   type MessageEnvelope,
 } from '@disqord/shared';
 import { AuthenticatedNodeClient, type NodeIdentity } from '@disqord/transport';
@@ -111,6 +112,7 @@ export interface NodeBridgeRuntimeOptions {
   readonly configPath: string;
   readonly queuePath: string;
   readonly avatarCachePath?: string;
+  readonly inlineEmojiDirectory?: string;
   readonly logPath?: string;
   readonly allowInsecureCentral?: boolean;
   readonly createAdapter: (identity: NodeIdentity) => PlatformAdapter;
@@ -127,6 +129,8 @@ export class NodeBridgeRuntime {
   readonly #configStore: NodeConfigStore;
   readonly #logger: NodeLogger;
   readonly #avatarCache: AvatarCache;
+  readonly #inlineEmojiDirectory: string | undefined;
+  readonly #inlineEmojiDataUriCache = new Map<string, string | undefined>();
   #queue: FileTaskQueue | undefined;
   #client: AuthenticatedNodeClient | undefined;
   #adapter: PlatformAdapter | undefined;
@@ -151,6 +155,7 @@ export class NodeBridgeRuntime {
     this.#avatarCache = new AvatarCache(
       options.avatarCachePath ?? join(dirname(options.queuePath), 'avatar-cache'),
     );
+    this.#inlineEmojiDirectory = options.inlineEmojiDirectory;
   }
 
   async start(): Promise<void> {
@@ -466,7 +471,7 @@ export class NodeBridgeRuntime {
         } else {
           let cards = item.payload.cards;
           if (!cards.length && item.payload.render) {
-            let renderSpec = item.payload.render;
+            let renderSpec = await this.#resolveInlineEmojiData(item.payload.render);
             this.#log('debug', 'client_card_render_started', {
               taskId,
               targetSessionId: item.payload.targetSessionId,
@@ -546,6 +551,55 @@ export class NodeBridgeRuntime {
         await delay(retryDelay(current.attempts));
       }
     }
+  }
+
+  async #resolveInlineEmojiData(renderSpec: MessageCardRenderSpec): Promise<MessageCardRenderSpec> {
+    const { inlineEmojis: _inlineEmojis, reply, ...withoutInlineEmojis } = renderSpec;
+    const inlineEmojis = await this.#resolveInlineEmojiList(renderSpec.inlineEmojis);
+    if (!reply) {
+      return {
+        ...withoutInlineEmojis,
+        ...(inlineEmojis.length ? { inlineEmojis } : {}),
+      };
+    }
+    const { inlineEmojis: _replyInlineEmojis, ...replyWithoutInlineEmojis } = reply;
+    const replyInlineEmojis = await this.#resolveInlineEmojiList(reply.inlineEmojis);
+    return {
+      ...withoutInlineEmojis,
+      ...(inlineEmojis.length ? { inlineEmojis } : {}),
+      reply: {
+        ...replyWithoutInlineEmojis,
+        ...(replyInlineEmojis.length ? { inlineEmojis: replyInlineEmojis } : {}),
+      },
+    };
+  }
+
+  async #resolveInlineEmojiList(
+    emojis: MessageCardRenderSpec['inlineEmojis'],
+  ): Promise<NonNullable<MessageCardRenderSpec['inlineEmojis']>> {
+    const resolved = await Promise.all(
+      (emojis ?? []).map(async (emoji) => {
+        if (emoji.dataUri) return emoji;
+        const match = /^\[CQ:face,id=(\d+)\]$/u.exec(emoji.token);
+        if (!match || !this.#inlineEmojiDirectory) return undefined;
+        const id = match[1]!;
+        if (emoji.id && emoji.id !== id) return undefined;
+        let dataUri: string | undefined;
+        if (this.#inlineEmojiDataUriCache.has(id)) {
+          dataUri = this.#inlineEmojiDataUriCache.get(id);
+        } else {
+          try {
+            const bytes = await readFile(join(this.#inlineEmojiDirectory, `${id}.png`));
+            dataUri = `data:image/png;base64,${bytes.toString('base64')}`;
+          } catch {
+            dataUri = undefined;
+          }
+          this.#inlineEmojiDataUriCache.set(id, dataUri);
+        }
+        return dataUri ? { ...emoji, id, dataUri } : undefined;
+      }),
+    );
+    return resolved.filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));
   }
 
   async #getAvatarDataUri(avatarKey: string): Promise<string | undefined> {

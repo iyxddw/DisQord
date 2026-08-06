@@ -9,7 +9,6 @@ const segmentSchema = z.object({
 });
 
 export type NapCatMessageSegment = z.infer<typeof segmentSchema>;
-export type NapCatEmojiDataUris = ReadonlyMap<string, string>;
 
 const napCatFacePattern = /\[CQ:face,id=(\d+)\]/gu;
 
@@ -61,12 +60,9 @@ export function extractNapCatFaceIds(segments: readonly NapCatMessageSegment[]):
 
 export function createNapCatCustomEmojis(
   segments: readonly NapCatMessageSegment[],
-  dataUris: NapCatEmojiDataUris,
 ): MessageEnvelope['customEmojis'] {
   const emojis = new Map<string, NonNullable<MessageEnvelope['customEmojis']>[number]>();
   for (const faceId of extractNapCatFaceIds(segments)) {
-    const dataUri = dataUris.get(faceId);
-    if (!dataUri) continue;
     const token = createNapCatFaceToken(faceId);
     if (emojis.has(token)) continue;
     emojis.set(token, {
@@ -74,7 +70,6 @@ export function createNapCatCustomEmojis(
       name: `qq-face-${faceId}`,
       id: faceId,
       animated: false,
-      dataUri,
     });
   }
   return emojis.size ? [...emojis.values()].slice(0, 32) : undefined;
@@ -85,7 +80,6 @@ export function normalizeNapCatGroupMessage(
   nodeId: string,
   mentionNames: ReadonlyMap<string, string> = new Map(),
   replyPreviews: ReadonlyMap<string, NapCatReplyPreview> = new Map(),
-  faceDataUris: NapCatEmojiDataUris = new Map(),
 ): MessageEnvelope | undefined {
   const event = napCatGroupMessageEventSchema.parse(candidate);
   if (String(event.user_id) === String(event.self_id)) {
@@ -159,7 +153,7 @@ export function normalizeNapCatGroupMessage(
         : 'text';
   const groupId = String(event.group_id);
   const userId = String(event.user_id);
-  const customEmojis = createNapCatCustomEmojis(event.message, faceDataUris);
+  const customEmojis = createNapCatCustomEmojis(event.message);
 
   return messageEnvelopeSchema.parse({
     schemaVersion: 1,

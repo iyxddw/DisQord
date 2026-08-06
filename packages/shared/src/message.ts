@@ -31,9 +31,6 @@ export const customEmojiReferenceSchema = z
       .regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u)
       .max(2 * 1024 * 1024)
       .optional(),
-  })
-  .refine((emoji) => Boolean(emoji.sourceUrl || emoji.dataUri), {
-    message: 'Custom emojis require either a source URL or inline image data.',
   });
 
 export const replyReferenceSchema = z.object({

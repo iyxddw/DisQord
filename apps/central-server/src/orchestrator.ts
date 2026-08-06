@@ -2207,7 +2207,11 @@ export class CentralMessageProcessor implements MessageProcessor {
                   }).catch(() => undefined)
                 )?.dataUri
               : undefined);
-          return dataUri ? { token: emoji.token, dataUri } : undefined;
+          return {
+            token: emoji.token,
+            ...(emoji.id ? { id: emoji.id } : {}),
+            ...(dataUri ? { dataUri } : {}),
+          };
         }),
       )
     ).filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));

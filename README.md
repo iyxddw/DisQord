@@ -37,7 +37,7 @@ DisQord 是一个自托管的 QQ ↔ Discord 消息桥。它把 QQ 群和 Discor
 - 识别 QQ / Discord 原生回复，并把跨平台回复映射回另一端的原消息。
 - 支持文本、图片和图文消息；不支持的消息类型会以提示卡片转发。
 - Discord 自定义表情会获取原始图片，并按接近文字高度内嵌到卡片正文中；普通图片仍保持独立图片区块。
-- QQ `[CQ:face,id=123]` 使用 `apps/qq-node/default-emojis/123.png` 作为本地内联表情，正文和回复预览都会渲染。
+- QQ `[CQ:face,id=123]` 由 Discord 节点使用 `apps/discord-node/default-emojis/123.png` 本地渲染，正文和回复预览都会显示。
 - 节点断线自动重连，中央端负责去重、投递确认和回复 ID 映射，节点本地保存失败重试队列。
 - 中央运行日志和节点日志最多保留 `16,384` 条，采用追加写入并在需要时批量整理。
 - 不依赖 MySQL、PostgreSQL、Redis 或 Docker；中央状态和节点数据写入各自的数据目录。

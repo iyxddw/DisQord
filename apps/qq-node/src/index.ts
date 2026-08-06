@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 import { NapCatOneBotClient } from '@disqord/adapter-napcat';
 import {
@@ -20,7 +20,6 @@ process.on('uncaughtException', (error: unknown) => {
 });
 
 export const program = createProgramDescriptor('qq-node');
-const defaultEmojiDirectory = fileURLToPath(new URL('../default-emojis', import.meta.url));
 
 const envSchema = z.object({
   CENTRAL_WSS_URL: z.url(),
@@ -30,7 +29,6 @@ const envSchema = z.object({
   ALLOW_INSECURE_CENTRAL: z.enum(['true', 'false']).default('false'),
   NAPCAT_ONEBOT_WS_URL: z.url(),
   NAPCAT_ACCESS_TOKEN: z.string().optional(),
-  QQ_DEFAULT_EMOJI_DIR: z.string().min(1).default(defaultEmojiDirectory),
   NODE_WEB_HOST: z.string().default('127.0.0.1'),
   NODE_WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(8090),
   NODE_WEB_TOKEN: z.string().min(16).optional(),
@@ -40,16 +38,10 @@ const envSchema = z.object({
 class QqPlatformAdapter implements PlatformAdapter {
   readonly #client: NapCatOneBotClient;
 
-  constructor(
-    nodeId: string,
-    url: string,
-    accessToken: string | undefined,
-    emojiDirectory: string,
-  ) {
+  constructor(nodeId: string, url: string, accessToken: string | undefined) {
     this.#client = new NapCatOneBotClient({
       url,
       nodeId,
-      emojiDirectory,
       ...(accessToken ? { accessToken } : {}),
       onMessage: async (message) => await this.#dispatch.handler?.(message),
     });
@@ -108,7 +100,6 @@ export async function startQqNode(environment: NodeJS.ProcessEnv = process.env):
         identity.nodeId,
         env.NAPCAT_ONEBOT_WS_URL,
         env.NAPCAT_ACCESS_TOKEN,
-        resolve(env.QQ_DEFAULT_EMOJI_DIR),
       );
     },
     onStatus: ({ state, detail }) => {

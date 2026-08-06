@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { DiscordBotAdapter } from '@disqord/adapter-discord';
 import {
@@ -20,6 +20,7 @@ process.on('uncaughtException', (error: unknown) => {
 });
 
 export const program = createProgramDescriptor('discord-node');
+const defaultEmojiDirectory = fileURLToPath(new URL('../default-emojis', import.meta.url));
 
 const envSchema = z.object({
   CENTRAL_WSS_URL: z.url(),
@@ -28,6 +29,7 @@ const envSchema = z.object({
   NODE_LOG_PATH: z.string().min(1).default('./logs/discord-node.jsonl'),
   ALLOW_INSECURE_CENTRAL: z.enum(['true', 'false']).default('false'),
   DISCORD_BOT_TOKEN: z.string().min(1),
+  DISCORD_DEFAULT_EMOJI_DIR: z.string().min(1).default(defaultEmojiDirectory),
   NODE_WEB_HOST: z.string().default('127.0.0.1'),
   NODE_WEB_PORT: z.coerce.number().int().min(1).max(65_535).default(8090),
   NODE_WEB_TOKEN: z.string().min(16).optional(),
@@ -92,6 +94,7 @@ export async function startDiscordNode(
     configPath: resolve(env.NODE_CONFIG_PATH),
     queuePath: resolve(env.NODE_QUEUE_PATH),
     logPath: resolve(env.NODE_LOG_PATH),
+    inlineEmojiDirectory: resolve(env.DISCORD_DEFAULT_EMOJI_DIR),
     allowInsecureCentral: env.ALLOW_INSECURE_CENTRAL === 'true',
     createAdapter: (identity) => new DiscordPlatformAdapter(identity.nodeId, env.DISCORD_BOT_TOKEN),
     onStatus: ({ state, detail }) => {

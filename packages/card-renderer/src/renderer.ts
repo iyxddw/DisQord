@@ -128,6 +128,12 @@ async function normalizeCanvasInput(
   const spec = messageCardRenderSpecSchema.parse(candidate);
   const images = spec.images.map((media) => media.dataUri);
   const replyImage = spec.reply?.imagePreview?.dataUri;
+  const inlineEmojis = spec.inlineEmojis?.flatMap((emoji) =>
+    emoji.dataUri ? [{ token: emoji.token, dataUri: emoji.dataUri }] : [],
+  );
+  const replyInlineEmojis = spec.reply?.inlineEmojis?.flatMap((emoji) =>
+    emoji.dataUri ? [{ token: emoji.token, dataUri: emoji.dataUri }] : [],
+  );
   return {
     sourcePlatform: spec.sourcePlatform,
     targetLanguage: spec.targetLanguage,
@@ -138,27 +144,13 @@ async function normalizeCanvasInput(
     primaryText: spec.primaryText,
     ...(spec.originalText ? { originalText: spec.originalText } : {}),
     images,
-    ...(spec.inlineEmojis?.length
-      ? {
-          inlineEmojis: spec.inlineEmojis.map((emoji) => ({
-            token: emoji.token,
-            dataUri: emoji.dataUri,
-          })),
-        }
-      : {}),
+    ...(inlineEmojis?.length ? { inlineEmojis } : {}),
     ...(spec.reply
       ? {
           reply: {
             senderName: spec.reply.senderName,
             ...(spec.reply.textPreview ? { textPreview: spec.reply.textPreview } : {}),
-            ...(spec.reply.inlineEmojis?.length
-              ? {
-                  inlineEmojis: spec.reply.inlineEmojis.map((emoji) => ({
-                    token: emoji.token,
-                    dataUri: emoji.dataUri,
-                  })),
-                }
-              : {}),
+            ...(replyInlineEmojis?.length ? { inlineEmojis: replyInlineEmojis } : {}),
             ...(replyImage ? { imagePreview: replyImage } : {}),
           },
         }

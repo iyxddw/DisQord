@@ -96,8 +96,7 @@ describe('normalizeNapCatGroupMessage', () => {
     expect(message?.text).toBe('是这样的啊');
   });
 
-  it('keeps QQ face CQ codes as inline emoji references when a local image is available', () => {
-    const dataUri = 'data:image/png;base64,aGVsbG8=';
+  it('keeps QQ face CQ codes as local inline emoji references', () => {
     const message = normalizeNapCatGroupMessage(
       {
         ...baseEvent,
@@ -108,9 +107,6 @@ describe('normalizeNapCatGroupMessage', () => {
         ],
       },
       randomUUID(),
-      new Map(),
-      new Map(),
-      new Map([['123', dataUri]]),
     );
 
     expect(message).toMatchObject({
@@ -119,26 +115,21 @@ describe('normalizeNapCatGroupMessage', () => {
         {
           token: '[CQ:face,id=123]',
           id: '123',
-          dataUri,
         },
       ],
     });
   });
 
   it('also extracts CQ face codes embedded in text segments', () => {
-    const dataUri = 'data:image/png;base64,aGVsbG8=';
     const message = normalizeNapCatGroupMessage(
       {
         ...baseEvent,
         message: [{ type: 'text', data: { text: '测试[CQ:face,id=123]' } }],
       },
       randomUUID(),
-      new Map(),
-      new Map(),
-      new Map([['123', dataUri]]),
     );
 
-    expect(message?.customEmojis).toMatchObject([{ token: '[CQ:face,id=123]', dataUri }]);
+    expect(message?.customEmojis).toMatchObject([{ token: '[CQ:face,id=123]', id: '123' }]);
   });
 
   it('ignores a QQ message that only mentions the logged-in account', () => {
@@ -176,7 +167,6 @@ describe('normalizeNapCatGroupMessage', () => {
                 name: 'qq-face-123',
                 id: '123',
                 animated: false,
-                dataUri: 'data:image/png;base64,aGVsbG8=',
               },
             ],
             imageUrl: 'https://example.test/reply.png',
@@ -189,7 +179,7 @@ describe('normalizeNapCatGroupMessage', () => {
       sourceMessageId: '88',
       senderDisplayName: '上一位用户',
       textPreview: '上一条消息',
-      customEmojis: [{ token: '[CQ:face,id=123]', dataUri: 'data:image/png;base64,aGVsbG8=' }],
+      customEmojis: [{ token: '[CQ:face,id=123]', id: '123' }],
       imagePreview: { sourceUrl: 'https://example.test/reply.png' },
     });
   });

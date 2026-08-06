@@ -1,6 +1,4 @@
-import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -8,10 +6,8 @@ import { z } from 'zod';
 import {
   createNapCatCustomEmojis,
   createNapCatFaceToken,
-  extractNapCatFaceIds,
   normalizeNapCatGroupMessage,
   napCatGroupMessageEventSchema,
-  type NapCatMessageSegment,
   type NapCatReplyPreview,
 } from './normalize.js';
 
@@ -67,7 +63,6 @@ export interface NapCatClientOptions {
   readonly url: string;
   readonly accessToken?: string;
   readonly nodeId: string;
-  readonly emojiDirectory?: string;
   readonly onMessage: (
     message: NonNullable<ReturnType<typeof normalizeNapCatGroupMessage>>,
   ) => void | Promise<void>;
@@ -88,8 +83,6 @@ export class NapCatOneBotClient {
     string,
     { preview: NapCatReplyPreview; expiresAt: number }
   >();
-  readonly #emojiDirectory: string | undefined;
-  readonly #emojiDataUriCache = new Map<string, string | undefined>();
   #socket: WebSocket | undefined;
   #manualClose = false;
   #reconnectTimer: NodeJS.Timeout | undefined;
@@ -100,7 +93,6 @@ export class NapCatOneBotClient {
       throw new Error('NapCat OneBot URL must use ws:// or wss://.');
     }
     this.#options = options;
-    this.#emojiDirectory = options.emojiDirectory;
   }
 
   async connect(): Promise<void> {
@@ -237,17 +229,11 @@ export class NapCatOneBotClient {
         withTimeout(this.#resolveMentionNames(event.data), new Map(), MESSAGE_METADATA_BUDGET_MS),
         withTimeout(this.#resolveReplyPreviews(event.data), new Map(), MESSAGE_METADATA_BUDGET_MS),
       ]);
-      const faceDataUris = await withTimeout(
-        this.#resolveFaceDataUris(event.data.message),
-        new Map<string, string>(),
-        MESSAGE_METADATA_BUDGET_MS,
-      );
       const message = normalizeNapCatGroupMessage(
         event.data,
         this.#options.nodeId,
         mentionNames,
         replyPreviews,
-        faceDataUris,
       );
       if (message) await this.#options.onMessage(message);
     }
@@ -278,7 +264,6 @@ export class NapCatOneBotClient {
             await this.call('get_msg', { message_id: messageId }),
           );
           const messageSegments = replied.message ?? [];
-          const faceDataUris = await this.#resolveFaceDataUris(messageSegments);
           const text = (replied.message ?? [])
             .filter(
               (segment) =>
@@ -293,7 +278,7 @@ export class NapCatOneBotClient {
             )
             .join('')
             .trim();
-          const customEmojis = createNapCatCustomEmojis(messageSegments, faceDataUris);
+          const customEmojis = createNapCatCustomEmojis(messageSegments);
           const image = (replied.message ?? []).find(
             (segment) => segment.type === 'image' && typeof segment.data.url === 'string',
           );
@@ -365,30 +350,6 @@ export class NapCatOneBotClient {
     return names;
   }
 
-  async #resolveFaceDataUris(
-    segments: readonly NapCatMessageSegment[],
-  ): Promise<ReadonlyMap<string, string>> {
-    if (!this.#emojiDirectory) return new Map();
-    const ids = extractNapCatFaceIds(segments).slice(0, 32);
-    const entries = await Promise.all(
-      ids.map(async (id) => {
-        if (this.#emojiDataUriCache.has(id)) {
-          const cached = this.#emojiDataUriCache.get(id);
-          return cached ? ([id, cached] as const) : undefined;
-        }
-        try {
-          const bytes = await readFile(join(this.#emojiDirectory!, `${id}.png`));
-          const dataUri = `data:image/png;base64,${bytes.toString('base64')}`;
-          this.#emojiDataUriCache.set(id, dataUri);
-          return [id, dataUri] as const;
-        } catch {
-          this.#emojiDataUriCache.set(id, undefined);
-          return undefined;
-        }
-      }),
-    );
-    return new Map(entries.filter((entry): entry is readonly [string, string] => Boolean(entry)));
-  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, fallback: T, timeoutMs: number): Promise<T> {
