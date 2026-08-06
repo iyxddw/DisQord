@@ -67,6 +67,8 @@ export interface OpenAICompatibleClientOptions {
   readonly apiKey: string;
   readonly timeoutMs?: number;
   readonly maxRetries?: number;
+  /** Cap on completion output tokens; sent as `max_tokens` to prevent truncation. */
+  readonly maxTokens?: number;
   readonly fetchImplementation?: typeof fetch;
 }
 
@@ -90,6 +92,7 @@ export class OpenAICompatibleClient {
   readonly #apiKey: string;
   readonly #timeoutMs: number;
   readonly #maxRetries: number;
+  readonly #maxTokens: number | undefined;
   readonly #fetch: typeof fetch;
 
   constructor(options: OpenAICompatibleClientOptions) {
@@ -97,6 +100,7 @@ export class OpenAICompatibleClient {
     this.#apiKey = options.apiKey;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#maxRetries = options.maxRetries ?? 2;
+    this.#maxTokens = options.maxTokens;
     this.#fetch = options.fetchImplementation ?? fetch;
     if (!this.#baseUrl.startsWith('https://') && !this.#baseUrl.startsWith('http://127.0.0.1')) {
       throw new Error('LLM API must use HTTPS unless it is a local loopback service.');
@@ -138,6 +142,7 @@ export class OpenAICompatibleClient {
         { role: 'user', content: userContent },
       ],
       response_format: this.#responseFormat(request),
+      ...this.#maxTokensField(),
       ...this.#thinking(request.enableThinking),
     };
 
@@ -261,6 +266,12 @@ export class OpenAICompatibleClient {
       };
     }
     return { type: 'json_object' };
+  }
+
+  /** Sends the configured output-token cap only when one is set. */
+  #maxTokensField(): Record<string, unknown> {
+    if (this.#maxTokens === undefined) return {};
+    return { max_tokens: this.#maxTokens };
   }
 
   /**

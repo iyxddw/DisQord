@@ -2376,6 +2376,7 @@ function LlmSettings() {
     maxImageBytes: 10 * 1024 * 1024,
     timeoutMs: 30000,
     maxRetries: 2,
+    maxTokens: 2048 as number | '',
     concurrency: 4,
     fastMode: false,
     fastDeliveryIntervalMs: 1500,
@@ -2384,7 +2385,12 @@ function LlmSettings() {
   const [notice, setNotice] = useState('');
   useEffect(() => {
     if (Object.keys(settings.data).length)
-      setForm((current) => ({ ...current, ...settings.data, apiKey: '' }));
+      setForm((current) => ({
+        ...current,
+        ...settings.data,
+        maxTokens: (settings.data.maxTokens as number | undefined) ?? '',
+        apiKey: '',
+      }));
   }, [settings.data]);
   useEffect(() => {
     setSimulationDelayMs(simulation.data.delayMs ?? 1_000);
@@ -2396,7 +2402,11 @@ function LlmSettings() {
           '/settings/llm',
           {
             method: 'PUT',
-            json: { ...form, ...(form.apiKey ? {} : { apiKey: undefined }) },
+            json: {
+              ...form,
+              ...(form.apiKey ? {} : { apiKey: undefined }),
+              ...(form.maxTokens === '' ? { maxTokens: undefined } : {}),
+            },
           },
           { attempts: 3 },
         ),
@@ -2521,6 +2531,26 @@ function LlmSettings() {
             onChange={(event) => setForm({ ...form, maxRetries: Number(event.target.value) })}
           />
           <small className="field-hint">仅对限流和服务器错误自动重试。</small>
+        </label>
+        <label>
+          最大输出 token 数
+          <input
+            type="number"
+            min="64"
+            max="65536"
+            value={form.maxTokens}
+            placeholder="留空则不发送，使用服务商默认"
+            onChange={(event) =>
+              setForm({
+                ...form,
+                maxTokens: event.target.value === '' ? '' : Number(event.target.value),
+              })
+            }
+          />
+          <small className="field-hint">
+            默认 2048；留空表示不发送
+            max_tokens，采用服务商默认（部分服务商默认较低，长文本可能被截断）。
+          </small>
         </label>
         <label>
           并发数

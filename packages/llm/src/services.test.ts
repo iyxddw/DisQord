@@ -7,6 +7,7 @@ import {
   LlmTranslationService,
   OpenAICompatibleClient,
   PromptVersionStore,
+  llmSettingsSchema,
 } from './index.js';
 
 function jsonCompletion(content: unknown): Response {
@@ -323,6 +324,66 @@ describe('LLM translation and moderation', () => {
       thinking?: unknown;
     };
     expect(body.thinking).toBeUndefined();
+  });
+
+  it('sends max_tokens when a cap is configured and omits it otherwise', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: 'Hello',
+        confidence: 0.99,
+      }),
+    );
+    const capped = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      maxTokens: 2048,
+      fetchImplementation,
+    });
+    await new LlmTranslationService(capped).translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'translation-model',
+      prompt: { content: '准确翻译。', version: 1 },
+    });
+    const cappedBody = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      max_tokens?: number;
+    };
+    expect(cappedBody.max_tokens).toBe(2048);
+
+    fetchImplementation.mockClear();
+    const uncapped = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+    await new LlmTranslationService(uncapped).translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'translation-model',
+      prompt: { content: '准确翻译。', version: 1 },
+    });
+    const uncappedBody = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      max_tokens?: number;
+    };
+    expect(uncappedBody.max_tokens).toBeUndefined();
+  });
+
+  it('treats maxTokens as optional in the settings schema', () => {
+    const withCap = llmSettingsSchema.parse({
+      baseUrl: 'https://llm.example.test/v1',
+      translationModel: 'translate',
+      moderationModel: 'moderate',
+      maxTokens: 4096,
+    });
+    expect(withCap.maxTokens).toBe(4096);
+
+    const withoutCap = llmSettingsSchema.parse({
+      baseUrl: 'https://llm.example.test/v1',
+      translationModel: 'translate',
+      moderationModel: 'moderate',
+    });
+    expect(withoutCap.maxTokens).toBeUndefined();
   });
 });
 

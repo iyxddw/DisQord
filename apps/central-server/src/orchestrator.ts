@@ -2258,6 +2258,7 @@ export class CentralMessageProcessor implements MessageProcessor {
         apiKey,
         timeoutMs: settings.timeoutMs,
         maxRetries: settings.maxRetries,
+        ...(settings.maxTokens === undefined ? {} : { maxTokens: settings.maxTokens }),
       }),
     };
   }

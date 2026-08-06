@@ -75,6 +75,7 @@ const llmSettingsInputSchema = z.object({
     .default(10 * 1024 * 1024),
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
+  maxTokens: z.number().int().min(64).max(65_536).optional(),
   concurrency: z.number().int().min(1).max(100).default(4),
   fastMode: z.boolean().default(false),
   fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(1_500),
