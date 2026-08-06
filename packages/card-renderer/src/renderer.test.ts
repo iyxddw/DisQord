@@ -209,7 +209,8 @@ describe('message card renderer', () => {
   });
 
   it('slices a tall image so the next message head stitches to the tail', async () => {
-    const image = await rowEncodedPng(400, 3_000);
+    // 888 wide keeps scale 1, so band boundaries land on exact source rows.
+    const image = await rowEncodedPng(888, 3_000);
     const cards = await renderMessageCards({
       sourcePlatform: 'qq',
       sourceName: '群',
@@ -251,6 +252,7 @@ describe('message card renderer', () => {
   });
 
   it('keeps every sliced card within the height cap', async () => {
+    // 400x10000 upscales to 888 wide, i.e. 22200px tall -> 11 bands.
     const image = await rowEncodedPng(400, 10_000);
     const cards = await renderMessageCards({
       sourcePlatform: 'qq',
@@ -260,11 +262,30 @@ describe('message card renderer', () => {
       primaryText: '超长图',
       images: [image],
     });
-    // 10000px tall -> 5 bands: main card + 4 tile cards.
-    expect(cards.length).toBe(5);
+    // Main card + 10 tile cards; every card stays within the platform cap.
+    expect(cards.length).toBe(11);
     for (const card of cards) {
       const metadata = await sharp(card).metadata();
       expect(metadata.height).toBeLessThanOrEqual(8_192);
     }
+  });
+
+  it('scales every image to the fixed content width', async () => {
+    const render = async (size: number): Promise<number> => {
+      const [card] = await renderMessageCards({
+        sourcePlatform: 'qq',
+        sourceName: '群',
+        senderName: 'Alice',
+        sentAt: '2026-08-06 12:00',
+        primaryText: '固定宽度',
+        images: [await rowEncodedPng(size, size)],
+      });
+      const metadata = await sharp(card).metadata();
+      return metadata.height!;
+    };
+    // 200x200 and 400x400 both scale up to the 888px content width, so the two
+    // cards are identical: one primary line (chrome 352) + an 888px image.
+    expect(await render(200)).toBe(await render(400));
+    expect(await render(200)).toBe(352 + 888);
   });
 });

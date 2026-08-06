@@ -398,7 +398,9 @@ async function loadSizedImages(dataUris: readonly string[]): Promise<readonly Si
     dataUris.map(async (dataUri): Promise<SizedImage | undefined> => {
       const image = await loadDataImage(dataUri);
       if (!image) return undefined;
-      const scale = Math.min(1, contentWidth / image.width);
+      // Every image spans the fixed content width, so narrow images upscale and
+      // all blocks render centered with even margins on both sides.
+      const scale = contentWidth / image.width;
       return {
         image,
         w: Math.max(1, Math.round(image.width * scale)),
