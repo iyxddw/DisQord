@@ -521,6 +521,7 @@ type FlowData = {
   sessionId?: string;
   prompt?: string;
   memoryMode?: boolean;
+  enableThinking?: boolean;
   threshold?: number;
   text?: string;
   outputText?: string;
@@ -686,14 +687,24 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
             onChange={(event) => patchData({ prompt: event.target.value })}
             placeholder="翻译提示词"
           />
-          <label className="memory-toggle">
-            <input
-              type="checkbox"
-              checked={Boolean(data.memoryMode)}
-              onChange={(event) => patchData({ memoryMode: event.target.checked })}
-            />
-            <span>记忆模式</span>
-          </label>
+          <div className="flow-node-toggle-row">
+            <label className="memory-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(data.memoryMode)}
+                onChange={(event) => patchData({ memoryMode: event.target.checked })}
+              />
+              <span>记忆模式</span>
+            </label>
+            <label className="memory-toggle">
+              <input
+                type="checkbox"
+                checked={Boolean(data.enableThinking)}
+                onChange={(event) => patchData({ enableThinking: event.target.checked })}
+              />
+              <span>开启思考</span>
+            </label>
+          </div>
         </div>
       )}
       {data.kind === 'moderation' && (
@@ -714,6 +725,14 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
             onChange={(event) => patchData({ prompt: event.target.value })}
             placeholder="审核提示词"
           />
+          <label className="memory-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(data.enableThinking)}
+              onChange={(event) => patchData({ enableThinking: event.target.checked })}
+            />
+            <span>开启思考</span>
+          </label>
         </div>
       )}
       {data.kind === 'fixed' && (
@@ -927,13 +946,20 @@ function MobileFlowCard({
         )}
       {data.kind === 'translation' && (
         <div className="mobile-flow-readonly-config">
-          <span>{data.memoryMode ? '已开启记忆模式' : '未开启记忆模式'}</span>
+          <span>
+            {data.memoryMode ? '已开启记忆模式' : '未开启记忆模式'}
+            {' · '}
+            {data.enableThinking ? '已开启思考' : '未开启思考'}
+          </span>
           <p>{data.prompt || '未设置翻译提示词'}</p>
         </div>
       )}
       {data.kind === 'moderation' && (
         <div className="mobile-flow-readonly-config">
-          <span>允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%</span>
+          <span>
+            允许的最高违规分数：{Math.round((data.threshold ?? 0.5) * 100)}%{' · '}
+            {data.enableThinking ? '已开启思考' : '未开启思考'}
+          </span>
           <p>{data.prompt || '未设置审核提示词'}</p>
         </div>
       )}
@@ -1522,6 +1548,9 @@ function BlueprintEditor() {
             ...(typeof node.config.memoryMode === 'boolean'
               ? { memoryMode: node.config.memoryMode }
               : {}),
+            ...(typeof node.config.enableThinking === 'boolean'
+              ? { enableThinking: node.config.enableThinking }
+              : {}),
             ...(typeof node.config.threshold === 'number'
               ? { threshold: node.config.threshold }
               : {}),
@@ -1583,12 +1612,14 @@ function BlueprintEditor() {
         label: '翻译当前文本',
         prompt: defaultTranslationPrompt,
         memoryMode: false,
+        enableThinking: false,
       },
       moderation: {
         kind: 'moderation',
         label: '按违规分数分流',
         prompt: defaultModerationPrompt,
         threshold: 0.5,
+        enableThinking: false,
       },
       review: { kind: 'review', label: '等待管理员处理' },
       fixed: { kind: 'fixed', label: '替换当前文本', text: '内容未通过审核' },
@@ -1692,9 +1723,17 @@ function BlueprintEditor() {
         node.data.kind === 'input' || node.data.kind === 'output'
           ? { sessionId: node.data.sessionId }
           : node.data.kind === 'translation'
-            ? { prompt: node.data.prompt, memoryMode: Boolean(node.data.memoryMode) }
+            ? {
+                prompt: node.data.prompt,
+                memoryMode: Boolean(node.data.memoryMode),
+                enableThinking: Boolean(node.data.enableThinking),
+              }
             : node.data.kind === 'moderation'
-              ? { prompt: node.data.prompt, threshold: node.data.threshold ?? 0.5 }
+              ? {
+                  prompt: node.data.prompt,
+                  threshold: node.data.threshold ?? 0.5,
+                  enableThinking: Boolean(node.data.enableThinking),
+                }
               : node.data.kind === 'fixed'
                 ? { text: node.data.text ?? '' }
                 : {},

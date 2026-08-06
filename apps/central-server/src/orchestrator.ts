@@ -55,10 +55,12 @@ const chatConfigSchema = z.object({ sessionId: z.uuid() });
 const translationConfigSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000),
   memoryMode: z.boolean().default(false),
+  enableThinking: z.boolean().default(false),
 });
 const moderationConfigSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000),
   threshold: z.number().min(0).max(1),
+  enableThinking: z.boolean().default(false),
 });
 const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
@@ -103,6 +105,7 @@ export interface MessageProcessor {
     prompt: string,
     recentMessages: readonly MessageEnvelope[],
     memoryMode: boolean,
+    enableThinking: boolean,
   ): Promise<TranslationResult>;
   moderate?(
     text: string,
@@ -111,6 +114,7 @@ export interface MessageProcessor {
       readonly imageReviewRequested?: boolean;
       readonly imageCount?: number;
       readonly imageUrls?: readonly string[];
+      readonly enableThinking?: boolean;
     },
   ): Promise<ViolationAssessment>;
   render?(
@@ -426,6 +430,7 @@ export class MessageOrchestrator {
           config.prompt,
           [],
           config.memoryMode,
+          config.enableThinking,
         );
         state = { ...state, text: result.translatedText, fixedText: false };
         steps.push({
@@ -438,7 +443,9 @@ export class MessageOrchestrator {
         const config = moderationConfigSchema.parse(node.config);
         if (!this.#processor.moderate) throw new Error('审核处理器不可用。');
         const assessment = state.text.trim()
-          ? await this.#processor.moderate(state.text, config.prompt)
+          ? await this.#processor.moderate(state.text, config.prompt, {
+              enableThinking: config.enableThinking,
+            })
           : {
               violationScore: 0,
               categories: [],
@@ -1200,6 +1207,7 @@ export class MessageOrchestrator {
             config.prompt,
             recentMessages,
             config.memoryMode,
+            config.enableThinking,
           );
         } catch (error) {
           const errorDetails = describeError(error);
@@ -1258,8 +1266,13 @@ export class MessageOrchestrator {
           });
           try {
             assessment = moderationOptions
-              ? await this.#processor.moderate(moderationText, config.prompt, moderationOptions)
-              : await this.#processor.moderate(moderationText, config.prompt);
+              ? await this.#processor.moderate(moderationText, config.prompt, {
+                  ...moderationOptions,
+                  enableThinking: config.enableThinking,
+                })
+              : await this.#processor.moderate(moderationText, config.prompt, {
+                  enableThinking: config.enableThinking,
+                });
           } catch (error) {
             const errorDetails = describeError(error);
             await this.#log(message.traceId, 'error', 'moderation_failed', {
@@ -1962,6 +1975,7 @@ export class CentralMessageProcessor implements MessageProcessor {
     prompt: string,
     recentMessages: readonly MessageEnvelope[],
     memoryMode: boolean,
+    enableThinking: boolean,
   ): Promise<TranslationResult> {
     const { settings, client } = await this.#client();
     const protectedText = protectCustomEmojiText(text, message.customEmojis);
@@ -1970,6 +1984,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
       model: settings.translationModel,
       prompt: { content: prompt, version: 1 },
+      enableThinking,
       ...(memoryMode
         ? {
             recentMessages: recentMessages
@@ -2000,6 +2015,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       readonly imageReviewRequested?: boolean;
       readonly imageCount?: number;
       readonly imageUrls?: readonly string[];
+      readonly enableThinking?: boolean;
     },
   ): Promise<ViolationAssessment> {
     const unavailable = (
@@ -2019,6 +2035,9 @@ export class CentralMessageProcessor implements MessageProcessor {
         text,
         model: settings.moderationModel,
         prompt: { content: prompt, version: 1 },
+        ...(options?.enableThinking === undefined
+          ? {}
+          : { enableThinking: options.enableThinking }),
       });
     }
 
@@ -2070,6 +2089,9 @@ export class CentralMessageProcessor implements MessageProcessor {
         prompt: { content: prompt, version: 1 },
         images,
         imageDetail: settings.imageModerationDetail,
+        ...(options?.enableThinking === undefined
+          ? {}
+          : { enableThinking: options.enableThinking }),
       });
     } catch (error) {
       return unavailable('图片审核模型不支持视觉输入或请求失败。', {

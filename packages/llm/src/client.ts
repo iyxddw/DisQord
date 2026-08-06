@@ -81,6 +81,8 @@ export interface JsonCompletionRequest<TSchema extends z.ZodType> {
   readonly images?: readonly string[];
   readonly imageDetail?: 'auto' | 'low' | 'high';
   readonly temperature?: number;
+  /** Explicitly enable/disable the provider's thinking mode. */
+  readonly enableThinking?: boolean;
 }
 
 export class OpenAICompatibleClient {
@@ -136,6 +138,7 @@ export class OpenAICompatibleClient {
         { role: 'user', content: userContent },
       ],
       response_format: this.#responseFormat(request),
+      ...this.#thinking(request.enableThinking),
     };
 
     let lastError: LlmRequestError | undefined;
@@ -152,7 +155,11 @@ export class OpenAICompatibleClient {
         });
         const responseBody = await response.text();
         if (!response.ok) {
-          const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
+          const retryable =
+            response.status === 408 ||
+            response.status === 409 ||
+            response.status === 429 ||
+            response.status >= 500;
           const detail = extractApiError(responseBody);
           const error = new LlmRequestError(
             `LLM API request failed with status ${response.status}${detail ? `: ${detail}` : ''}.`,
@@ -256,6 +263,19 @@ export class OpenAICompatibleClient {
     return { type: 'json_object' };
   }
 
+  /**
+   * Maps the explicit thinking toggle to the OpenAI-compatible `thinking`
+   * request field. DeepSeek understands it and defaults to thinking ON, so an
+   * explicit flag is required to turn it off; other providers either support
+   * the same field or harmlessly ignore it, so the checkbox applies to
+   * whichever model is configured. When the flag is unset the provider default
+   * applies and nothing extra is sent.
+   */
+  #thinking(enableThinking: boolean | undefined): Record<string, unknown> {
+    if (enableThinking === undefined) return {};
+    return { thinking: { type: enableThinking ? 'enabled' : 'disabled' } };
+  }
+
   #failure<TSchema extends z.ZodType>(
     request: JsonCompletionRequest<TSchema>,
     attempt: number,
@@ -296,7 +316,10 @@ function parseJsonContent(content: string): ParsedJsonContent {
 
   const objectStart = normalized.indexOf('{');
   const arrayStart = normalized.indexOf('[');
-  const start = [objectStart, arrayStart].filter((value) => value >= 0).sort((left, right) => left - right)[0] ?? -1;
+  const start =
+    [objectStart, arrayStart]
+      .filter((value) => value >= 0)
+      .sort((left, right) => left - right)[0] ?? -1;
   if (start < 0) throw new SyntaxError('no JSON object or array found');
   let depth = 0;
   let inString = false;
@@ -325,7 +348,10 @@ function parseJsonContent(content: string): ParsedJsonContent {
   }
   if (end < 0) throw new SyntaxError('incomplete JSON object or array');
   const value = JSON.parse(normalized.slice(start, end)) as unknown;
-  const trailing = normalized.slice(end).replace(/^\s*```\s*$/u, '').trim();
+  const trailing = normalized
+    .slice(end)
+    .replace(/^\s*```\s*$/u, '')
+    .trim();
   return trailing ? { value, trailing } : { value };
 }
 

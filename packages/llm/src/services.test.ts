@@ -19,10 +19,10 @@ function jsonCompletion(content: unknown): Response {
 }
 
 function rawJsonCompletion(content: string): Response {
-  return new Response(
-    JSON.stringify({ choices: [{ message: { content } }] }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  );
+  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 describe('LLM translation and moderation', () => {
@@ -237,6 +237,92 @@ describe('LLM translation and moderation', () => {
         image_url: { url: 'data:image/png;base64,aGVsbG8=', detail: 'high' },
       },
     ]);
+  });
+
+  it('sends an explicit thinking toggle to a DeepSeek-compatible endpoint', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: 'Hello',
+        confidence: 0.99,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+    const service = new LlmTranslationService(client);
+
+    await service.translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'deepseek-v4-flash',
+      prompt: { content: '准确翻译。', version: 1 },
+      enableThinking: false,
+    });
+
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      thinking?: { type: string };
+    };
+    expect(body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('sends the enabled thinking toggle to any OpenAI-compatible provider', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: 'Hello',
+        confidence: 0.99,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+    const service = new LlmTranslationService(client);
+
+    await service.translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'other-model',
+      prompt: { content: '准确翻译。', version: 1 },
+      enableThinking: true,
+    });
+
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      thinking?: { type: string };
+    };
+    expect(body.thinking).toEqual({ type: 'enabled' });
+  });
+
+  it('omits the thinking field when enableThinking is not set', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: 'Hello',
+        confidence: 0.99,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+    const service = new LlmTranslationService(client);
+
+    await service.translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'deepseek-v4-flash',
+      prompt: { content: '准确翻译。', version: 1 },
+    });
+
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      thinking?: unknown;
+    };
+    expect(body.thinking).toBeUndefined();
   });
 });
 

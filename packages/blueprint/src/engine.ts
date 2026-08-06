@@ -19,10 +19,12 @@ const textConditionConfigSchema = z.object({
 const translationConfigSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000),
   memoryMode: z.boolean().default(false),
+  enableThinking: z.boolean().default(false),
 });
 const moderationConfigSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000),
   threshold: z.number().min(0).max(1),
+  enableThinking: z.boolean().default(false),
 });
 const fixedTextConfigSchema = z.object({ text: z.string().max(30_000) });
 

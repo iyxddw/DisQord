@@ -1023,6 +1023,11 @@ button.fit {
   padding: 0;
   accent-color: var(--cyan);
 }
+.flow-node-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
 .memory-toggle {
   display: flex !important;
   align-items: center;

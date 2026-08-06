@@ -50,6 +50,7 @@ export interface TranslationRequest {
   readonly prompt: PublishedPrompt;
   readonly recentMessages?: readonly { sender: string; text: string }[];
   readonly repliedMessage?: { sender: string; text: string };
+  readonly enableThinking?: boolean;
 }
 
 export interface ModerationRequest {
@@ -58,6 +59,7 @@ export interface ModerationRequest {
   readonly prompt: PublishedPrompt;
   readonly images?: readonly string[];
   readonly imageDetail?: 'auto' | 'low' | 'high';
+  readonly enableThinking?: boolean;
 }
 
 export interface ViolationAssessment {
@@ -92,6 +94,7 @@ export class LlmTranslationService {
         recentMessages: request.recentMessages ?? [],
         repliedMessage: request.repliedMessage ?? null,
       },
+      ...(request.enableThinking === undefined ? {} : { enableThinking: request.enableThinking }),
     });
     return translationResultSchema.parse({
       ...result,
@@ -123,6 +126,7 @@ export class LlmModerationService {
       ...(request.images?.length
         ? { images: request.images, imageDetail: request.imageDetail }
         : {}),
+      ...(request.enableThinking === undefined ? {} : { enableThinking: request.enableThinking }),
     });
     return {
       ...result,

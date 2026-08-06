@@ -780,8 +780,9 @@ describe('blueprint message pipeline', () => {
       '翻译提示词',
       expect.arrayContaining([expect.objectContaining({ text: '上一条' })]),
       true,
+      false,
     );
-    expect(moderate).toHaveBeenCalledWith('Hello', '审核提示词');
+    expect(moderate).toHaveBeenCalledWith('Hello', '审核提示词', { enableThinking: false });
     expect(render).toHaveBeenCalledWith(incoming, setup.targetSession, 'Hello', false);
     await waitFor(() => setup.sendToNode.mock.calls.length === 1);
     expect(setup.sendToNode).toHaveBeenCalledOnce();
@@ -990,7 +991,9 @@ describe('blueprint message pipeline', () => {
     });
 
     await waitFor(() => render.mock.calls.length === 1);
-    expect(moderate).toHaveBeenCalledWith('当前回复\n被回复消息原文：原始文本消息', '审核');
+    expect(moderate).toHaveBeenCalledWith('当前回复\n被回复消息原文：原始文本消息', '审核', {
+      enableThinking: false,
+    });
     expect(render).toHaveBeenCalledWith(
       expect.objectContaining({
         replyTo: expect.objectContaining({
