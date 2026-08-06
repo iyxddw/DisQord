@@ -160,6 +160,11 @@ describe('message card renderer', () => {
           dataUri: image,
         },
       ],
+      reply: {
+        senderName: 'Bob',
+        textPreview: '引用 <:reply:2>',
+        inlineEmojis: [{ token: '<:reply:2>', dataUri: image }],
+      },
       images: [image],
     });
 

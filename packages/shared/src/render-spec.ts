@@ -75,6 +75,7 @@ export const messageCardRenderSpecSchema = z.object({
     .object({
       senderName: z.string().trim().min(1).max(256),
       textPreview: z.string().max(1_000).optional(),
+      inlineEmojis: z.array(messageCardInlineEmojiSchema).max(32).optional(),
       imagePreview: messageCardMediaSchema.optional(),
     })
     .optional(),

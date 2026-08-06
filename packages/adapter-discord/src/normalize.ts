@@ -134,6 +134,9 @@ export function normalizeDiscordMessage(
   const referencedText = referenced
     ? replaceDiscordUserMentions(referenced.content, referenced.mentions, selfUserId)
     : undefined;
+  const referencedCustomEmojis = referenced
+    ? extractDiscordCustomEmojis(referenced.content)
+    : undefined;
 
   if (!text && attachments.length === 0 && !unsupportedType) return undefined;
 
@@ -164,6 +167,7 @@ export function normalizeDiscordMessage(
             sourceMessageId: replyId,
             senderDisplayName: referenced?.authorDisplayName ?? 'Replied user',
             ...(referencedText ? { textPreview: referencedText.slice(0, 1_000) } : {}),
+            ...(referencedCustomEmojis ? { customEmojis: referencedCustomEmojis } : {}),
             ...(referenced?.imageUrl
               ? {
                   imagePreview: {

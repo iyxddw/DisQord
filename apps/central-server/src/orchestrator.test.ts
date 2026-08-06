@@ -345,6 +345,39 @@ describe('blueprint message pipeline', () => {
     ).toEqual({ sourceUrl: 'https://q1.qlogo.cn/g?b=qq&nk=12345&s=640' });
   });
 
+  it('passes local message and reply emojis into the client render spec', async () => {
+    const setup = await fixture([], [], {});
+    const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
+    const dataUri = 'data:image/png;base64,aGVsbG8=';
+    const emoji = {
+      token: '[CQ:face,id=123]',
+      name: 'qq-face-123',
+      id: '123',
+      animated: false,
+      dataUri,
+    } as const;
+    const incoming: MessageEnvelope = {
+      ...message(setup.sourceSession.nodeId, '正文[CQ:face,id=123]'),
+      customEmojis: [emoji],
+      replyTo: {
+        sourceMessageId: '88',
+        senderDisplayName: '上一位用户',
+        textPreview: '回复[CQ:face,id=123]',
+        customEmojis: [emoji],
+      },
+    };
+
+    const spec = await processor.prepareRender(
+      incoming,
+      setup.targetSession,
+      incoming.text!,
+      false,
+    );
+
+    expect(spec.inlineEmojis).toEqual([{ token: emoji.token, dataUri }]);
+    expect(spec.reply?.inlineEmojis).toEqual([{ token: emoji.token, dataUri }]);
+  });
+
   it('serves an avatar response for a node cache miss', async () => {
     const avatar = 'data:image/png;base64,aGVsbG8=';
     const resolveAvatar = vi.fn(async (avatarKey: string) =>

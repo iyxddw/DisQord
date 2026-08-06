@@ -1109,6 +1109,9 @@ export class MessageOrchestrator {
           ...(bridgeReplyOriginal.text?.trim()
             ? { textPreview: bridgeReplyOriginal.text.slice(0, 1000) }
             : {}),
+          ...(bridgeReplyOriginal.customEmojis?.length
+            ? { customEmojis: bridgeReplyOriginal.customEmojis }
+            : {}),
         },
       };
     }
@@ -2155,17 +2158,10 @@ export class CentralMessageProcessor implements MessageProcessor {
           .filter((image): image is NonNullable<typeof image> => Boolean(image))
           .map((image) => image.dataUri)
       : [];
-    const inlineEmojis = (
-      await Promise.all(
-        (message.customEmojis ?? []).map(async (emoji) => {
-          const image = await downloadExternalImage(emoji.sourceUrl, {
-            maxBytes: 2 * 1024 * 1024,
-            resize: { width: 64, height: 64, fit: 'inside' },
-          }).catch(() => undefined);
-          return image ? { token: emoji.token, dataUri: image.dataUri } : undefined;
-        }),
-      )
-    ).filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));
+    const [inlineEmojis, replyInlineEmojis] = await Promise.all([
+      this.#resolveInlineEmojis(message.customEmojis),
+      this.#resolveInlineEmojis(message.replyTo?.customEmojis),
+    ]);
     return {
       sourcePlatform: message.source.platform,
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
@@ -2183,6 +2179,7 @@ export class CentralMessageProcessor implements MessageProcessor {
             reply: {
               senderName: message.replyTo.senderDisplayName,
               ...(message.replyTo.textPreview ? { textPreview: message.replyTo.textPreview } : {}),
+              ...(replyInlineEmojis.length ? { inlineEmojis: replyInlineEmojis } : {}),
               ...(replyImage ? { imagePreview: { dataUri: replyImage.dataUri } } : {}),
             },
           }
@@ -2192,6 +2189,28 @@ export class CentralMessageProcessor implements MessageProcessor {
         : {}),
       traceLabel: message.traceId.slice(0, 8),
     } satisfies MessageCardRenderSpec;
+  }
+
+  async #resolveInlineEmojis(
+    emojis: MessageEnvelope['customEmojis'],
+  ): Promise<NonNullable<MessageCardRenderSpec['inlineEmojis']>> {
+    return (
+      await Promise.all(
+        (emojis ?? []).map(async (emoji) => {
+          const dataUri =
+            emoji.dataUri ??
+            (emoji.sourceUrl
+              ? (
+                  await downloadExternalImage(emoji.sourceUrl, {
+                    maxBytes: 2 * 1024 * 1024,
+                    resize: { width: 64, height: 64, fit: 'inside' },
+                  }).catch(() => undefined)
+                )?.dataUri
+              : undefined);
+          return dataUri ? { token: emoji.token, dataUri } : undefined;
+        }),
+      )
+    ).filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));
   }
 
   async #rememberAvatarSource(avatarKey: string, sourceUrl: string): Promise<void> {

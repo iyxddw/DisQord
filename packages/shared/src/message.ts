@@ -18,14 +18,23 @@ export const mediaReferenceSchema = z.object({
   height: z.number().int().positive().optional(),
 });
 
-export const customEmojiReferenceSchema = z.object({
-  /** The exact Discord token as it appeared in the message body. */
-  token: z.string().trim().min(1).max(128),
-  name: z.string().trim().min(1).max(64),
-  id: externalIdSchema,
-  animated: z.boolean(),
-  sourceUrl: z.url(),
-});
+export const customEmojiReferenceSchema = z
+  .object({
+    /** The exact platform token as it appeared in the message body. */
+    token: z.string().trim().min(1).max(128),
+    name: z.string().trim().min(1).max(64),
+    id: externalIdSchema,
+    animated: z.boolean(),
+    sourceUrl: z.url().optional(),
+    dataUri: z
+      .string()
+      .regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u)
+      .max(2 * 1024 * 1024)
+      .optional(),
+  })
+  .refine((emoji) => Boolean(emoji.sourceUrl || emoji.dataUri), {
+    message: 'Custom emojis require either a source URL or inline image data.',
+  });
 
 export const replyReferenceSchema = z.object({
   sourceMessageId: externalIdSchema,
@@ -33,6 +42,7 @@ export const replyReferenceSchema = z.object({
   senderId: externalIdSchema.optional(),
   senderDisplayName: z.string().trim().min(1).max(256),
   textPreview: z.string().max(1_000).optional(),
+  customEmojis: z.array(customEmojiReferenceSchema).max(32).optional(),
   imagePreview: mediaReferenceSchema.optional(),
 });
 

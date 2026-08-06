@@ -8,6 +8,11 @@ const segmentSchema = z.object({
   data: z.record(z.string(), z.unknown()).default({}),
 });
 
+export type NapCatMessageSegment = z.infer<typeof segmentSchema>;
+export type NapCatEmojiDataUris = ReadonlyMap<string, string>;
+
+const napCatFacePattern = /\[CQ:face,id=(\d+)\]/gu;
+
 export const napCatGroupMessageEventSchema = z.object({
   post_type: z.literal('message'),
   message_type: z.literal('group'),
@@ -30,7 +35,49 @@ export type NapCatGroupMessageEvent = z.infer<typeof napCatGroupMessageEventSche
 export interface NapCatReplyPreview {
   readonly senderDisplayName: string;
   readonly textPreview?: string;
+  readonly customEmojis?: MessageEnvelope['customEmojis'];
   readonly imageUrl?: string;
+}
+
+export function createNapCatFaceToken(faceId: string): string {
+  return `[CQ:face,id=${faceId}]`;
+}
+
+export function extractNapCatFaceIds(segments: readonly NapCatMessageSegment[]): string[] {
+  const ids = new Set<string>();
+  for (const segment of segments) {
+    if (segment.type === 'face') {
+      const faceId = String(segment.data.id ?? '').trim();
+      if (/^\d+$/u.test(faceId)) ids.add(faceId);
+    }
+    if (segment.type === 'text') {
+      for (const match of String(segment.data.text ?? '').matchAll(napCatFacePattern)) {
+        ids.add(match[1]!);
+      }
+    }
+  }
+  return [...ids];
+}
+
+export function createNapCatCustomEmojis(
+  segments: readonly NapCatMessageSegment[],
+  dataUris: NapCatEmojiDataUris,
+): MessageEnvelope['customEmojis'] {
+  const emojis = new Map<string, NonNullable<MessageEnvelope['customEmojis']>[number]>();
+  for (const faceId of extractNapCatFaceIds(segments)) {
+    const dataUri = dataUris.get(faceId);
+    if (!dataUri) continue;
+    const token = createNapCatFaceToken(faceId);
+    if (emojis.has(token)) continue;
+    emojis.set(token, {
+      token,
+      name: `qq-face-${faceId}`,
+      id: faceId,
+      animated: false,
+      dataUri,
+    });
+  }
+  return emojis.size ? [...emojis.values()].slice(0, 32) : undefined;
 }
 
 export function normalizeNapCatGroupMessage(
@@ -38,6 +85,7 @@ export function normalizeNapCatGroupMessage(
   nodeId: string,
   mentionNames: ReadonlyMap<string, string> = new Map(),
   replyPreviews: ReadonlyMap<string, NapCatReplyPreview> = new Map(),
+  faceDataUris: NapCatEmojiDataUris = new Map(),
 ): MessageEnvelope | undefined {
   const event = napCatGroupMessageEventSchema.parse(candidate);
   if (String(event.user_id) === String(event.self_id)) {
@@ -58,6 +106,10 @@ export function normalizeNapCatGroupMessage(
       textParts.push(
         mentionedId === 'all' ? '@全体成员' : `@${mentionNames.get(mentionedId) ?? mentionedId}`,
       );
+    } else if (segment.type === 'face') {
+      const faceId = String(segment.data.id ?? '').trim();
+      if (faceId) textParts.push(createNapCatFaceToken(faceId));
+      else unsupportedType ??= 'face';
     } else if (segment.type === 'image') {
       const sourceUrl = typeof segment.data.url === 'string' ? segment.data.url : undefined;
       const file = String(segment.data.file ?? 'image');
@@ -78,6 +130,7 @@ export function normalizeNapCatGroupMessage(
         sourceMessageId,
         senderDisplayName: preview?.senderDisplayName ?? '被回复用户',
         ...(preview?.textPreview ? { textPreview: preview.textPreview.slice(0, 1_000) } : {}),
+        ...(preview?.customEmojis ? { customEmojis: preview.customEmojis } : {}),
         ...(preview?.imageUrl
           ? {
               imagePreview: {
@@ -106,6 +159,7 @@ export function normalizeNapCatGroupMessage(
         : 'text';
   const groupId = String(event.group_id);
   const userId = String(event.user_id);
+  const customEmojis = createNapCatCustomEmojis(event.message, faceDataUris);
 
   return messageEnvelopeSchema.parse({
     schemaVersion: 1,
@@ -126,6 +180,7 @@ export function normalizeNapCatGroupMessage(
     kind,
     ...(text ? { text } : {}),
     attachments,
+    ...(customEmojis ? { customEmojis } : {}),
     ...(unsupportedType ? { unsupportedType } : {}),
     ...(replyTo?.sourceMessageId ? { replyTo } : {}),
     traceId: randomUUID(),

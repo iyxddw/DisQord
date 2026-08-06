@@ -27,6 +27,15 @@ export const messageCardInputSchema = z.object({
     .object({
       senderName: z.string().trim().min(1).max(256),
       textPreview: z.string().max(1_000).optional(),
+      inlineEmojis: z
+        .array(
+          z.object({
+            token: z.string().trim().min(1).max(128),
+            dataUri: dataImageSchema,
+          }),
+        )
+        .max(32)
+        .optional(),
       imagePreview: dataImageSchema.optional(),
     })
     .optional(),
@@ -51,13 +60,29 @@ export async function renderMessageCards(
   candidate: MessageCardInput | MessageCardRenderSpec,
 ): Promise<Buffer[]> {
   const input = await normalizeCanvasInput(candidate);
-  const inlineEmojiReplacements = createInlineEmojiReplacements(input.inlineEmojis);
+  const inlineEmojiReplacements = createInlineEmojiReplacements([
+    ...(input.inlineEmojis ?? []),
+    ...(input.reply?.inlineEmojis ?? []),
+  ]);
   const inlineEmojiImages = await loadInlineEmojiImages(inlineEmojiReplacements);
   const displayText = input.unsupportedType
     ? unsupportedMessage(input.unsupportedType, input.targetLanguage ?? 'en')
     : replaceInlineEmojiTokens(input.primaryText, inlineEmojiReplacements);
   const originalText = input.originalText
     ? replaceInlineEmojiTokens(input.originalText, inlineEmojiReplacements)
+    : undefined;
+  const reply = input.reply
+    ? {
+        ...input.reply,
+        ...(input.reply.textPreview
+          ? {
+              textPreview: replaceInlineEmojiTokens(
+                input.reply.textPreview,
+                inlineEmojiReplacements,
+              ),
+            }
+          : {}),
+      }
     : undefined;
   const primaryPages = paginateText(displayText, 34);
   const originalPages = originalText ? paginateText(originalText, 28) : [[]];
@@ -71,6 +96,7 @@ export async function renderMessageCards(
         primaryText: (primaryPages[page] ?? []).join('\n'),
         ...(originalText ? { originalText: (originalPages[page] ?? []).join('\n') } : {}),
         images: page === 0 ? input.images : [],
+        ...(reply ? { reply } : {}),
         inlineEmojiReplacements,
         inlineEmojiImages,
         ...(pageCount > 1
@@ -125,6 +151,14 @@ async function normalizeCanvasInput(
           reply: {
             senderName: spec.reply.senderName,
             ...(spec.reply.textPreview ? { textPreview: spec.reply.textPreview } : {}),
+            ...(spec.reply.inlineEmojis?.length
+              ? {
+                  inlineEmojis: spec.reply.inlineEmojis.map((emoji) => ({
+                    token: emoji.token,
+                    dataUri: emoji.dataUri,
+                  })),
+                }
+              : {}),
             ...(replyImage ? { imagePreview: replyImage } : {}),
           },
         }

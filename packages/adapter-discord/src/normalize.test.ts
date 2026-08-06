@@ -40,7 +40,7 @@ describe('normalizeDiscordMessage', () => {
         referencedMessage: {
           id: '90',
           authorDisplayName: 'Bob',
-          content: 'Previous message',
+          content: 'Previous <:thonk:1132907705724575777>',
         },
       },
       randomUUID(),
@@ -48,7 +48,17 @@ describe('normalizeDiscordMessage', () => {
 
     expect(message).toMatchObject({
       kind: 'mixed',
-      replyTo: { sourceMessageId: '90', textPreview: 'Previous message' },
+      replyTo: {
+        sourceMessageId: '90',
+        textPreview: 'Previous <:thonk:1132907705724575777>',
+        customEmojis: [
+          {
+            token: '<:thonk:1132907705724575777>',
+            sourceUrl:
+              'https://cdn.discordapp.com/emojis/1132907705724575777.png?size=64&quality=lossless',
+          },
+        ],
+      },
       attachments: [{ mimeType: 'image/png', byteSize: 1024 }],
     });
   });
