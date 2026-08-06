@@ -3,6 +3,27 @@ import { describe, expect, it } from 'vitest';
 
 import { buildMessageCardSvg, renderMessageCards } from './renderer.js';
 
+/** Reads one RGB pixel from a rendered PNG. */
+async function readRgbPixel(png: Buffer, x: number, y: number): Promise<[number, number, number]> {
+  const raw = await sharp(png).extract({ left: x, top: y, width: 1, height: 1 }).raw().toBuffer();
+  return [raw[0]!, raw[1]!, raw[2]!];
+}
+
+/** A PNG whose pixel color encodes its source row: `rgb(y & 0xff, (y >> 8) & 0xff, 0)`. */
+async function rowEncodedPng(width: number, height: number): Promise<string> {
+  const raw = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    const base = y * width * 3;
+    for (let x = 0; x < width; x += 1) {
+      const offset = base + x * 3;
+      raw[offset] = y & 0xff;
+      raw[offset + 1] = (y >> 8) & 0xff;
+    }
+  }
+  const png = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+  return `data:image/png;base64,${png.toString('base64')}`;
+}
+
 describe('message card renderer', () => {
   it('renders a PNG with reply context and a translucent original section', async () => {
     const input = {
@@ -172,5 +193,78 @@ describe('message card renderer', () => {
     expect(metadata.format).toBe('png');
     expect(metadata.width).toBe(1_000);
     expect(png.byteLength).toBeGreaterThan(1_000);
+  });
+
+  it('keeps a small image on a single card', async () => {
+    const image = await rowEncodedPng(200, 200);
+    const cards = await renderMessageCards({
+      sourcePlatform: 'qq',
+      sourceName: '群',
+      senderName: 'Alice',
+      sentAt: '2026-08-06 12:00',
+      primaryText: '一张小图',
+      images: [image],
+    });
+    expect(cards.length).toBe(1);
+  });
+
+  it('slices a tall image so the next message head stitches to the tail', async () => {
+    const image = await rowEncodedPng(400, 3_000);
+    const cards = await renderMessageCards({
+      sourcePlatform: 'qq',
+      sourceName: '群',
+      senderName: 'Alice',
+      sentAt: '2026-08-06 12:00',
+      primaryText: '长图切片',
+      images: [image],
+    });
+    // 3000px tall -> band of 2048 on the main card + one 952px tile card.
+    expect(cards.length).toBe(2);
+
+    const mainMetadata = await sharp(cards[0]).metadata();
+    expect(mainMetadata.height).toBeLessThanOrEqual(8_192);
+    // Layout: cursorY = 170, one primary line -> image block starts at y = 250.
+    const imageTop = 250;
+    const imageBottom = imageTop + 2_048 - 1;
+    // Row encoding: source row 0 = [0,0,0], 2047 = [255,7,0], 2048 = [0,8,0].
+    expect(await readRgbPixel(cards[0], 256, imageTop)).toEqual([0, 0, 0]);
+    expect(await readRgbPixel(cards[0], 256, imageBottom)).toEqual([255, 7, 0]);
+    // The tile card's top row is the very next source row: seamless seam.
+    expect(await readRgbPixel(cards[1], 256, 0)).toEqual([0, 8, 0]);
+  });
+
+  it('does not split English words across lines', () => {
+    const svg = buildMessageCardSvg({
+      sourcePlatform: 'qq',
+      targetLanguage: 'en',
+      sourceName: 'group',
+      senderName: 'Alice',
+      sentAt: '2026-08-06 12:00',
+      // 40 'a's fill the line so "wonderful" lands exactly at a wrap boundary.
+      primaryText: `${'a'.repeat(40)} wonderful tail`,
+      images: [],
+    });
+    const lines = Array.from(svg.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/gu)).map((match) => match[1]!);
+    const lineWithWord = lines.findIndex((line) => line.includes('wonderful'));
+    expect(lineWithWord).toBeGreaterThan(-1);
+    expect(lines[lineWithWord]).toContain('wonderful');
+  });
+
+  it('keeps every sliced card within the height cap', async () => {
+    const image = await rowEncodedPng(400, 10_000);
+    const cards = await renderMessageCards({
+      sourcePlatform: 'qq',
+      sourceName: '群',
+      senderName: 'Alice',
+      sentAt: '2026-08-06 12:00',
+      primaryText: '超长图',
+      images: [image],
+    });
+    // 10000px tall -> 5 bands: main card + 4 tile cards.
+    expect(cards.length).toBe(5);
+    for (const card of cards) {
+      const metadata = await sharp(card).metadata();
+      expect(metadata.height).toBeLessThanOrEqual(8_192);
+    }
   });
 });

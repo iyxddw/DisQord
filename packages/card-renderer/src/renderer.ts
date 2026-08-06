@@ -49,6 +49,14 @@ const width = 1_000;
 const horizontalPadding = 56;
 const contentWidth = width - horizontalPadding * 2;
 const lineHeight = 48;
+// A single card may not exceed this height (platform canvas cap).
+const MAX_CARD_HEIGHT = 8_192;
+// A message image taller than this is sliced into vertical bands, one per
+// card, so tall images span multiple messages instead of being cut off.
+const IMAGE_TILE_HEIGHT = 2_048;
+// Vertical space between two different images stacked on one card.  Continuation
+// bands of the same image get no gap so consecutive messages stitch seamlessly.
+const imageGap = 24;
 // Keep a real CJK/Latin font first.  Skia can otherwise select Noto Color
 // Emoji for the whole run on Linux, which turns Chinese into tofu boxes and
 // gives ASCII text emoji-sized advances.  Emoji remains in the fallback tail
@@ -90,20 +98,31 @@ export async function renderMessageCards(
   const cards: Buffer[] = [];
 
   for (let page = 0; page < pageCount; page += 1) {
-    cards.push(
-      await renderMessageCardCanvas({
-        ...input,
-        primaryText: (primaryPages[page] ?? []).join('\n'),
-        ...(originalText ? { originalText: (originalPages[page] ?? []).join('\n') } : {}),
-        images: page === 0 ? input.images : [],
-        ...(reply ? { reply } : {}),
-        inlineEmojiReplacements,
-        inlineEmojiImages,
-        ...(pageCount > 1
-          ? { traceLabel: `${input.traceLabel ?? ''} ${page + 1}/${pageCount}`.trim() }
-          : {}),
-      }),
-    );
+    const pageInput: CanvasCardInput = {
+      ...input,
+      primaryText: (primaryPages[page] ?? []).join('\n'),
+      ...(originalText ? { originalText: (originalPages[page] ?? []).join('\n') } : {}),
+      ...(reply ? { reply } : {}),
+      inlineEmojiReplacements,
+      inlineEmojiImages,
+      ...(pageCount > 1
+        ? { traceLabel: `${input.traceLabel ?? ''} ${page + 1}/${pageCount}`.trim() }
+        : {}),
+    };
+    if (page > 0) {
+      // Continuation text pages carry no images.
+      cards.push(await renderMessageCardCanvas(pageInput, []));
+      continue;
+    }
+    // Page 0 is the chrome card plus a pure-image tile card per leftover band.
+    const sizedImages = await loadSizedImages(input.images);
+    const bands = buildImageBands(sizedImages, IMAGE_TILE_HEIGHT);
+    const { chromeHeight } = computeLayout(pageInput);
+    const { card1Bands, tileBands } = planImageBands(bands, chromeHeight);
+    cards.push(await renderMessageCardCanvas(pageInput, card1Bands));
+    for (const band of tileBands) {
+      cards.push(renderImageTileCard(band));
+    }
   }
   return cards;
 }
@@ -117,6 +136,28 @@ type InlineEmojiReplacement = {
 type CanvasCardInput = MessageCardInput & {
   readonly inlineEmojiReplacements?: readonly InlineEmojiReplacement[];
   readonly inlineEmojiImages?: ReadonlyMap<string, Image>;
+};
+
+type SizedImage = {
+  readonly image: Image;
+  readonly w: number;
+  readonly h: number;
+};
+
+/**
+ * A horizontal slice of a sized image, drawn from the source rect
+ * `[0, srcY, image.width, srcH]` into `[horizontalPadding, y, w, h]`.
+ * `srcW` is always `image.width`.  `first`/`last` mark the image's top and
+ * bottom bands so the card knows which corners to round (seams stay square).
+ */
+type ImageBand = {
+  readonly image: Image;
+  readonly srcY: number;
+  readonly srcH: number;
+  readonly w: number;
+  readonly h: number;
+  readonly first: boolean;
+  readonly last: boolean;
 };
 
 async function normalizeCanvasInput(
@@ -160,40 +201,32 @@ async function normalizeCanvasInput(
   };
 }
 
-async function renderMessageCardCanvas(input: CanvasCardInput): Promise<Buffer> {
+async function renderMessageCardCanvas(
+  input: CanvasCardInput,
+  bands: readonly ImageBand[],
+): Promise<Buffer> {
   const language = input.targetLanguage ?? 'en';
   const inlineEmojiImages =
     input.inlineEmojiImages ?? (await loadInlineEmojiImages(input.inlineEmojiReplacements ?? []));
   const inlineEmojiFallbacks = new Map(
     (input.inlineEmojiReplacements ?? []).map((emoji) => [emoji.placeholder, emoji.token]),
   );
-  const primaryLines = wrapText(
-    input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
-    42,
-  );
-  const replyLines = input.reply
-    ? wrapText(
-        input.reply.textPreview ||
-          (input.reply.imagePreview
-            ? ''
-            : language === 'zh'
-              ? '无可用预览'
-              : 'Preview unavailable'),
-        52,
-      ).slice(0, 4)
-    : [];
-  const replyImageHeight = input.reply?.imagePreview ? 180 : 0;
-  const originalLines = input.originalText ? wrapText(input.originalText, 52) : [];
-  const replyHeight = input.reply
-    ? 64 + replyLines.length * 32 + replyImageHeight + (replyImageHeight ? 16 : 0)
-    : 0;
-  const primaryHeight = Math.max(1, primaryLines.length) * lineHeight;
-  const imageHeight = input.images.length * 420;
-  const originalHeight = input.originalText ? 88 + Math.max(1, originalLines.length) * 36 : 0;
-  const height = Math.min(
-    8_192,
-    208 + replyHeight + primaryHeight + imageHeight + originalHeight + 96,
-  );
+  const {
+    primaryLines,
+    replyLines,
+    replyImageHeight,
+    originalLines,
+    replyHeight,
+    primaryHeight,
+    originalHeight,
+    chromeHeight,
+  } = computeLayout(input);
+  let imageHeight = 0;
+  for (const [index, band] of bands.entries()) {
+    imageHeight += band.h;
+    if (band.first && index > 0) imageHeight += imageGap;
+  }
+  const height = Math.min(MAX_CARD_HEIGHT, chromeHeight + imageHeight);
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   ctx.textBaseline = 'alphabetic';
@@ -289,19 +322,35 @@ async function renderMessageCardCanvas(input: CanvasCardInput): Promise<Buffer> 
     inlineEmojiFallbacks,
   );
 
-  for (const [index, imageData] of input.images.entries()) {
-    const y = cursorY + index * 420;
+  let imageY = cursorY;
+  for (const [index, band] of bands.entries()) {
+    if (band.first && index > 0) imageY += imageGap;
+    const radius = Math.min(22, band.h / 2);
+    const corners: [number, number, number, number] = [
+      band.first ? radius : 0,
+      band.first ? radius : 0,
+      band.last ? radius : 0,
+      band.last ? radius : 0,
+    ];
     ctx.fillStyle = '#0b0d13';
-    roundedRect(ctx, horizontalPadding, y, contentWidth, 396, 22);
+    roundedRectRadii(ctx, horizontalPadding, imageY, band.w, band.h, corners);
     ctx.fill();
-    const image = await loadDataImage(imageData);
-    if (image) {
-      ctx.save();
-      roundedRect(ctx, horizontalPadding, y, contentWidth, 396, 22);
-      ctx.clip();
-      drawContain(ctx, image, horizontalPadding, y, contentWidth, 396);
-      ctx.restore();
-    }
+    ctx.save();
+    roundedRectRadii(ctx, horizontalPadding, imageY, band.w, band.h, corners);
+    ctx.clip();
+    ctx.drawImage(
+      band.image,
+      0,
+      band.srcY,
+      band.image.width,
+      band.srcH,
+      horizontalPadding,
+      imageY,
+      band.w,
+      band.h,
+    );
+    ctx.restore();
+    imageY += band.h;
   }
   cursorY += imageHeight;
 
@@ -342,6 +391,181 @@ async function loadDataImage(dataUri: string): Promise<Image | undefined> {
   } catch {
     return undefined;
   }
+}
+
+async function loadSizedImages(dataUris: readonly string[]): Promise<readonly SizedImage[]> {
+  const loaded = await Promise.all(
+    dataUris.map(async (dataUri): Promise<SizedImage | undefined> => {
+      const image = await loadDataImage(dataUri);
+      if (!image) return undefined;
+      const scale = Math.min(1, contentWidth / image.width);
+      return {
+        image,
+        w: Math.max(1, Math.round(image.width * scale)),
+        h: Math.max(1, Math.round(image.height * scale)),
+      };
+    }),
+  );
+  return loaded.filter((item): item is SizedImage => Boolean(item));
+}
+
+/**
+ * Splits sized images into vertical bands.  Images no taller than `tileHeight`
+ * yield a single full band; taller ones are cut into ~`tileHeight`-tall bands.
+ * Band boundaries are integer source rows: `srcY` accumulates rounding and
+ * `srcH` is the distance to the next boundary, so the source pixels are tiled
+ * with no gaps and no overlap, and the last band reaches `image.height`.
+ * Each band is displayed with the same scale (`w / image.width`), which makes
+ * consecutive messages stitch seamlessly.
+ */
+function buildImageBands(
+  sizedImages: readonly SizedImage[],
+  tileHeight: number,
+): readonly ImageBand[] {
+  const bands: ImageBand[] = [];
+  for (const item of sizedImages) {
+    if (item.h <= tileHeight) {
+      bands.push({
+        image: item.image,
+        srcY: 0,
+        srcH: item.image.height,
+        w: item.w,
+        h: item.h,
+        first: true,
+        last: true,
+      });
+      continue;
+    }
+    const srcScale = item.image.width / item.w;
+    const count = Math.ceil(item.h / tileHeight);
+    const boundaries = Array.from({ length: count + 1 }, (_, index) =>
+      Math.min(item.image.height, Math.round(index * tileHeight * srcScale)),
+    );
+    for (let index = 0; index < count; index += 1) {
+      const srcY = boundaries[index]!;
+      const srcH = boundaries[index + 1]! - srcY;
+      bands.push({
+        image: item.image,
+        srcY,
+        srcH,
+        w: item.w,
+        h: Math.max(1, Math.round((srcH * item.w) / item.image.width)),
+        first: index === 0,
+        last: index === count - 1,
+      });
+    }
+  }
+  return bands;
+}
+
+type CardLayout = {
+  readonly primaryLines: readonly string[];
+  readonly replyLines: readonly string[];
+  readonly replyImageHeight: number;
+  readonly originalLines: readonly string[];
+  readonly replyHeight: number;
+  readonly primaryHeight: number;
+  readonly originalHeight: number;
+  /** Non-image card content: header + reply + primary + original + footer. */
+  readonly chromeHeight: number;
+};
+
+function computeLayout(input: CanvasCardInput): CardLayout {
+  const language = input.targetLanguage ?? 'en';
+  const primaryLines = wrapText(
+    input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
+    42,
+  );
+  const replyLines = input.reply
+    ? wrapText(
+        input.reply.textPreview ||
+          (input.reply.imagePreview
+            ? ''
+            : language === 'zh'
+              ? '无可用预览'
+              : 'Preview unavailable'),
+        52,
+      ).slice(0, 4)
+    : [];
+  const replyImageHeight = input.reply?.imagePreview ? 180 : 0;
+  const originalLines = input.originalText ? wrapText(input.originalText, 52) : [];
+  const replyHeight = input.reply
+    ? 64 + replyLines.length * 32 + replyImageHeight + (replyImageHeight ? 16 : 0)
+    : 0;
+  const primaryHeight = Math.max(1, primaryLines.length) * lineHeight;
+  const originalHeight = input.originalText ? 88 + Math.max(1, originalLines.length) * 36 : 0;
+  return {
+    primaryLines,
+    replyLines,
+    replyImageHeight,
+    originalLines,
+    replyHeight,
+    primaryHeight,
+    originalHeight,
+    chromeHeight: 208 + replyHeight + primaryHeight + originalHeight + 96,
+  };
+}
+
+/**
+ * Greedily packs first bands onto the main card, then leaves every remaining
+ * band for its own image-only tile card.  The first band always lands on the
+ * main card; further first bands only join while the running total stays within
+ * `MAX_CARD_HEIGHT - chromeHeight`.  A 24px gap separates different images.
+ */
+function planImageBands(
+  bands: readonly ImageBand[],
+  chromeHeight: number,
+): { readonly card1Bands: readonly ImageBand[]; readonly tileBands: readonly ImageBand[] } {
+  const budget = Math.max(1, MAX_CARD_HEIGHT - chromeHeight);
+  const card1Bands: ImageBand[] = [];
+  const tileBands: ImageBand[] = [];
+  let used = 0;
+  for (const band of bands) {
+    if (band.first && (card1Bands.length === 0 || used + imageGap + band.h <= budget)) {
+      if (card1Bands.length > 0) used += imageGap;
+      used += band.h;
+      card1Bands.push(band);
+    } else {
+      tileBands.push(band);
+    }
+  }
+  return { card1Bands, tileBands };
+}
+
+/**
+ * A pure image card: one band fills the canvas at the standard x/width, with
+ * rounded corners only at the image's real top/bottom.  Seam edges are square
+ * so consecutive messages stitch without a background notch.
+ */
+function renderImageTileCard(band: ImageBand): Buffer {
+  const canvas = createCanvas(width, band.h);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b0d13';
+  ctx.fillRect(0, 0, width, band.h);
+  const radius = Math.min(22, band.h / 2);
+  ctx.save();
+  roundedRectRadii(
+    ctx,
+    horizontalPadding,
+    0,
+    band.w,
+    band.h,
+    [band.first ? radius : 0, band.first ? radius : 0, band.last ? radius : 0, band.last ? radius : 0],
+  );
+  ctx.clip();
+  ctx.drawImage(
+    band.image,
+    0,
+    band.srcY,
+    band.image.width,
+    band.srcH,
+    horizontalPadding,
+    0,
+    band.w,
+    band.h,
+  );
+  ctx.restore();
+  return canvas.toBuffer('image/png');
 }
 
 function createInlineEmojiReplacements(
@@ -394,6 +618,18 @@ function roundedRect(
 ): void {
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, radius);
+}
+
+function roundedRectRadii(
+  ctx: SKRSContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radii: [number, number, number, number],
+): void {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, radii);
 }
 
 function circleClip(ctx: SKRSContext2D, x: number, y: number, radius: number): void {
@@ -647,6 +883,10 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
   `;
 }
 
+function columnWidth(character: string): number {
+  return (character.codePointAt(0) ?? 0) <= 0xff ? 1 : 2;
+}
+
 function wrapText(text: string, maxColumns: number): string[] {
   const lines: string[] = [];
   for (const paragraph of text.replace(/\r\n?/gu, '\n').split('\n')) {
@@ -654,19 +894,72 @@ function wrapText(text: string, maxColumns: number): string[] {
       lines.push('');
       continue;
     }
-    let current = '';
+    let line = '';
     let columns = 0;
-    for (const character of paragraph) {
-      const width = (character.codePointAt(0) ?? 0) <= 0xff ? 1 : 2;
-      if (columns + width > maxColumns && current) {
-        lines.push(current);
-        current = '';
+    let sawWord = false;
+    const flushLine = (): void => {
+      if (line) {
+        lines.push(line);
+        line = '';
         columns = 0;
       }
-      current += character;
-      columns += width;
+    };
+    for (const match of paragraph.matchAll(/\S+|\s+/gu)) {
+      const token = match[0]!;
+      if (/^\s+$/u.test(token)) {
+        // Keep whitespace only when it follows content on the current line.
+        if (line) {
+          line += token;
+          columns += Array.from(token).reduce((sum, character) => sum + columnWidth(character), 0);
+        }
+        continue;
+      }
+      sawWord = true;
+      const tokenColumns = Array.from(token).reduce(
+        (sum, character) => sum + columnWidth(character),
+        0,
+      );
+      if (tokenColumns > maxColumns) {
+        // A single run longer than one line (long URL, unbroken CJK): fall back
+        // to column-based hard splitting so nothing is dropped.
+        flushLine();
+        let chunk = '';
+        let chunkColumns = 0;
+        for (const character of token) {
+          const width = columnWidth(character);
+          if (chunkColumns + width > maxColumns && chunk) {
+            lines.push(chunk);
+            chunk = '';
+            chunkColumns = 0;
+          }
+          chunk += character;
+          chunkColumns += width;
+        }
+        if (chunk) lines.push(chunk);
+        continue;
+      }
+      if (columns === 0) {
+        line = token;
+        columns = tokenColumns;
+        continue;
+      }
+      if (columns + tokenColumns <= maxColumns) {
+        line += token;
+        columns += tokenColumns;
+        continue;
+      }
+      // The word does not fit on this line: move the whole word to a new line
+      // instead of splitting it mid-word.
+      flushLine();
+      line = token;
+      columns = tokenColumns;
     }
-    if (current) lines.push(current);
+    if (line) {
+      lines.push(line);
+    } else if (!sawWord) {
+      // Paragraph was only whitespace: keep a blank line like the old path.
+      lines.push('');
+    }
   }
   return lines;
 }
