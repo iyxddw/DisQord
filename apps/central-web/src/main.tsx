@@ -1729,7 +1729,14 @@ function BlueprintEditor() {
       data,
     };
     setNodes((current) => [...current, node]);
-    if (terminal) {
+    // Auto-connect only extends a forward flow. Never link a terminal
+    // (output-type) node and never target an entry (input-type) node:
+    // doing so mid-chain would wire e.g. chat-output → chat-input and the
+    // saved blueprint would fail validation with a CYCLE.
+    const terminalIsOutput =
+      terminal?.data.kind === 'output' || terminal?.data.kind === 'simulated-output';
+    const nodeIsInput = resolvedKind === 'input' || resolvedKind === 'simulated-input';
+    if (terminal && !terminalIsOutput && !nodeIsInput) {
       const sourceHandle = defaultFlowSourceHandle(terminal);
       setEdges((current) => [
         ...current,
@@ -1741,6 +1748,8 @@ function BlueprintEditor() {
         },
       ]);
       setNotice(`已添加“${data.label}”并连接到流程末尾。`);
+    } else if (terminal) {
+      setNotice(`已添加“${data.label}”。`);
     }
     setDraftDirty(true);
   };
