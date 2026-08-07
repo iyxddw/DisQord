@@ -28,6 +28,7 @@ function createTextMessage(input: {
       displayName: `${input.platform.toUpperCase()} User`,
     },
     sentAt: new Date().toISOString(),
+    fromSelf: false,
     kind: 'text',
     text: input.text,
     attachments: [],

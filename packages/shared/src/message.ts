@@ -18,20 +18,19 @@ export const mediaReferenceSchema = z.object({
   height: z.number().int().positive().optional(),
 });
 
-export const customEmojiReferenceSchema = z
-  .object({
-    /** The exact platform token as it appeared in the message body. */
-    token: z.string().trim().min(1).max(128),
-    name: z.string().trim().min(1).max(64),
-    id: externalIdSchema,
-    animated: z.boolean(),
-    sourceUrl: z.url().optional(),
-    dataUri: z
-      .string()
-      .regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u)
-      .max(2 * 1024 * 1024)
-      .optional(),
-  });
+export const customEmojiReferenceSchema = z.object({
+  /** The exact platform token as it appeared in the message body. */
+  token: z.string().trim().min(1).max(128),
+  name: z.string().trim().min(1).max(64),
+  id: externalIdSchema,
+  animated: z.boolean(),
+  sourceUrl: z.url().optional(),
+  dataUri: z
+    .string()
+    .regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u)
+    .max(2 * 1024 * 1024)
+    .optional(),
+});
 
 export const replyReferenceSchema = z.object({
   sourceMessageId: externalIdSchema,
@@ -60,6 +59,8 @@ export const messageEnvelopeSchema = z
       avatarUrl: z.url().optional(),
     }),
     sentAt: isoDateTimeSchema,
+    /** True when the message was produced by this bot's own account. */
+    fromSelf: z.boolean().default(false),
     kind: messageKindSchema,
     text: z.string().max(20_000).optional(),
     attachments: z.array(mediaReferenceSchema).max(10).default([]),

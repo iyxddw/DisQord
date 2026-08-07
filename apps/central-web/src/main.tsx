@@ -519,6 +519,7 @@ type FlowData = {
   label: string;
   kind: FlowKind;
   sessionId?: string;
+  includeSelf?: boolean;
   prompt?: string;
   memoryMode?: boolean;
   enableThinking?: boolean;
@@ -680,6 +681,21 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
               ))}
           </div>
         )}
+      {data.kind === 'input' && (
+        <div className="flow-node-config nodrag nopan">
+          <label className="memory-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(data.includeSelf)}
+              onChange={(event) => patchData({ includeSelf: event.target.checked })}
+            />
+            <span>包括自身</span>
+          </label>
+          <small className="flow-node-hint">
+            开启后，此机器人自己发送的消息也会进入流程（例如其他服务通过同一账号发出的系统消息）。
+          </small>
+        </div>
+      )}
       {data.kind === 'translation' && (
         <div className="flow-node-config nodrag nopan">
           <textarea
@@ -1544,6 +1560,9 @@ function BlueprintEditor() {
                             : '使用原消息资料生成 PNG',
             kind,
             ...(sessionId ? { sessionId } : {}),
+            ...(typeof node.config.includeSelf === 'boolean'
+              ? { includeSelf: node.config.includeSelf }
+              : {}),
             ...(typeof node.config.prompt === 'string' ? { prompt: node.config.prompt } : {}),
             ...(typeof node.config.memoryMode === 'boolean'
               ? { memoryMode: node.config.memoryMode }
@@ -1720,23 +1739,25 @@ function BlueprintEditor() {
                         : 'card-renderer',
       position: node.position,
       config:
-        node.data.kind === 'input' || node.data.kind === 'output'
-          ? { sessionId: node.data.sessionId }
-          : node.data.kind === 'translation'
-            ? {
-                prompt: node.data.prompt,
-                memoryMode: Boolean(node.data.memoryMode),
-                enableThinking: Boolean(node.data.enableThinking),
-              }
-            : node.data.kind === 'moderation'
+        node.data.kind === 'input'
+          ? { sessionId: node.data.sessionId, includeSelf: Boolean(node.data.includeSelf) }
+          : node.data.kind === 'output'
+            ? { sessionId: node.data.sessionId }
+            : node.data.kind === 'translation'
               ? {
                   prompt: node.data.prompt,
-                  threshold: node.data.threshold ?? 0.5,
+                  memoryMode: Boolean(node.data.memoryMode),
                   enableThinking: Boolean(node.data.enableThinking),
                 }
-              : node.data.kind === 'fixed'
-                ? { text: node.data.text ?? '' }
-                : {},
+              : node.data.kind === 'moderation'
+                ? {
+                    prompt: node.data.prompt,
+                    threshold: node.data.threshold ?? 0.5,
+                    enableThinking: Boolean(node.data.enableThinking),
+                  }
+                : node.data.kind === 'fixed'
+                  ? { text: node.data.text ?? '' }
+                  : {},
     })),
     edges: edges.map((edge) => ({
       id: edge.id,

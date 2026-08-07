@@ -82,9 +82,7 @@ export function normalizeNapCatGroupMessage(
   replyPreviews: ReadonlyMap<string, NapCatReplyPreview> = new Map(),
 ): MessageEnvelope | undefined {
   const event = napCatGroupMessageEventSchema.parse(candidate);
-  if (String(event.user_id) === String(event.self_id)) {
-    return undefined;
-  }
+  const fromSelf = String(event.user_id) === String(event.self_id);
 
   const textParts: string[] = [];
   const attachments: MessageEnvelope['attachments'][number][] = [];
@@ -171,6 +169,7 @@ export function normalizeNapCatGroupMessage(
       avatarUrl: `https://q1.qlogo.cn/g?b=qq&nk=${encodeURIComponent(userId)}&s=640`,
     },
     sentAt: new Date(event.time * 1_000).toISOString(),
+    fromSelf,
     kind,
     ...(text ? { text } : {}),
     attachments,

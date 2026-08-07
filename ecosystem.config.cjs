@@ -7,7 +7,7 @@ module.exports = {
   apps: [
     {
       name: 'disqord-central',
-      script: 'pm2-run-central.sh',
+      script: 'deploy/pm2-run-central.sh',
       cwd: projectRoot,
       interpreter: '/bin/bash',
       autorestart: true,
@@ -21,7 +21,7 @@ module.exports = {
     },
     {
       name: 'disqord-qq',
-      script: 'pm2-run-qq.sh',
+      script: 'deploy/pm2-run-qq.sh',
       cwd: projectRoot,
       interpreter: '/bin/bash',
       autorestart: true,
@@ -35,7 +35,7 @@ module.exports = {
     },
     {
       name: 'disqord-discord',
-      script: 'pm2-run-discord.sh',
+      script: 'deploy/pm2-run-discord.sh',
       cwd: projectRoot,
       interpreter: '/bin/bash',
       autorestart: true,

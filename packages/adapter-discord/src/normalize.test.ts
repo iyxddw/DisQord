@@ -161,7 +161,7 @@ describe('normalizeDiscordMessage', () => {
     ).toBeUndefined();
   });
 
-  it('ignores Discord bot messages to prevent loops', () => {
+  it('ignores other Discord bot messages to prevent loops', () => {
     expect(
       normalizeDiscordMessage(
         {
@@ -171,5 +171,18 @@ describe('normalizeDiscordMessage', () => {
         randomUUID(),
       ),
     ).toBeUndefined();
+  });
+
+  it('keeps the bot own messages and marks them as fromSelf', () => {
+    expect(
+      normalizeDiscordMessage(
+        {
+          ...baseMessage,
+          author: { ...baseMessage.author, id: '999', bot: true },
+        },
+        randomUUID(),
+        '999',
+      ),
+    ).toMatchObject({ fromSelf: true });
   });
 });

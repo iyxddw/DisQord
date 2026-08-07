@@ -29,6 +29,7 @@ function message(nodeId: string, text = '你好'): MessageEnvelope {
     },
     sender: { id: 'sender', displayName: 'Sender' },
     sentAt: new Date().toISOString(),
+    fromSelf: false,
     kind: 'text',
     text,
     attachments: [],

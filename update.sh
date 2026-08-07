@@ -31,7 +31,7 @@ usage() {
 选项：
   --no-pull     不从 Git 远端拉取，只同步依赖并构建本地代码
   --no-install  不执行 pnpm install
-  --no-restart  构建成功后不执行对应的 pm2-start-*.sh
+  --no-restart  构建成功后不执行对应的 deploy/pm2-start-*.sh
   --verify      构建后执行完整 typecheck 和 test
   --yes         跳过确认，适合脚本或 CI 调用
   -h, --help    显示帮助
@@ -220,7 +220,7 @@ show_selection() {
   [[ "$discord_selected" == true ]] && printf '  - Discord 节点（Discord Node + 节点 Web）\n'
   [[ "$should_pull" == true ]] && info '代码：拉取当前分支的上游更新（仅快进）' || info '代码：不拉取，使用当前工作区'
   [[ "$should_install" == true ]] && info '依赖：pnpm install --frozen-lockfile' || info '依赖：跳过安装'
-  [[ "$should_restart" == true ]] && info '服务：构建成功后直接执行对应的 pm2-start-*.sh' || info '服务：不自动重启'
+  [[ "$should_restart" == true ]] && info '服务：构建成功后直接执行对应的 deploy/pm2-start-*.sh' || info '服务：不自动重启'
   [[ "$should_verify" == true ]] && info '验证：执行完整 typecheck 和 test' || info '验证：跳过完整 typecheck/test'
 }
 
@@ -328,23 +328,23 @@ verify_build() {
 restart_selected_services() {
 
   if [[ "$central_selected" == true ]]; then
-    info '正在执行 pm2-start-central.sh……'
-    bash "$project_root/pm2-start-central.sh"
+    info '正在执行 deploy/pm2-start-central.sh……'
+    bash "$project_root/deploy/pm2-start-central.sh"
   fi
   if [[ "$qq_selected" == true ]]; then
-    info '正在执行 pm2-start-qq.sh……'
-    bash "$project_root/pm2-start-qq.sh"
+    info '正在执行 deploy/pm2-start-qq.sh……'
+    bash "$project_root/deploy/pm2-start-qq.sh"
   fi
   if [[ "$discord_selected" == true ]]; then
-    info '正在执行 pm2-start-discord.sh……'
-    bash "$project_root/pm2-start-discord.sh"
+    info '正在执行 deploy/pm2-start-discord.sh……'
+    bash "$project_root/deploy/pm2-start-discord.sh"
   fi
 }
 
 validate_restart_scripts() {
-  [[ -f "$project_root/pm2-start-central.sh" ]] || die '缺少 pm2-start-central.sh。'
-  [[ -f "$project_root/pm2-start-qq.sh" ]] || die '缺少 pm2-start-qq.sh。'
-  [[ -f "$project_root/pm2-start-discord.sh" ]] || die '缺少 pm2-start-discord.sh。'
+  [[ -f "$project_root/deploy/pm2-start-central.sh" ]] || die '缺少 deploy/pm2-start-central.sh。'
+  [[ -f "$project_root/deploy/pm2-start-qq.sh" ]] || die '缺少 deploy/pm2-start-qq.sh。'
+  [[ -f "$project_root/deploy/pm2-start-discord.sh" ]] || die '缺少 deploy/pm2-start-discord.sh。'
   require_command pm2
 }
 

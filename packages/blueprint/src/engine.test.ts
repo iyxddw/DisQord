@@ -71,6 +71,7 @@ const textMessage: MessageEnvelope = {
   },
   sender: { id: 'user', displayName: 'User' },
   sentAt: new Date().toISOString(),
+  fromSelf: false,
   kind: 'text',
   text: 'hello',
   attachments: [],

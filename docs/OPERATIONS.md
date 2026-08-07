@@ -92,9 +92,9 @@ sudo ls -lh /var/lib/disqord/central
 sudo apt install -y fontconfig fonts-noto-cjk fonts-noto-color-emoji
 sudo fc-cache -f
 # 重启实际发送图片的节点，例如：
-bash pm2-start-qq.sh
+bash deploy/pm2-start-qq.sh
 # 或
-bash pm2-start-discord.sh
+bash deploy/pm2-start-discord.sh
 ```
 
 如果没有使用 PM2，停止对应节点后重新运行它的启动脚本。当前渲染器是客户端 Skia Canvas；中央端不会

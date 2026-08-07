@@ -108,15 +108,18 @@ discord.env    # Discord Node
 
 不要把填入真实 Token、API Key 或 `PAIRING_PEPPER` 的环境文件提交到 Git。
 
-构建完成并准备好环境文件后，可以分别启动：
+构建完成并准备好环境文件后，可以启动（使用 PM2，会启动或重启对应进程）：
 
 ```bash
-bash start-central.sh
-bash start-qq.sh
-bash start-discord.sh
+bash start.sh                        # 交互选择要启动的服务
+bash start.sh central --yes          # 直接启动中央端
+bash start.sh qq --yes               # 直接启动 QQ 节点
+bash start.sh discord --yes          # 直接启动 Discord 节点
+bash start.sh all --yes              # 启动全部
 ```
 
-这些脚本使用 PM2，并会启动或重启对应进程。开发时也可以使用：
+也可以单独执行 `deploy/pm2-start-central.sh`、`deploy/pm2-start-qq.sh`、
+`deploy/pm2-start-discord.sh` 启动单个服务。开发时也可以使用：
 
 ```bash
 pnpm dev:central

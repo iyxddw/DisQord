@@ -369,6 +369,34 @@ describe('LLM translation and moderation', () => {
     expect(uncappedBody.max_tokens).toBeUndefined();
   });
 
+  it('instructs the model to preserve emoji tokens verbatim', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: '__DISQORD_CUSTOM_EMOJI_0__',
+        confidence: 0.99,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      fetchImplementation,
+    });
+    await new LlmTranslationService(client).translate({
+      text: '__DISQORD_CUSTOM_EMOJI_0__',
+      targetLanguage: 'en',
+      model: 'translation-model',
+      prompt: { content: '准确翻译。', version: 1 },
+    });
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const fixedSystem = body.messages[0]?.content ?? '';
+    expect(fixedSystem).toContain('__DISQORD_CUSTOM_EMOJI');
+    expect(fixedSystem).toContain('CQ:face');
+    expect(fixedSystem).toContain('原样保留');
+  });
+
   it('treats maxTokens as optional in the settings schema', () => {
     const withCap = llmSettingsSchema.parse({
       baseUrl: 'https://llm.example.test/v1',

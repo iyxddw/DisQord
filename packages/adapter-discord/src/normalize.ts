@@ -96,7 +96,8 @@ export function normalizeDiscordMessage(
   selfUserId?: string,
 ): MessageEnvelope | undefined {
   const message = discordMessageSnapshotSchema.parse(candidate);
-  if (message.author.bot) return undefined;
+  const fromSelf = message.author.id === selfUserId;
+  if (message.author.bot && !fromSelf) return undefined;
 
   const images = message.attachments.filter((attachment) =>
     attachment.contentType?.startsWith('image/'),
@@ -156,6 +157,7 @@ export function normalizeDiscordMessage(
       ...(message.author.avatarUrl ? { avatarUrl: message.author.avatarUrl } : {}),
     },
     sentAt: message.createdAt,
+    fromSelf,
     kind,
     ...(text ? { text } : {}),
     attachments,

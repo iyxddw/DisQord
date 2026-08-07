@@ -51,7 +51,7 @@ describe('normalizeNapCatGroupMessage', () => {
     expect(message).toMatchObject({ kind: 'unsupported', unsupportedType: 'record' });
   });
 
-  it('ignores messages produced by the logged-in QQ account', () => {
+  it('marks messages produced by the logged-in QQ account as fromSelf', () => {
     expect(
       normalizeNapCatGroupMessage(
         {
@@ -61,7 +61,7 @@ describe('normalizeNapCatGroupMessage', () => {
         },
         randomUUID(),
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ fromSelf: true, text: 'self' });
   });
 
   it('renders QQ mentions with resolved group display names', () => {

@@ -1044,6 +1044,11 @@ button.fit {
   letter-spacing: 0;
   text-transform: none;
 }
+.flow-node-hint {
+  color: #7d8aa0;
+  font-size: 10px;
+  line-height: 1.45;
+}
 .flow-handle-label {
   position: absolute;
   right: 15px;

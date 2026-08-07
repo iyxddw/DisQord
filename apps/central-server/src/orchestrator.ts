@@ -51,7 +51,11 @@ const deliveryFailedFrameSchema = z.object({
   error: z.string().min(1).max(4_000),
 });
 
-const chatConfigSchema = z.object({ sessionId: z.uuid() });
+const chatConfigSchema = z.object({
+  sessionId: z.uuid(),
+  /** Whether messages produced by this bot's own account are forwarded. */
+  includeSelf: z.boolean().default(false),
+});
 const translationConfigSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000),
   memoryMode: z.boolean().default(false),
@@ -1123,11 +1127,13 @@ export class MessageOrchestrator {
       current.push(edge);
       outgoing.set(edge.sourceNodeId, current);
     }
-    const starts = blueprint.nodes.filter(
-      (node) =>
-        node.type === 'chat-input' &&
-        chatConfigSchema.parse(node.config).sessionId === sourceSession.id,
-    );
+    const starts = blueprint.nodes.filter((node) => {
+      if (node.type !== 'chat-input') return false;
+      const config = chatConfigSchema.parse(node.config);
+      if (config.sessionId !== sourceSession.id) return false;
+      if (message.fromSelf && !config.includeSelf) return false;
+      return true;
+    });
     const work: WorkItem[] = initialWork
       ? [...initialWork]
       : starts.map((node) => ({
