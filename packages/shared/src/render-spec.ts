@@ -88,7 +88,7 @@ export const messageCardRenderSpecSchema = z.object({
     .optional(),
   unsupportedType: z.string().trim().min(1).max(128).optional(),
   traceLabel: z.string().trim().min(1).max(64).optional(),
-  /** Delivered into a fetch-only session; replying to it never triggers a flow. */
+  /** Forwarded out of a fetch-only session; replying to it is suppressed. */
   nonReplyable: z.boolean().optional(),
 });
 

@@ -1188,12 +1188,18 @@ describe('blueprint message pipeline', () => {
     ).toMatchObject({ status: 'approved' });
   });
 
-  it('ignores messages from a fetch-only session without starting a blueprint', async () => {
-    const process = vi.fn(async () => ({
-      decision: 'allow' as const,
-      cards: [Buffer.from('card')],
-    }));
-    const setup = await fixture([], [], { process });
+  it('processes messages from a fetch-only session normally', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const render = vi.fn(async () => [Buffer.from('card')]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { render },
+    );
     await setup.store.set('chat-session', setup.sourceSession.id, {
       ...setup.sourceSession,
       fetchOnly: true,
@@ -1207,33 +1213,91 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(process).not.toHaveBeenCalled();
+    await waitFor(() => render.mock.calls.length === 1);
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver.batch',
+      expect.objectContaining({
+        deliveries: [
+          expect.objectContaining({
+            cards: [Buffer.from('card').toString('base64')],
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('suppresses deliveries into a fetch-only session', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const render = vi.fn(async () => [Buffer.from('card')]);
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { render },
+    );
+    await setup.store.set('chat-session', setup.targetSession.id, {
+      ...setup.targetSession,
+      fetchOnly: true,
+    });
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: message(setup.sourceSession.nodeId),
+      frameId: randomUUID(),
+    });
+
+    await waitForAsync(async () => (await setup.store.list('blueprint-activity')).length >= 2);
+    expect(render).not.toHaveBeenCalled();
     expect(setup.sendToNode).not.toHaveBeenCalled();
-    expect(await setup.store.list('message-dedupe')).toHaveLength(0);
     const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
       (entry) => entry.value,
     );
     expect(logs).toEqual(
-      expect.arrayContaining([expect.objectContaining({ event: 'message_ignored_fetch_only' })]),
+      expect.arrayContaining([
+        expect.objectContaining({ event: 'delivery_suppressed_fetch_only' }),
+      ]),
     );
   });
 
-  it('marks deliveries into a fetch-only session as non-replyable', async () => {
+  it('marks cards forwarded out of a fetch-only source as non-replyable', async () => {
     const setup = await fixture([], [], {});
     const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
-    const incoming = message(setup.sourceSession.nodeId, '公告');
+    await setup.store.set('chat-session', setup.sourceSession.id, {
+      ...setup.sourceSession,
+      fetchOnly: true,
+    });
+    const discordMessage: MessageEnvelope = {
+      ...message(setup.targetSession.nodeId, '公告'),
+      source: {
+        ...message(setup.targetSession.nodeId, '公告').source,
+        platform: 'discord' as const,
+        spaceId: setup.targetSession.spaceId,
+        channelId: setup.targetSession.externalId,
+      },
+    };
 
-    const fetchOnly = await processor.prepareRender(
-      incoming,
-      { ...setup.targetSession, fetchOnly: true },
+    const fromFetchOnly = await processor.prepareRender(
+      message(setup.sourceSession.nodeId, '公告'),
+      setup.targetSession,
       '公告',
       false,
     );
-    const normal = await processor.prepareRender(incoming, setup.targetSession, '公告', false);
+    const fromNormal = await processor.prepareRender(
+      discordMessage,
+      setup.sourceSession,
+      '公告',
+      false,
+    );
 
-    expect(fetchOnly.nonReplyable).toBe(true);
-    expect(normal.nonReplyable).toBeUndefined();
+    expect(fromFetchOnly.nonReplyable).toBe(true);
+    expect(fromNormal.nonReplyable).toBeUndefined();
   });
 
   it('sends a non-replyable error notice card when a delivery fails', async () => {

@@ -466,7 +466,7 @@ function Sessions() {
             </div>
             <div className="grow">
               <strong>{sessionLabel(session)}</strong>
-              {session.fetchOnly && <em className="session-fetch-only">只读 · 不可回复</em>}
+              {session.fetchOnly && <em className="session-fetch-only">只读 · 机器人不发送</em>}
               {session.remark && <em className="session-remark">原名：{session.displayName}</em>}
               <span>
                 {session.platform === 'discord'
@@ -492,8 +492,8 @@ function Sessions() {
                   className={session.fetchOnly ? 'fetch-only active' : 'fetch-only'}
                   title={
                     session.fetchOnly
-                      ? '只读频道：不可回复，来自此频道的消息不会触发转发'
-                      : '设为只读（不可回复）'
+                      ? '只读频道：机器人不会向此频道发送消息'
+                      : '设为只读（机器人不向此频道发送消息）'
                   }
                   onClick={() => void toggleFetchOnly(session)}
                 >

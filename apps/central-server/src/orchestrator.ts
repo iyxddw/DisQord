@@ -719,15 +719,6 @@ export class MessageOrchestrator {
         session.externalId === message.source.channelId,
     );
     if (!sourceSession) return;
-    if (sourceSession.fetchOnly) {
-      // Fetch-only sessions are one-way feeds: their own messages and replies
-      // never start a blueprint, so they can never trigger a forwarded reply.
-      await this.#log(message.traceId, 'info', 'message_ignored_fetch_only', {
-        sessionId: sourceSession.id,
-        message,
-      });
-      return;
-    }
 
     const dedupeKey = createMessageIdempotencyKey(message);
     if (await this.#store.get('message-dedupe', dedupeKey)) {
@@ -1462,6 +1453,19 @@ export class MessageOrchestrator {
         const targetId = chatConfigSchema.parse(node.config).sessionId;
         const target = sessions.find((session) => session.id === targetId);
         if (!target) throw new Error(`Target session ${targetId} is unavailable.`);
+        if (target.fetchOnly) {
+          // The bot never delivers into a fetch-only channel; this includes
+          // blueprint forwards and replies that would land here.
+          await this.#log(message.traceId, 'info', 'delivery_suppressed_fetch_only', {
+            nodeId: node.id,
+            targetSessionId: target.id,
+          });
+          await recordActivity(node, processedSteps, {
+            message: `已拦截：机器人不向只读频道 ${target.remark?.trim() || target.displayName} 发送消息`,
+            text: state.text,
+          });
+          continue;
+        }
         let renderSpec = fastMode
           ? undefined
           : state.renderSpec && state.renderedForSessionId === target.id
@@ -2273,6 +2277,15 @@ export class CentralMessageProcessor implements MessageProcessor {
     fixedText: boolean,
     includeImages: boolean,
   ): Promise<MessageCardRenderSpec> {
+    const sourceSession = (await this.#store.list<ChatSession>('chat-session'))
+      .map((entry) => chatSessionSchema.parse(entry.value))
+      .find(
+        (session) =>
+          session.nodeId === message.source.nodeId &&
+          session.platform === message.source.platform &&
+          session.externalId === message.source.channelId &&
+          session.status === 'verified',
+      );
     const senderAvatarKey = message.sender.avatarUrl
       ? createAvatarKey(message.source.platform, message.sender.id)
       : undefined;
@@ -2329,7 +2342,9 @@ export class CentralMessageProcessor implements MessageProcessor {
       ...(!fixedText && message.unsupportedType
         ? { unsupportedType: message.unsupportedType }
         : {}),
-      ...(target.fetchOnly ? { nonReplyable: true } : {}),
+      // A card forwarded out of a fetch-only channel is non-replyable: the
+      // reply's return delivery into that channel is suppressed by the bot.
+      ...(sourceSession?.fetchOnly ? { nonReplyable: true } : {}),
       traceLabel: message.traceId.slice(0, 8),
     } satisfies MessageCardRenderSpec;
   }

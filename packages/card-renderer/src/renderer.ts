@@ -41,7 +41,7 @@ export const messageCardInputSchema = z.object({
     .optional(),
   unsupportedType: z.string().trim().min(1).max(128).optional(),
   traceLabel: z.string().trim().min(1).max(64).optional(),
-  /** Delivered into a fetch-only session; show a red 不可回复 badge. */
+  /** Forwarded out of a fetch-only session; show a red 不可回复 badge. */
   nonReplyable: z.boolean().optional(),
 });
 
