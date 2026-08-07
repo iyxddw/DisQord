@@ -395,6 +395,8 @@ describe('LLM translation and moderation', () => {
     expect(fixedSystem).toContain('__DISQORD_CUSTOM_EMOJI');
     expect(fixedSystem).toContain('CQ:face');
     expect(fixedSystem).toContain('原样保留');
+    expect(fixedSystem).toContain('机械化翻译');
+    expect(fixedSystem).toContain('快，而不是准确');
   });
 
   it('treats maxTokens as optional in the settings schema', () => {

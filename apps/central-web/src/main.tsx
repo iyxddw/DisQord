@@ -691,9 +691,6 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
             />
             <span>包括自身</span>
           </label>
-          <small className="flow-node-hint">
-            开启后，此机器人自己发送的消息也会进入流程（例如其他服务通过同一账号发出的系统消息）。
-          </small>
         </div>
       )}
       {data.kind === 'translation' && (
