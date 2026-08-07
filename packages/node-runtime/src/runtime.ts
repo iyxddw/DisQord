@@ -25,6 +25,8 @@ const DELIVERY_MAX_GAP_MS = 3_000;
 const FAST_DELIVERY_INTERVAL_MS = 1_500;
 const FAST_UPLOAD_RETRY_DELAY_MS = 250;
 const AVATAR_REQUEST_TIMEOUT_MS = 15_000;
+/** How long a just-delivered platform message ID is recognized as our own echo. */
+const DELIVERED_ECHO_WINDOW_MS = 5 * 60_000;
 
 export interface PlatformSessionCandidate {
   readonly externalId: string;
@@ -62,7 +64,7 @@ const deliverCommandSchema = z
     fastMode: z.boolean().default(false),
     replyMessageId: z.string().min(1).optional(),
     targetMessageId: z.string().min(1).optional(),
-    /** System error notice; the node suppresses re-upload of its platform message. */
+    /** System error notice card (e.g. a failed delivery surfaced to the source). */
     errorNotice: z.boolean().optional(),
   })
   .superRefine((command, context) => {
@@ -148,11 +150,12 @@ export class NodeBridgeRuntime {
   readonly #lastDeliveryAt = new Map<string, number>();
   readonly #nextFastDeliveryAt = new Map<string, number>();
   /**
-   * Platform message IDs of error notices this node just delivered.  The
-   * adapter's own-message event for one of these is suppressed, so an error
-   * card can never be re-uploaded and re-enter a blueprint.
+   * Platform message IDs this node just delivered.  The adapter's own-message
+   * event for one of these is suppressed, so a delivered card can never be
+   * re-uploaded and re-enter a blueprint — which would otherwise echo the
+   * bot's own message back to the source session regardless of includeSelf.
    */
-  readonly #errorNoticeIds = new Map<string, number>();
+  readonly #deliveredEchoIds = new Map<string, number>();
   readonly #avatarRequests = new Map<string, PendingAvatarRequest>();
   readonly #avatarFetches = new Map<string, Promise<string | undefined>>();
 
@@ -220,7 +223,7 @@ export class NodeBridgeRuntime {
     await this.#adapter.start(async (message) => {
       try {
         const validated = messageEnvelopeSchema.parse(message);
-        if (this.#isErrorNoticeEcho(validated.source.messageId)) return;
+        if (this.#isDeliveredEcho(validated.source.messageId)) return;
         const queued = this.#queue?.enqueue({
           id: validated.eventId,
           kind: 'message.upload',
@@ -529,10 +532,12 @@ export class NodeBridgeRuntime {
         const completed = { ...item.payload, targetMessageId: firstMessageId };
         queue.updatePayload(taskId, completed);
         queue.markAcknowledged(taskId);
-        if (item.payload.errorNotice && firstMessageId) {
-          // Suppress the adapter's own-message echo so the error card cannot be
-          // re-uploaded and re-enter a blueprint (fetch-only or not).
-          this.#errorNoticeIds.set(firstMessageId, Date.now());
+        if (firstMessageId) {
+          // Suppress the adapter's own-message echo for EVERY delivery, not
+          // just error notices.  Without this the bot's own card would be
+          // re-uploaded and re-enter a blueprint, echoing its own message back
+          // to the source session.
+          this.#recordDeliveredEcho(firstMessageId);
         }
         this.#log('info', 'delivery_platform_confirmed', {
           taskId,
@@ -676,10 +681,28 @@ export class NodeBridgeRuntime {
     }
   }
 
-  /** Consume the error-notice marker for a message ID seen on the wire. */
-  #isErrorNoticeEcho(messageId: string): boolean {
-    if (!this.#errorNoticeIds.delete(messageId)) return false;
-    this.#log('info', 'error_notice_echo_suppressed', { messageId });
+  /** Remember a just-delivered platform message ID so its echo is suppressed. */
+  #recordDeliveredEcho(messageId: string): void {
+    const now = Date.now();
+    for (const [id, at] of this.#deliveredEchoIds) {
+      if (now - at >= DELIVERED_ECHO_WINDOW_MS) this.#deliveredEchoIds.delete(id);
+    }
+    this.#deliveredEchoIds.set(messageId, now);
+  }
+
+  /**
+   * Suppress the own-message echo of a just-delivered message.  The marker is
+   * kept (not consumed) so a duplicate gateway event for the same message is
+   * also suppressed until the short window expires.
+   */
+  #isDeliveredEcho(messageId: string): boolean {
+    const at = this.#deliveredEchoIds.get(messageId);
+    if (at === undefined) return false;
+    if (Date.now() - at >= DELIVERED_ECHO_WINDOW_MS) {
+      this.#deliveredEchoIds.delete(messageId);
+      return false;
+    }
+    this.#log('info', 'delivered_echo_suppressed', { messageId });
     return true;
   }
 
