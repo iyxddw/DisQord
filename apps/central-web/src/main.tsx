@@ -28,6 +28,7 @@ import {
 } from '@xyflow/react';
 import {
   Activity,
+  ArrowRightLeft,
   Bot,
   Check,
   ChevronRight,
@@ -426,6 +427,24 @@ function Sessions() {
       setError(cause instanceof Error ? cause.message : '会话删除失败');
     }
   };
+  const toggleFetchOnly = async (session: ChatSession) => {
+    const next = !Boolean(session.fetchOnly);
+    const previous = data;
+    setData((current) =>
+      current.map((item) => (item.id === session.id ? { ...item, fetchOnly: next } : item)),
+    );
+    try {
+      await apiRetry(
+        `/chat-sessions/${session.id}`,
+        { method: 'PATCH', json: { fetchOnly: next } },
+        { attempts: 3 },
+      );
+      setError('');
+    } catch (cause) {
+      setData(previous);
+      setError(cause instanceof Error ? cause.message : '只读状态保存失败');
+    }
+  };
   return (
     <div className="panel">
       <PanelTitle
@@ -447,6 +466,7 @@ function Sessions() {
             </div>
             <div className="grow">
               <strong>{sessionLabel(session)}</strong>
+              {session.fetchOnly && <em className="session-fetch-only">只读 · 不可回复</em>}
               {session.remark && <em className="session-remark">原名：{session.displayName}</em>}
               <span>
                 {session.platform === 'discord'
@@ -468,6 +488,17 @@ function Sessions() {
               </div>
             ) : (
               <div className="session-actions">
+                <button
+                  className={session.fetchOnly ? 'fetch-only active' : 'fetch-only'}
+                  title={
+                    session.fetchOnly
+                      ? '只读频道：不可回复，来自此频道的消息不会触发转发'
+                      : '设为只读（不可回复）'
+                  }
+                  onClick={() => void toggleFetchOnly(session)}
+                >
+                  <ArrowRightLeft size={14} />
+                </button>
                 <button
                   title={session.remark ? '编辑备注' : '添加备注'}
                   onClick={() => {

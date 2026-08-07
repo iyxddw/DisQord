@@ -174,6 +174,23 @@ describe('central control-plane API', () => {
     expect(updated.statusCode).toBe(200);
     expect(updated.json()).toMatchObject({ remark: '工作群' });
 
+    const fetchOnly = await central.app.inject({
+      method: 'PATCH',
+      url: `/api/chat-sessions/${id}`,
+      cookies: { disqord_session: token },
+      payload: { fetchOnly: true },
+    });
+    expect(fetchOnly.statusCode).toBe(200);
+    expect(fetchOnly.json()).toMatchObject({ fetchOnly: true });
+
+    const unchanged = await central.app.inject({
+      method: 'PATCH',
+      url: `/api/chat-sessions/${id}`,
+      cookies: { disqord_session: token },
+      payload: {},
+    });
+    expect(unchanged.statusCode).toBe(400);
+
     const removed = await central.app.inject({
       method: 'DELETE',
       url: `/api/chat-sessions/${id}`,

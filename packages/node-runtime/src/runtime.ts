@@ -62,6 +62,8 @@ const deliverCommandSchema = z
     fastMode: z.boolean().default(false),
     replyMessageId: z.string().min(1).optional(),
     targetMessageId: z.string().min(1).optional(),
+    /** System error notice; the node suppresses re-upload of its platform message. */
+    errorNotice: z.boolean().optional(),
   })
   .superRefine((command, context) => {
     if (command.mode === 'card' && command.cards.length === 0 && !command.render) {
@@ -145,6 +147,12 @@ export class NodeBridgeRuntime {
   readonly #deliveryTasks = new Map<string, Promise<void>>();
   readonly #lastDeliveryAt = new Map<string, number>();
   readonly #nextFastDeliveryAt = new Map<string, number>();
+  /**
+   * Platform message IDs of error notices this node just delivered.  The
+   * adapter's own-message event for one of these is suppressed, so an error
+   * card can never be re-uploaded and re-enter a blueprint.
+   */
+  readonly #errorNoticeIds = new Map<string, number>();
   readonly #avatarRequests = new Map<string, PendingAvatarRequest>();
   readonly #avatarFetches = new Map<string, Promise<string | undefined>>();
 
@@ -212,6 +220,7 @@ export class NodeBridgeRuntime {
     await this.#adapter.start(async (message) => {
       try {
         const validated = messageEnvelopeSchema.parse(message);
+        if (this.#isErrorNoticeEcho(validated.source.messageId)) return;
         const queued = this.#queue?.enqueue({
           id: validated.eventId,
           kind: 'message.upload',
@@ -520,6 +529,11 @@ export class NodeBridgeRuntime {
         const completed = { ...item.payload, targetMessageId: firstMessageId };
         queue.updatePayload(taskId, completed);
         queue.markAcknowledged(taskId);
+        if (item.payload.errorNotice && firstMessageId) {
+          // Suppress the adapter's own-message echo so the error card cannot be
+          // re-uploaded and re-enter a blueprint (fetch-only or not).
+          this.#errorNoticeIds.set(firstMessageId, Date.now());
+        }
         this.#log('info', 'delivery_platform_confirmed', {
           taskId,
           targetSessionId: item.payload.targetSessionId,
@@ -660,6 +674,13 @@ export class NodeBridgeRuntime {
         this.#avatarRequests.delete(requestId);
       }
     }
+  }
+
+  /** Consume the error-notice marker for a message ID seen on the wire. */
+  #isErrorNoticeEcho(messageId: string): boolean {
+    if (!this.#errorNoticeIds.delete(messageId)) return false;
+    this.#log('info', 'error_notice_echo_suppressed', { messageId });
+    return true;
   }
 
   async #sendDelivered(command: DeliveryCommand): Promise<void> {

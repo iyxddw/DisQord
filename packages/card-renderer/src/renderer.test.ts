@@ -20,8 +20,22 @@ async function rowEncodedPng(width: number, height: number): Promise<string> {
       raw[offset + 1] = (y >> 8) & 0xff;
     }
   }
-  const png = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+  const png = await sharp(raw, { raw: { width, height, channels: 3 } })
+    .png()
+    .toBuffer();
   return `data:image/png;base64,${png.toString('base64')}`;
+}
+
+/** True when any pixel is strongly red, which only the 不可回复 badge produces on a plain card. */
+async function hasRedPixel(png: Buffer): Promise<boolean> {
+  const { data } = await sharp(png).raw().toBuffer({ resolveWithObject: true });
+  for (let offset = 0; offset < data.length; offset += 3) {
+    const r = data[offset]!;
+    const g = data[offset + 1]!;
+    const b = data[offset + 2]!;
+    if (r - g > 20 && r - b > 20) return true;
+  }
+  return false;
 }
 
 describe('message card renderer', () => {
@@ -234,6 +248,46 @@ describe('message card renderer', () => {
     expect(await readRgbPixel(cards[1], 256, 0)).toEqual([0, 8, 0]);
   });
 
+  it('shows a red 不可回复 badge when the card is non-replyable', async () => {
+    const zh = buildMessageCardSvg({
+      sourcePlatform: 'qq',
+      targetLanguage: 'zh',
+      sourceName: '通知频道',
+      senderName: 'Bot',
+      sentAt: '2026-08-08 12:00',
+      primaryText: '公告内容',
+      images: [],
+      nonReplyable: true,
+    });
+    expect(zh).toContain('不可回复');
+
+    const en = buildMessageCardSvg({
+      sourcePlatform: 'discord',
+      targetLanguage: 'en',
+      sourceName: 'notifications',
+      senderName: 'Bot',
+      sentAt: '2026-08-08 12:00',
+      primaryText: 'announcement',
+      images: [],
+      nonReplyable: true,
+    });
+    expect(en).toContain('NO REPLY');
+
+    const [png] = await renderMessageCards({
+      sourcePlatform: 'qq',
+      targetLanguage: 'zh',
+      sourceName: '通知频道',
+      senderName: 'Bot',
+      sentAt: '2026-08-08 12:00',
+      primaryText: '公告内容',
+      images: [],
+      nonReplyable: true,
+    });
+    // The badge fill, border, and text are red (#ff5c5c); the rest of a plain
+    // text card is near-grayscale, so a strongly red pixel proves the badge.
+    expect(await hasRedPixel(png)).toBe(true);
+  });
+
   it('does not split English words across lines', () => {
     const svg = buildMessageCardSvg({
       sourcePlatform: 'qq',
@@ -245,7 +299,9 @@ describe('message card renderer', () => {
       primaryText: `${'a'.repeat(40)} wonderful tail`,
       images: [],
     });
-    const lines = Array.from(svg.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/gu)).map((match) => match[1]!);
+    const lines = Array.from(svg.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/gu)).map(
+      (match) => match[1]!,
+    );
     const lineWithWord = lines.findIndex((line) => line.includes('wonderful'));
     expect(lineWithWord).toBeGreaterThan(-1);
     expect(lines[lineWithWord]).toContain('wonderful');

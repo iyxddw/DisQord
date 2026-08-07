@@ -13,6 +13,8 @@ export const chatSessionSchema = z.object({
   spaceId: externalIdSchema,
   displayName: z.string().trim().min(1).max(256),
   remark: z.string().trim().max(256).optional(),
+  /** Fetch-only channel: deliveries arrive marked 不可回复, its own messages never trigger a flow. */
+  fetchOnly: z.boolean().optional(),
   status: chatSessionStatusSchema,
   verifiedAt: isoDateTimeSchema.optional(),
   lastSuccessfulSendAt: isoDateTimeSchema.optional(),

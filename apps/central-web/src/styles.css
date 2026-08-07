@@ -303,6 +303,17 @@ h1 {
   font-size: 12px;
   font-style: normal;
 }
+.session-fetch-only {
+  margin-left: 8px;
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid #7a3441;
+  border-radius: 999px;
+  color: #ff7b7b;
+  font-size: 11px;
+  font-style: normal;
+  vertical-align: 2px;
+}
 .session-actions {
   display: flex;
   gap: 5px;
@@ -327,6 +338,15 @@ h1 {
 .session-actions button:last-child:hover {
   color: #efa1ae;
   border-color: #623645;
+}
+.session-actions button.fetch-only.active {
+  color: #ff7b7b;
+  border-color: #7a3441;
+  background: #3a2026;
+}
+.session-actions button.fetch-only.active:hover {
+  color: #ff9a9a;
+  border-color: #a3444f;
 }
 .remark-editor {
   display: flex;

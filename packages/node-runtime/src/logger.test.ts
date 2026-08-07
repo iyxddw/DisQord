@@ -36,6 +36,9 @@ describe('NodeLogger', () => {
     });
   });
 
+  // Writing 16k records means that many synchronous disk appends, which can
+  // take several seconds on a cold Windows disk.  The default 5s timeout made
+  // this flaky whenever other suites were running in parallel.
   it('keeps at most 16 * 1024 records in the readable log window', () => {
     const directory = mkdtempSync(join(tmpdir(), 'disqord-node-log-limit-'));
     directories.push(directory);
@@ -49,5 +52,5 @@ describe('NodeLogger', () => {
     expect(logger.list()).toMatchObject({ total: limit });
     expect(logger.list({ search: 'event-0' }).total).toBe(0);
     expect(logger.list({ search: `event-${limit}` }).total).toBe(1);
-  });
+  }, 30_000);
 });

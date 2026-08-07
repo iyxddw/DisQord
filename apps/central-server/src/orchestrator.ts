@@ -174,6 +174,8 @@ interface OutboundDeliveryCommand {
   readonly senderName?: string;
   readonly fastMode?: boolean;
   readonly replyMessageId?: string;
+  /** System error notice; the target node never re-uploads its platform message. */
+  readonly errorNotice?: boolean;
 }
 
 interface PreparedDelivery {
@@ -303,6 +305,46 @@ export class MessageOrchestrator {
       await this.#handleDeliveryFailed(frame.payload);
     } else if (frame.kind === 'session.candidates') {
       await this.#store.set('session-candidates', frame.nodeId, frame.payload);
+      await this.#reconcileSessionDisplayNames(frame.nodeId, frame.payload);
+    }
+  }
+
+  /**
+   * Self-healing session names: a session created before the node announced
+   * its candidate list keeps the numeric fallback name ("Discord <server> /
+   * <channel>"). When the real candidate later arrives, promote the resolved
+   * display name so the web UI shows the channel name without re-creating it.
+   */
+  async #reconcileSessionDisplayNames(nodeId: string, payload: unknown): Promise<void> {
+    const parsed = z
+      .object({
+        candidates: z.array(
+          z.object({
+            externalId: z.string().min(1).max(256),
+            spaceId: z.string().min(1).max(256),
+            displayName: z.string().trim().min(1).max(256),
+          }),
+        ),
+      })
+      .safeParse(payload);
+    if (!parsed.success) return;
+    for (const candidate of parsed.data.candidates) {
+      const sessions = (await this.#store.list<ChatSession>('chat-session'))
+        .map((entry) => chatSessionSchema.parse(entry.value))
+        .filter(
+          (session) =>
+            session.nodeId === nodeId &&
+            session.externalId === candidate.externalId &&
+            session.spaceId === candidate.spaceId &&
+            isFallbackSessionName(session.displayName),
+        );
+      for (const session of sessions) {
+        await this.#store.set('chat-session', session.id, {
+          ...session,
+          displayName: candidate.displayName,
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
   }
 
@@ -677,6 +719,15 @@ export class MessageOrchestrator {
         session.externalId === message.source.channelId,
     );
     if (!sourceSession) return;
+    if (sourceSession.fetchOnly) {
+      // Fetch-only sessions are one-way feeds: their own messages and replies
+      // never start a blueprint, so they can never trigger a forwarded reply.
+      await this.#log(message.traceId, 'info', 'message_ignored_fetch_only', {
+        sessionId: sourceSession.id,
+        message,
+      });
+      return;
+    }
 
     const dedupeKey = createMessageIdempotencyKey(message);
     if (await this.#store.get('message-dedupe', dedupeKey)) {
@@ -1683,7 +1734,7 @@ export class MessageOrchestrator {
 
   async #sendPreparedDelivery(prepared: PreparedDelivery): Promise<void> {
     const { intent, command } = prepared;
-    const { message, target, cards, renderSpec } = intent;
+    const { sourceSession, message, target, cards, renderSpec } = intent;
     try {
       await this.#commandBus.sendToNode(target.nodeId, 'message.deliver', command);
       await this.#log(message.traceId, 'info', 'delivery_queued', {
@@ -1699,17 +1750,25 @@ export class MessageOrchestrator {
         replyMessageId: command.replyMessageId,
       });
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       await this.#store.set('delivery-task', command.taskId, {
         ...(await this.#store.get<Record<string, unknown>>('delivery-task', command.taskId))?.value,
         status: 'failed',
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
         updatedAt: new Date().toISOString(),
       });
       await this.#log(message.traceId, 'error', 'delivery_command_failed', {
         taskId: command.taskId,
         targetSessionId: target.id,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
       });
+      await this.#deliverErrorNotice(
+        message.traceId,
+        sourceSession.id,
+        target.id,
+        errorMessage,
+        message.source.messageId,
+      );
     }
   }
 
@@ -1783,11 +1842,80 @@ export class MessageOrchestrator {
                 targetSessionId: intent.target.id,
                 error: message,
               });
+              await this.#deliverErrorNotice(
+                intent.message.traceId,
+                intent.sourceSession.id,
+                intent.target.id,
+                message,
+                intent.message.source.messageId,
+              );
             }
           }
         }
       }),
     );
+  }
+
+  /**
+   * Surface a failed delivery to the user instead of dropping it silently: an
+   * error card is rendered and sent to the source session. The card is a
+   * non-replyable system notice, so it never enters a blueprint again and its
+   * own failure path cannot recurse (it has no delivery-task record).
+   */
+  async #deliverErrorNotice(
+    traceId: string,
+    sourceSessionId: string,
+    targetSessionId: string,
+    errorMessage: string,
+    sourceMessageId: string,
+  ): Promise<void> {
+    try {
+      const [sourceEntry, targetEntry] = await Promise.all([
+        this.#store.get<ChatSession>('chat-session', sourceSessionId),
+        this.#store.get<ChatSession>('chat-session', targetSessionId),
+      ]);
+      if (!sourceEntry) return;
+      const sourceSession = chatSessionSchema.parse(sourceEntry.value);
+      if (sourceSession.status !== 'verified') return;
+      const targetName = targetEntry
+        ? chatSessionSchema.parse(targetEntry.value).displayName
+        : '未知会话';
+      const spec: MessageCardRenderSpec = {
+        sourcePlatform: sourceSession.platform,
+        targetLanguage: sourceSession.platform === 'discord' ? 'en' : 'zh',
+        sourceName: targetName,
+        senderName: 'DisQord',
+        sentAt: new Date().toISOString(),
+        primaryText: `⚠️ 消息发送失败\n${errorMessage}`,
+        images: [],
+        nonReplyable: true,
+        traceLabel: traceId.slice(0, 8),
+      };
+      const command: OutboundDeliveryCommand = {
+        taskId: randomUUID(),
+        sourceSessionId: sourceSession.id,
+        sourceMessageId,
+        targetSessionId: sourceSession.id,
+        externalId: sourceSession.externalId,
+        mode: 'card',
+        cards: [],
+        render: spec,
+        errorNotice: true,
+      };
+      await this.#commandBus.sendToNode(sourceSession.nodeId, 'message.deliver', command);
+      await this.#log(traceId, 'error', 'delivery_error_notice_sent', {
+        taskId: command.taskId,
+        sourceSessionId: sourceSession.id,
+        targetSessionId,
+        error: errorMessage,
+      });
+    } catch (error) {
+      await this.#log(traceId, 'error', 'delivery_error_notice_failed', {
+        sourceSessionId,
+        targetSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async handleReview(taskId: string, decision: 'approve' | 'reject'): Promise<void> {
@@ -1889,13 +2017,21 @@ export class MessageOrchestrator {
     const failed = deliveryFailedFrameSchema.parse(payload);
     const task = await this.#store.get<Record<string, unknown>>('delivery-task', failed.taskId);
     if (task) {
+      const traceId = String(task.value.traceId);
       await this.#store.set('delivery-task', failed.taskId, {
         ...task.value,
         status: 'failed',
         error: failed.error,
         updatedAt: new Date().toISOString(),
       });
-      await this.#log(String(task.value.traceId), 'error', 'delivery_failed', failed);
+      await this.#log(traceId, 'error', 'delivery_failed', failed);
+      await this.#deliverErrorNotice(
+        traceId,
+        failed.sourceSessionId,
+        failed.targetSessionId,
+        failed.error,
+        failed.sourceMessageId,
+      );
     }
   }
 
@@ -2193,6 +2329,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       ...(!fixedText && message.unsupportedType
         ? { unsupportedType: message.unsupportedType }
         : {}),
+      ...(target.fetchOnly ? { nonReplyable: true } : {}),
       traceLabel: message.traceId.slice(0, 8),
     } satisfies MessageCardRenderSpec;
   }
@@ -2304,4 +2441,9 @@ function mappingKey(
   targetSessionId: string,
 ): string {
   return `${sourceSessionId}:${sourceMessageId}:${targetSessionId}`;
+}
+
+/** The numeric ID fallback used when a session is created before its name is resolved. */
+function isFallbackSessionName(name: string): boolean {
+  return /^(?:QQ|Discord) [\d/ ]+$/u.test(name.trim());
 }

@@ -69,6 +69,8 @@ export interface ChatSession {
   spaceId: string;
   displayName: string;
   remark?: string;
+  /** Fetch-only channel: deliveries arrive marked 不可回复, its own messages never trigger a flow. */
+  fetchOnly?: boolean;
   verificationExpiresAt?: string;
   status: 'pending' | 'verified' | 'disabled' | 'stale';
 }

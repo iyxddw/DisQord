@@ -36,8 +36,16 @@ const sessionCandidateSchema = z.object({
   externalId: z.string().min(1).max(256),
   spaceId: z.string().min(1).max(256),
   displayName: z.string().min(1).max(256).optional(),
+  fetchOnly: z.boolean().optional(),
 });
-const sessionUpdateSchema = z.object({ remark: z.string().trim().max(256).nullable() });
+const sessionUpdateSchema = z
+  .object({
+    remark: z.string().trim().max(256).nullable().optional(),
+    fetchOnly: z.boolean().optional(),
+  })
+  .refine((value) => value.remark !== undefined || value.fetchOnly !== undefined, {
+    message: 'At least one session field must be updated.',
+  });
 const simulationSettingsSchema = z.object({
   delayMs: z.number().int().min(0).max(10_000).default(1_000),
 });
@@ -518,12 +526,13 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.patch('/api/chat-sessions/:id', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const { id } = z.object({ id: z.uuid() }).parse(request.params);
-      const { remark } = sessionUpdateSchema.parse(request.body);
+      const body = sessionUpdateSchema.parse(request.body);
       const entry = await options.store.get<ChatSession>('chat-session', id);
       if (!entry) return await reply.code(404).send({ error: 'Chat session not found.' });
       const updated = chatSessionSchema.parse({
         ...entry.value,
-        ...(remark ? { remark } : { remark: undefined }),
+        ...(body.remark === undefined ? {} : { remark: body.remark ?? undefined }),
+        ...(body.fetchOnly === undefined ? {} : { fetchOnly: body.fetchOnly }),
         updatedAt: new Date().toISOString(),
       });
       await options.store.set('chat-session', id, updated);

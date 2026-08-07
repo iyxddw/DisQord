@@ -41,6 +41,8 @@ export const messageCardInputSchema = z.object({
     .optional(),
   unsupportedType: z.string().trim().min(1).max(128).optional(),
   traceLabel: z.string().trim().min(1).max(64).optional(),
+  /** Delivered into a fetch-only session; show a red 不可回复 badge. */
+  nonReplyable: z.boolean().optional(),
 });
 
 export type MessageCardInput = z.infer<typeof messageCardInputSchema>;
@@ -198,6 +200,7 @@ async function normalizeCanvasInput(
       : {}),
     ...(spec.unsupportedType ? { unsupportedType: spec.unsupportedType } : {}),
     ...(spec.traceLabel ? { traceLabel: spec.traceLabel } : {}),
+    ...(spec.nonReplyable ? { nonReplyable: true } : {}),
   };
 }
 
@@ -268,6 +271,28 @@ async function renderMessageCardCanvas(
   ctx.textAlign = 'right';
   ctx.fillText(input.sourcePlatform.toUpperCase(), width - horizontalPadding, 76);
   ctx.textAlign = 'start';
+
+  if (input.nonReplyable) {
+    const badgeText = language === 'zh' ? '不可回复' : 'NO REPLY';
+    ctx.font = `700 20px ${fontFamily}`;
+    const textWidth = ctx.measureText(badgeText).width;
+    const padX = 16;
+    const padY = 10;
+    const badgeWidth = textWidth + padX * 2;
+    const badgeHeight = 24 + padY * 2;
+    const badgeX = width - horizontalPadding - badgeWidth;
+    const badgeY = 126;
+    ctx.fillStyle = 'rgba(255, 77, 79, 0.16)';
+    roundedRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, badgeHeight / 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ff5c5c';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ff5c5c';
+    ctx.textAlign = 'center';
+    ctx.fillText(badgeText, badgeX + badgeWidth / 2, badgeY + padY + 17);
+    ctx.textAlign = 'start';
+  }
 
   let cursorY = 170;
   if (input.reply) {
@@ -546,14 +571,12 @@ function renderImageTileCard(band: ImageBand): Buffer {
   ctx.fillRect(0, 0, width, band.h);
   const radius = Math.min(22, band.h / 2);
   ctx.save();
-  roundedRectRadii(
-    ctx,
-    horizontalPadding,
-    0,
-    band.w,
-    band.h,
-    [band.first ? radius : 0, band.first ? radius : 0, band.last ? radius : 0, band.last ? radius : 0],
-  );
+  roundedRectRadii(ctx, horizontalPadding, 0, band.w, band.h, [
+    band.first ? radius : 0,
+    band.first ? radius : 0,
+    band.last ? radius : 0,
+    band.last ? radius : 0,
+  ]);
   ctx.clip();
   ctx.drawImage(
     band.image,
@@ -868,6 +891,7 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
           .primary-text { fill: #f7f8ff; font-size: 34px; font-weight: 500; }
           .original-label { fill: #aeb6cc; font-size: 18px; font-weight: 700; letter-spacing: 1.5px; }
           .original-text { fill: #e2e5ef; font-size: 26px; }
+          .no-reply { fill: #ff5c5c; font-size: 20px; font-weight: 700; }
           .footer { fill: #737c92; font-size: 17px; }
         </style>
       </defs>
@@ -876,6 +900,15 @@ export function buildMessageCardSvg(candidate: MessageCardInput): string {
       <text x="${horizontalPadding + 98}" y="78" class="sender">${escapeXml(input.senderName)}</text>
       <text x="${horizontalPadding + 98}" y="112" class="meta">${escapeXml(input.sourceName)} · ${escapeXml(input.sentAt)}</text>
       <text x="${width - horizontalPadding}" y="76" text-anchor="end" class="platform">${input.sourcePlatform.toUpperCase()}</text>
+      ${
+        input.nonReplyable
+          ? `<rect x="${width - horizontalPadding - 112}" y="126" width="112" height="44" rx="22"
+              fill="#ff5c5c" fill-opacity="0.16" stroke="#ff5c5c" stroke-opacity="0.9" stroke-width="2"/>
+             <text x="${width - horizontalPadding - 56}" y="156" text-anchor="middle" class="no-reply">${
+               language === 'zh' ? '不可回复' : 'NO REPLY'
+             }</text>`
+          : ''
+      }
       ${replySvg}
       ${primarySvg}
       ${imagesSvg}

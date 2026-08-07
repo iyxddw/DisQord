@@ -1187,4 +1187,136 @@ describe('blueprint message pipeline', () => {
       (await setup.store.get<Record<string, unknown>>('moderation-review', reviews[0]!.key))?.value,
     ).toMatchObject({ status: 'approved' });
   });
+
+  it('ignores messages from a fetch-only session without starting a blueprint', async () => {
+    const process = vi.fn(async () => ({
+      decision: 'allow' as const,
+      cards: [Buffer.from('card')],
+    }));
+    const setup = await fixture([], [], { process });
+    await setup.store.set('chat-session', setup.sourceSession.id, {
+      ...setup.sourceSession,
+      fetchOnly: true,
+    });
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: message(setup.sourceSession.nodeId),
+      frameId: randomUUID(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(process).not.toHaveBeenCalled();
+    expect(setup.sendToNode).not.toHaveBeenCalled();
+    expect(await setup.store.list('message-dedupe')).toHaveLength(0);
+    const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
+      (entry) => entry.value,
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ event: 'message_ignored_fetch_only' })]),
+    );
+  });
+
+  it('marks deliveries into a fetch-only session as non-replyable', async () => {
+    const setup = await fixture([], [], {});
+    const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
+    const incoming = message(setup.sourceSession.nodeId, '公告');
+
+    const fetchOnly = await processor.prepareRender(
+      incoming,
+      { ...setup.targetSession, fetchOnly: true },
+      '公告',
+      false,
+    );
+    const normal = await processor.prepareRender(incoming, setup.targetSession, '公告', false);
+
+    expect(fetchOnly.nonReplyable).toBe(true);
+    expect(normal.nonReplyable).toBeUndefined();
+  });
+
+  it('sends a non-replyable error notice card when a delivery fails', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      { render: vi.fn(async () => [Buffer.from('card')]) },
+    );
+    const incoming = message(setup.sourceSession.nodeId);
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    const sentBatch = setup.sendToNode.mock.calls[0]![2] as {
+      deliveries: [Record<string, unknown>];
+    };
+    const sentCommand = sentBatch.deliveries[0]!;
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.targetSession.nodeId,
+      nodeType: 'discord',
+      kind: 'message.delivery_failed',
+      payload: { ...sentCommand, error: 'Discord API unavailable' },
+      frameId: randomUUID(),
+    });
+
+    await waitFor(() => setup.sendToNode.mock.calls.length === 2);
+    const notice = setup.sendToNode.mock.calls[1]!;
+    expect(notice[0]).toBe(setup.sourceSession.nodeId);
+    expect(notice[1]).toBe('message.deliver');
+    expect(notice[2]).toMatchObject({
+      errorNotice: true,
+      targetSessionId: setup.sourceSession.id,
+      sourceMessageId: incoming.source.messageId,
+    });
+    const render = (notice[2] as { render: Record<string, unknown> }).render;
+    expect(render).toMatchObject({
+      nonReplyable: true,
+      senderName: 'DisQord',
+      sourceName: setup.targetSession.displayName,
+    });
+    expect(String(render.primaryText)).toContain('消息发送失败');
+    const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
+      (entry) => entry.value,
+    );
+    expect(logs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ event: 'delivery_error_notice_sent' })]),
+    );
+  });
+
+  it('promotes the real channel name once a node announces candidates', async () => {
+    const setup = await fixture([], [], {});
+    await setup.store.set('chat-session', setup.sourceSession.id, {
+      ...setup.sourceSession,
+      displayName: 'QQ 123456',
+    });
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'session.candidates',
+      payload: {
+        candidates: [
+          {
+            externalId: setup.sourceSession.externalId,
+            spaceId: setup.sourceSession.spaceId,
+            displayName: '真的群名',
+          },
+        ],
+      },
+      frameId: randomUUID(),
+    });
+
+    const session = await setup.store.get<ChatSession>('chat-session', setup.sourceSession.id);
+    expect(session?.value.displayName).toBe('真的群名');
+  });
 });
