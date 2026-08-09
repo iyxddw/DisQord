@@ -1,15 +1,17 @@
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode, useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity,
-  Bot,
   CheckCircle2,
   CircleAlert,
   Clock3,
+  FileClock,
   KeyRound,
   Link2,
   RefreshCw,
   Server,
+  Settings,
+  ShieldCheck,
 } from 'lucide-react';
 
 import './styles.css';
@@ -39,9 +41,13 @@ interface NodeLogPage {
   totalPages: number;
 }
 
+type NodeSection = 'overview' | 'diagnostics' | 'logs' | 'access';
+
 function App() {
   const [status, setStatus] = useState<Status>();
   const [error, setError] = useState('');
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [token, setToken] = useState(sessionStorage.getItem('node-token') ?? '');
   const [logs, setLogs] = useState<NodeLogPage>({
     items: [],
@@ -54,7 +60,10 @@ function App() {
   const [logSearch, setLogSearch] = useState('');
   const [logPage, setLogPage] = useState(1);
   const [logError, setLogError] = useState('');
-  const load = async () => {
+  const [logsLoading, setLogsLoading] = useState(true);
+  const [activeSection, setActiveSection] = useState<NodeSection>('overview');
+  const load = async (background = false) => {
+    if (!background) setStatusLoading(true);
     try {
       const response = await fetch('/api/node/status', {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -65,15 +74,18 @@ function App() {
       setError('');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '节点不可用');
+    } finally {
+      if (!background) setStatusLoading(false);
     }
   };
   useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 5000);
+    const timer = setInterval(() => void load(true), 5000);
     return () => clearInterval(timer);
   }, [token]);
   useEffect(() => {
-    const loadLogs = async () => {
+    const loadLogs = async (background = false) => {
+      if (!background) setLogsLoading(true);
       try {
         const query = new URLSearchParams({
           page: String(logPage),
@@ -90,188 +102,277 @@ function App() {
         setLogError('');
       } catch (cause) {
         setLogError(cause instanceof Error ? cause.message : '读取日志失败');
+      } finally {
+        if (!background) setLogsLoading(false);
       }
     };
     void loadLogs();
-    const timer = setInterval(() => void loadLogs(), 5000);
+    const timer = setInterval(() => void loadLogs(true), 5000);
     return () => clearInterval(timer);
   }, [logLevel, logPage, logSearch, token]);
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((entry) => entry.isIntersecting);
+        if (visible) setActiveSection(visible.target.id as NodeSection);
+      },
+      { rootMargin: '-20% 0px -65% 0px' },
+    );
+    for (const id of ['overview', 'diagnostics', 'logs', 'access'] as const) {
+      const element = document.querySelector(`#${id}`);
+      if (element) observer.observe(element);
+    }
+    return () => observer.disconnect();
+  }, []);
   const saveToken = (value: string) => {
     setToken(value);
     sessionStorage.setItem('node-token', value);
   };
   const refresh = async () => {
-    await fetch('/api/node/refresh', {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    await load();
+    setRefreshing(true);
+    try {
+      const response = await fetch('/api/node/refresh', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) throw new Error('刷新会话列表失败');
+      await load(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '刷新会话列表失败');
+    } finally {
+      setRefreshing(false);
+    }
   };
 
+  const nodeName = status?.program === 'discord-node' ? 'Discord 消息节点' : 'QQ 消息节点';
+  const nodeKind = status?.program === 'discord-node' ? 'Discord Node' : 'QQ / NapCat Node';
+
   return (
-    <main>
-      <header>
+    <div className="app-shell">
+      <aside className="sidebar">
         <div className="brand">
-          <span>
-            <Link2 />
-          </span>
+          <Link2 className="brand-symbol" size={22} />
           <div>
             <strong>DisQord</strong>
-            <small>节点控制面板</small>
+            <span>客户端控制台</span>
           </div>
         </div>
-        <div className={`state ${status?.state === 'connected' ? 'online' : ''}`}>
-          <i />
-          {stateLabel(status?.state)}
+        <nav aria-label="客户端功能区">
+          <a
+            className={activeSection === 'overview' ? 'active' : ''}
+            href="#overview"
+            onClick={() => setActiveSection('overview')}
+          >
+            <Activity size={18} />
+            <span>运行状态</span>
+          </a>
+          <a
+            className={activeSection === 'diagnostics' ? 'active' : ''}
+            href="#diagnostics"
+            onClick={() => setActiveSection('diagnostics')}
+          >
+            <ShieldCheck size={18} />
+            <span>连接诊断</span>
+          </a>
+          <a
+            className={activeSection === 'logs' ? 'active' : ''}
+            href="#logs"
+            onClick={() => setActiveSection('logs')}
+          >
+            <FileClock size={18} />
+            <span>客户端日志</span>
+          </a>
+          <a
+            className={activeSection === 'access' ? 'active' : ''}
+            href="#access"
+            onClick={() => setActiveSection('access')}
+          >
+            <Settings size={18} />
+            <span>访问设置</span>
+          </a>
+        </nav>
+        <div className="sidebar-foot">
+          <span>
+            <i className={status?.state === 'connected' ? 'online' : ''} />
+            {stateLabel(status?.state)}
+          </span>
+          <small>{nodeKind}</small>
         </div>
-      </header>
-      <section className="hero">
-        <div>
-          <p className="eyebrow">
-            {status?.program === 'discord-node' ? 'DISCORD NODE' : 'QQ / NAPCAT NODE'}
-          </p>
-          <h1>{status?.program === 'discord-node' ? 'Discord 消息节点' : 'QQ 消息节点'}</h1>
-          <p>平台凭据和消息队列只保存在这台服务器。中央服务负责翻译、审核和渲染。</p>
-        </div>
-        <div className="hero-icon">
-          <Bot size={38} />
-        </div>
-      </section>
-      {error && (
-        <div className="alert">
-          <CircleAlert size={18} />
-          <div>
-            <strong>{error}</strong>
-            <span>如果面板对外开放，请填写 NODE_WEB_TOKEN。</span>
+      </aside>
+
+      <main className="workspace">
+        <header>
+          <h1>{nodeName}</h1>
+          <div className="header-status">
+            <ShieldCheck size={17} />
+            平台凭据与消息队列仅保存在本机
           </div>
-        </div>
-      )}
-      <section className="grid">
-        <Card
-          icon={Server}
-          title="中央服务"
-          value={status?.centralUrl ?? '等待配置'}
-          hint="节点主动向中央建立 WSS 连接"
-        />
-        <Card
-          icon={Activity}
-          title="平台连接"
-          value={status?.platformConnected ? '已连接' : '未连接'}
-          hint={status?.program === 'discord-node' ? 'Discord Gateway' : 'NapCat OneBot WebSocket'}
-        />
-        <Card
-          icon={Clock3}
-          title="启动时间"
-          value={
-            status ? new Date(status.startedAt).toLocaleString('zh-CN', { hour12: false }) : '—'
-          }
-          hint="页面每 5 秒自动刷新"
-        />
-      </section>
-      <section className="panel">
-        <div className="panel-head">
-          <div>
-            <h2>连接诊断</h2>
-            <p>这里不会显示机器人 Token、配对密钥或消息正文。</p>
-          </div>
-          <button onClick={() => void refresh()}>
-            <RefreshCw size={16} />
-            刷新会话列表
-          </button>
-        </div>
-        <div className="checks">
-          <Check label="节点程序已启动" ok={Boolean(status)} />
-          <Check label="平台适配器已连接" ok={Boolean(status?.platformConnected)} />
-          <Check label="中央安全通道已认证" ok={status?.state === 'connected'} />
-        </div>
-        {status?.detail && <pre>{status.detail}</pre>}
-      </section>
-      <section className="panel node-logs">
-        <div className="panel-head">
-          <div>
-            <h2>客户端日志</h2>
-            <p>按等级和关键词搜索本机 JSONL 日志；文件：{status?.logPath ?? '等待启动'}</p>
-          </div>
-          <div className="log-controls">
-            <input
-              placeholder="搜索事件或内容"
-              value={logSearch}
-              onChange={(event) => {
-                setLogSearch(event.target.value);
-                setLogPage(1);
-              }}
-            />
-            <select
-              value={logLevel}
-              onChange={(event) => {
-                setLogLevel(event.target.value);
-                setLogPage(1);
-              }}
-            >
-              <option value="all">全部级别</option>
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="warn">Warn</option>
-              <option value="error">Error</option>
-            </select>
-          </div>
-        </div>
-        {logError && <div className="alert">{logError}</div>}
-        <div className="node-log-list">
-          {logs.items.map((record, index) => (
-            <article className={`node-log ${record.level}`} key={`${record.createdAt}-${index}`}>
-              <div>
-                <strong>{translateLogEvent(record.event)}</strong>
-                <span>{record.level.toUpperCase()}</span>
-                <time>{new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}</time>
-              </div>
-              {record.details && <pre>{JSON.stringify(record.details, null, 2)}</pre>}
-            </article>
-          ))}
-          {!logs.items.length && !logError && <p className="muted">暂无匹配日志</p>}
-        </div>
-        {logs.totalPages > 1 && (
-          <div className="node-log-pagination">
-            <span>
-              第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条
-            </span>
+        </header>
+
+        <section className="page">
+          <section className="overview-summary" id="overview">
             <div>
-              <button
-                disabled={logs.page <= 1}
-                onClick={() => setLogPage((current) => Math.max(1, current - 1))}
-              >
-                上一页
-              </button>
-              <button
-                disabled={logs.page >= logs.totalPages}
-                onClick={() => setLogPage((current) => Math.min(logs.totalPages, current + 1))}
-              >
-                下一页
-              </button>
+              <span className="section-kicker">{nodeKind}</span>
+              <h2>客户端运行概览</h2>
+              <p>中央服务负责翻译、审核和卡片编排，当前页面只展示本机节点状态。</p>
             </div>
-          </div>
-        )}
-      </section>
-      <section className="panel token-panel">
-        <div>
-          <KeyRound size={19} />
-          <div>
-            <h2>面板访问令牌</h2>
-            <p>仅当面板监听非本机地址时需要。</p>
-          </div>
-        </div>
-        <input
-          type="password"
-          placeholder="NODE_WEB_TOKEN"
-          value={token}
-          onChange={(event) => saveToken(event.target.value)}
-        />
-      </section>
-    </main>
+            <div className={`system-state ${status?.state === 'connected' ? 'online' : ''}`}>
+              <i />
+              {statusLoading ? '正在读取状态' : stateLabel(status?.state)}
+            </div>
+          </section>
+
+          {error && (
+            <div className="alert">
+              <CircleAlert size={18} />
+              <div>
+                <strong>{error}</strong>
+                <span>如果面板对外开放，请填写 NODE_WEB_TOKEN。</span>
+              </div>
+            </div>
+          )}
+
+          <dl className="overview-metrics">
+            <Metric
+              icon={Server}
+              title="中央服务"
+              value={status?.centralUrl ?? '等待配置'}
+              hint="节点主动建立安全连接"
+            />
+            <Metric
+              icon={Activity}
+              title="平台连接"
+              value={status?.platformConnected ? '已连接' : '未连接'}
+              hint={
+                status?.program === 'discord-node' ? 'Discord Gateway' : 'NapCat OneBot WebSocket'
+              }
+            />
+            <Metric
+              icon={Clock3}
+              title="启动时间"
+              value={
+                status ? new Date(status.startedAt).toLocaleString('zh-CN', { hour12: false }) : '—'
+              }
+              hint="状态每 5 秒自动刷新"
+            />
+          </dl>
+
+          <section className="panel" id="diagnostics">
+            <PanelHead
+              title="连接诊断"
+              subtitle="不会显示机器人 Token、配对密钥或消息正文。"
+              action={
+                <button className="secondary" disabled={refreshing} onClick={() => void refresh()}>
+                  <RefreshCw className={refreshing ? 'spin' : ''} size={16} />
+                  {refreshing ? '刷新中' : '刷新会话列表'}
+                </button>
+              }
+            />
+            <div className="checks">
+              <Check label="节点程序已启动" ok={Boolean(status)} />
+              <Check label="平台适配器已连接" ok={Boolean(status?.platformConnected)} />
+              <Check label="中央安全通道已认证" ok={status?.state === 'connected'} />
+            </div>
+            {status?.detail && <pre>{status.detail}</pre>}
+          </section>
+
+          <section className="panel node-logs" id="logs">
+            <PanelHead
+              title="客户端日志"
+              subtitle={`本机 JSONL 日志：${status?.logPath ?? '等待启动'}`}
+              action={
+                <div className="log-controls">
+                  <input
+                    placeholder="搜索日志"
+                    value={logSearch}
+                    onChange={(event) => {
+                      setLogSearch(event.target.value);
+                      setLogPage(1);
+                    }}
+                  />
+                  <select
+                    value={logLevel}
+                    onChange={(event) => {
+                      setLogLevel(event.target.value);
+                      setLogPage(1);
+                    }}
+                  >
+                    <option value="all">全部级别</option>
+                    <option value="debug">Debug</option>
+                    <option value="info">Info</option>
+                    <option value="warn">Warn</option>
+                    <option value="error">Error</option>
+                  </select>
+                </div>
+              }
+            />
+            {logError && <div className="alert compact">{logError}</div>}
+            {logsLoading && <LoadingProgress text="正在读取客户端日志" />}
+            <div className="node-log-list">
+              {logs.items.map((record, index) => (
+                <article
+                  className={`node-log ${record.level}`}
+                  key={`${record.createdAt}-${index}`}
+                >
+                  <div>
+                    <strong>{translateLogEvent(record.event)}</strong>
+                    <span>{record.level.toUpperCase()}</span>
+                    <time>
+                      {new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                    </time>
+                  </div>
+                  {record.details && <pre>{JSON.stringify(record.details, null, 2)}</pre>}
+                </article>
+              ))}
+              {!logs.items.length && !logError && !logsLoading && (
+                <p className="empty">暂无匹配日志</p>
+              )}
+            </div>
+            {logs.totalPages > 1 && (
+              <div className="node-log-pagination">
+                <span>
+                  第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条
+                </span>
+                <div>
+                  <button
+                    disabled={logs.page <= 1}
+                    onClick={() => setLogPage((current) => Math.max(1, current - 1))}
+                  >
+                    上一页
+                  </button>
+                  <button
+                    disabled={logs.page >= logs.totalPages}
+                    onClick={() => setLogPage((current) => Math.min(logs.totalPages, current + 1))}
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="panel token-panel" id="access">
+            <div>
+              <KeyRound size={19} />
+              <div>
+                <h2>面板访问令牌</h2>
+                <p>仅当面板监听非本机地址时需要；内容只保存在当前浏览器会话。</p>
+              </div>
+            </div>
+            <input
+              type="password"
+              placeholder="NODE_WEB_TOKEN"
+              value={token}
+              onChange={(event) => saveToken(event.target.value)}
+            />
+          </section>
+        </section>
+      </main>
+    </div>
   );
 }
 
-function Card({
+function Metric({
   icon: Icon,
   title,
   value,
@@ -283,11 +384,42 @@ function Card({
   hint: string;
 }) {
   return (
-    <div className="card">
-      <Icon size={20} />
-      <span>{title}</span>
-      <strong>{value}</strong>
+    <div className="metric">
+      <dt>
+        <Icon size={16} />
+        {title}
+      </dt>
+      <dd>{value}</dd>
       <small>{hint}</small>
+    </div>
+  );
+}
+function PanelHead({
+  title,
+  subtitle,
+  action,
+}: {
+  title: string;
+  subtitle: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="panel-head">
+      <div>
+        <h2>{title}</h2>
+        <p>{subtitle}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+function LoadingProgress({ text }: { text: string }) {
+  return (
+    <div className="loading-progress" role="status" aria-live="polite">
+      <span>{text}</span>
+      <div aria-hidden="true">
+        <i />
+      </div>
     </div>
   );
 }
