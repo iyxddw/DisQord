@@ -16,6 +16,7 @@ export const queueItemStatusSchema = z.enum([
   'acknowledged',
   'retrying',
   'dead_letter',
+  'discarded',
 ]);
 
 export type QueueItemStatus = z.infer<typeof queueItemStatusSchema>;
@@ -133,6 +134,10 @@ export class FileTaskQueue {
     this.#transition(id, ['queued', 'processing', 'retrying'], 'dead_letter', false);
   }
 
+  markDiscarded(id: string): void {
+    this.#transition(id, ['queued', 'processing', 'retrying'], 'discarded', false);
+  }
+
   close(): void {
     this.#compact(true);
   }
@@ -225,7 +230,7 @@ export class FileTaskQueue {
   #pruneCompleted(): string[] {
     const now = Date.now();
     const completed = [...this.#items.values()]
-      .filter((item) => item.status === 'acknowledged' || item.status === 'dead_letter')
+      .filter((item) => ['acknowledged', 'dead_letter', 'discarded'].includes(item.status))
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
     const removable = new Set(
       completed

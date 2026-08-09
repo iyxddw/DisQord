@@ -133,6 +133,42 @@ async function waitForAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000
 }
 
 describe('blueprint message pipeline', () => {
+  it('sends each node only the active chat-input sessions it should upload', async () => {
+    const input = randomUUID();
+    const output = randomUUID();
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+      ],
+      [{ id: randomUUID(), sourceNodeId: input, targetNodeId: output }],
+      {},
+    );
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'node.runtime.settings.request',
+      payload: {},
+      frameId: randomUUID(),
+    });
+
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.sourceSession.nodeId,
+      'node.runtime.settings',
+      expect.objectContaining({
+        fastMode: false,
+        fastDeliveryIntervalMs: 1_500,
+        uploadSessions: [
+          {
+            spaceId: setup.sourceSession.spaceId,
+            channelId: setup.sourceSession.externalId,
+          },
+        ],
+      }),
+    );
+  });
+
   it('runs a simulated input through the real pipeline and sends to a real target', async () => {
     const input = randomUUID();
     const translation = randomUUID();

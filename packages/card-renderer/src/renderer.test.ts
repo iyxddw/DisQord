@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { describe, expect, it } from 'vitest';
+import { cardThemes } from '@disqord/shared';
 
 import { buildMessageCardSvg, renderMessageCards } from './renderer.js';
 
@@ -39,6 +40,53 @@ async function hasRedPixel(png: Buffer): Promise<boolean> {
 }
 
 describe('message card renderer', () => {
+  it('renders every theme with long identities, reply context, original text, and an image', async () => {
+    const image = `data:image/png;base64,${(
+      await sharp({
+        create: {
+          width: 96,
+          height: 64,
+          channels: 4,
+          background: '#4e86c8',
+        },
+      })
+        .png()
+        .toBuffer()
+    ).toString('base64')}`;
+
+    for (const theme of cardThemes) {
+      const cards = await renderMessageCards({
+        themeId: theme.id,
+        sourcePlatform: 'discord',
+        targetLanguage: 'zh',
+        sourceName: '一个很长很长的服务器名称 / 特别长的频道名称用于检查来源信息是否越界',
+        senderName: '这是一位昵称非常非常长的用户 Long Display Name Without Layout Breakage',
+        senderAvatar: image,
+        sentAt: '2026-08-09 20:14:59',
+        primaryText:
+          '今晚八点继续讨论卡片主题。这里故意放入较长的中英文混排 message content，用于检查换行、内容区宽度和各版式的阅读节奏。',
+        originalText: '原消息也可能很长，因此回复预览与原文区域都不能互相覆盖。',
+        reply: {
+          senderName: '被回复用户的超长昵称 Previous Message Author',
+          textPreview: '收到，我会带着修改后的版本参加，并把图片一并发到讨论组。',
+          imagePreview: image,
+        },
+        images: [image],
+        traceLabel: `theme-${theme.id}`,
+        nonReplyable: true,
+      });
+
+      expect(cards.length, theme.id).toBeGreaterThan(0);
+      for (const card of cards) {
+        const metadata = await sharp(card).metadata();
+        expect(metadata.format, theme.id).toBe('png');
+        expect(metadata.width, theme.id).toBe(1_000);
+        expect(metadata.height, theme.id).toBeLessThanOrEqual(8_192);
+        expect(card.byteLength, theme.id).toBeGreaterThan(1_000);
+      }
+    }
+  });
+
   it('renders different local palettes for different theme ids', async () => {
     const base = {
       sourcePlatform: 'qq' as const,

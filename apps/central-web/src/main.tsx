@@ -315,7 +315,7 @@ function Login({
           />
         </label>
         {error && (
-          <div className="error">
+          <div className="panel-error">
             <CircleAlert size={15} />
             {error}
           </div>
@@ -477,7 +477,7 @@ function CentralSetupGuide({ onDone }: { onDone: () => void }) {
               </label>
             </div>
             {error && (
-              <div className="error">
+              <div className="panel-error">
                 <CircleAlert size={15} />
                 {error}
               </div>
@@ -521,7 +521,7 @@ function CentralSetupGuide({ onDone }: { onDone: () => void }) {
               </li>
             </ol>
             {error && (
-              <div className="error">
+              <div className="panel-error">
                 <CircleAlert size={15} />
                 {error}
               </div>
@@ -688,7 +688,7 @@ function Sessions() {
           </button>
         }
       />
-      {error && <div className="error">{error}</div>}
+      {error && <div className="panel-error">{error}</div>}
       {loading && <LoadingState text="正在读取聊天会话" />}
       <div className="list">
         {data.map((session) => (
@@ -2679,12 +2679,15 @@ interface LlmProviderForm {
   responseFormatMode: 'auto' | 'json-object' | 'json-schema';
 }
 
+type CardThemeLayoutView =
+  'classic' | 'support' | 'timeline' | 'compact' | 'desktop' | 'board' | 'editorial' | 'minimal';
+
 interface CardThemeView {
   id: string;
   name: string;
   description: string;
   dark: boolean;
-  layout: string;
+  layout: CardThemeLayoutView;
   colors: {
     backgroundStart: string;
     backgroundMid: string;
@@ -2700,6 +2703,67 @@ interface CardThemeView {
 interface CardSettingsView {
   themeId: string;
   themes: CardThemeView[];
+}
+
+const cardThemeFamilies: readonly {
+  layout: CardThemeLayoutView;
+  name: string;
+  description: string;
+}[] = [
+  { layout: 'classic', name: '经典中继', description: '头像、身份和消息按自然阅读顺序展开。' },
+  { layout: 'support', name: '客服工单', description: '独立页眉与醒目标记，适合问答和回复。' },
+  { layout: 'timeline', name: '事件时间线', description: '用时间轴串起来源、正文和原消息。' },
+  { layout: 'compact', name: '紧凑摘要', description: '缩短页眉与行距，同屏容纳更多信息。' },
+  { layout: 'desktop', name: '桌面窗口', description: '带窗口标题栏和附件区域的桌面组件。' },
+  { layout: 'board', name: '侧栏看板', description: '用窄侧轨区分平台，正文保持完整宽度。' },
+  { layout: 'editorial', name: '杂志编排', description: '大标题、右侧头像与更宽松的内容节奏。' },
+  { layout: 'minimal', name: '纯净文本', description: '去掉头像装饰，只保留必要身份和消息。' },
+] as const;
+
+function CardThemePreview({ theme }: { theme: CardThemeView }) {
+  return (
+    <span className={`theme-preview layout-${theme.layout}`} aria-hidden="true">
+      {theme.layout === 'desktop' && (
+        <span className="preview-windowbar">
+          <i />
+          <i />
+          <i />
+          <b>消息预览</b>
+        </span>
+      )}
+      {theme.layout === 'board' && <span className="preview-board-rail">QQ</span>}
+      {theme.layout === 'timeline' && <span className="preview-timeline-rail" />}
+      {theme.layout !== 'minimal' && <span className="preview-avatar">林</span>}
+      <span className="preview-identity">
+        <strong>{theme.layout === 'support' ? '请求 #042' : '林屿'}</strong>
+        <small>
+          {theme.layout === 'timeline'
+            ? '20:14 · Discord'
+            : theme.layout === 'editorial'
+              ? '来自 Discord 的新消息'
+              : '项目讨论 · 20:14'}
+        </small>
+      </span>
+      <span className="preview-platform">{theme.layout === 'board' ? '' : 'QQ'}</span>
+      <span className="preview-body">
+        {theme.layout === 'editorial'
+          ? '今晚八点，继续把想法变成结果。'
+          : theme.layout === 'compact'
+            ? '文档已更新，今晚八点继续。'
+            : theme.layout === 'minimal'
+              ? '文档已更新。今晚八点继续讨论，附件在下一条。'
+              : '文档已经更新，今晚八点继续讨论。'}
+      </span>
+      <span className="preview-reply">
+        <b>{theme.layout === 'support' ? '回复内容' : '原消息'}</b>
+        <small>收到，我会带着修改后的版本参加。</small>
+      </span>
+      {theme.layout === 'desktop' && <span className="preview-attachment">PNG · 1280 × 720</span>}
+      {theme.layout === 'compact' && (
+        <span className="preview-compact-meta">1 条回复 · 已转发</span>
+      )}
+    </span>
+  );
 }
 
 function createProvider(index = 0): LlmProviderForm {
@@ -3310,48 +3374,56 @@ function SettingsPage() {
         <section className="panel settings-section-panel card-theme-section">
           <PanelTitle
             title="消息卡片主题"
-            subtitle="主题参数保存在节点本地，每条消息只传一个短 ID，不增加图片流量"
+            subtitle="8 套版式 × 3 套配色；下方预览直接展示真实的文字层级、回复框和附件区域"
           />
-          <div className="theme-grid">
-            {cards.data.themes.map((theme) => (
-              <button
-                className={`theme-choice ${themeId === theme.id ? 'selected' : ''}`}
-                key={theme.id}
-                onClick={() => {
-                  if (themeId === theme.id) return;
-                  setThemeId(theme.id);
-                  markDirty();
-                }}
-                style={
-                  {
-                    '--theme-a': theme.colors.backgroundStart,
-                    '--theme-b': theme.colors.backgroundEnd,
-                    '--theme-text': theme.colors.text,
-                    '--theme-muted': theme.colors.muted,
-                    '--theme-accent': theme.colors.accent,
-                    '--theme-panel': theme.colors.panel,
-                    '--theme-border': theme.colors.panelBorder,
-                  } as CSSProperties
-                }
-              >
-                <span className="theme-preview">
-                  <i className="theme-avatar" />
-                  <i className="theme-line main" />
-                  <i className="theme-line muted" />
-                  <i className="theme-platform">QQ</i>
-                  <i className="theme-message" />
-                  <i className="theme-quote" />
-                </span>
-                <span className="theme-meta">
-                  <strong>{theme.name}</strong>
-                  <small>{theme.description}</small>
-                </span>
-                <span className="theme-kind">
-                  {theme.dark ? '暗色' : '亮色'} · {theme.layout}
-                </span>
-                {themeId === theme.id && <Check className="theme-check" size={17} />}
-              </button>
-            ))}
+          <div className="theme-family-list">
+            {cardThemeFamilies.map((family) => {
+              const familyThemes = cards.data.themes.filter(
+                (theme) => theme.layout === family.layout,
+              );
+              if (!familyThemes.length) return null;
+              return (
+                <section className="theme-family" key={family.layout}>
+                  <header>
+                    <h3>{family.name}</h3>
+                    <p>{family.description}</p>
+                  </header>
+                  <div className="theme-grid">
+                    {familyThemes.map((theme) => (
+                      <button
+                        aria-pressed={themeId === theme.id}
+                        className={`theme-choice ${themeId === theme.id ? 'selected' : ''}`}
+                        key={theme.id}
+                        onClick={() => {
+                          if (themeId === theme.id) return;
+                          setThemeId(theme.id);
+                          markDirty();
+                        }}
+                        style={
+                          {
+                            '--theme-a': theme.colors.backgroundStart,
+                            '--theme-b': theme.colors.backgroundEnd,
+                            '--theme-text': theme.colors.text,
+                            '--theme-muted': theme.colors.muted,
+                            '--theme-accent': theme.colors.accent,
+                            '--theme-panel': theme.colors.panel,
+                            '--theme-border': theme.colors.panelBorder,
+                          } as CSSProperties
+                        }
+                      >
+                        <CardThemePreview theme={theme} />
+                        <span className="theme-meta">
+                          <strong>{theme.name}</strong>
+                          <small>{theme.description}</small>
+                        </span>
+                        <span className="theme-kind">{theme.dark ? '暗色' : '亮色'}</span>
+                        {themeId === theme.id && <Check className="theme-check" size={17} />}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
           </div>
         </section>
       )}
@@ -3456,7 +3528,7 @@ function ReviewRecords() {
           </div>
         }
       />
-      {records.error && <div className="error">{records.error}</div>}
+      {records.error && <div className="panel-error">{records.error}</div>}
       {records.loading && <LoadingProgress text="正在读取待审核消息" />}
       <div className="record-list">
         {visibleRecords.map((record, index) => (
@@ -3535,16 +3607,6 @@ function LogRecords() {
     const timer = window.setInterval(() => void logs.reload({ background: true }), 5_000);
     return () => window.clearInterval(timer);
   }, [live, logs.reload]);
-  useEffect(() => {
-    if (effectiveView !== 'traces') return;
-    setExpandedTraces((current) => {
-      const next = new Set(current);
-      for (const group of groups) {
-        if (group.level === 'warn' || group.level === 'error') next.add(group.traceId);
-      }
-      return next;
-    });
-  }, [effectiveView, logs.data.items]);
   const setDevice = (device: string) => {
     setLogDevice(device);
     setLogPage(1);
@@ -3588,7 +3650,7 @@ function LogRecords() {
         title="运行日志"
         subtitle={
           effectiveView === 'traces'
-            ? '每一项代表一条完整消息链路；异常会自动展开'
+            ? '每一项代表一条完整消息链路；点击任务查看处理时间线'
             : '按写入顺序查看未经聚合的底层事件'
         }
         action={
@@ -3680,7 +3742,7 @@ function LogRecords() {
         </button>
       </div>
 
-      {logs.error && <div className="error">{logs.error}</div>}
+      {logs.error && <div className="panel-error">{logs.error}</div>}
       {(logs.loading || logNodes.loading) && <LoadingProgress text="正在读取运行日志" />}
 
       {effectiveView === 'traces' && !logs.loading && groups.length > 0 && (
@@ -3776,7 +3838,8 @@ function TraceLogCard({
             <span className={`trace-status ${state.id}`}>{state.label}</span>
           </span>
           <span className="trace-subtitle">
-            {translateLogEvent(group.event)} · {count} 条消息 · {group.eventCount} 个步骤
+            {traceMessagePreview(group.events)} · {translateLogEvent(group.event)} · {count} 条消息
+            · {group.eventCount} 个步骤
           </span>
         </span>
         <span className="trace-numbers">
@@ -3847,6 +3910,7 @@ function RawLogList({
             <summary>
               <span className={`log-level ${level}`}>{level.toUpperCase()}</span>
               <strong>{translateLogEvent(String(record.event ?? 'unknown'))}</strong>
+              <span className="log-message-preview">{logMessagePreview(record)}</span>
               <code title={String(record.traceId ?? '')}>
                 {shortTraceId(String(record.traceId ?? ''))}
               </code>
@@ -3922,6 +3986,37 @@ function traceMessageCount(events: Array<Record<string, unknown>>): number {
     }
   }
   return count;
+}
+
+function traceMessagePreview(events: Array<Record<string, unknown>>): string {
+  for (const record of events) {
+    const preview = logMessagePreview(record, '');
+    if (preview) return preview;
+  }
+  return '—';
+}
+
+function logMessagePreview(record: Record<string, unknown>, fallback = '—'): string {
+  const details = asRecord(record.details);
+  const direct = typeof details.messagePreview === 'string' ? details.messagePreview : '';
+  if (direct.trim()) return compactMessagePreview(direct, false);
+  if (Array.isArray(details.messagePreviews)) {
+    const first = details.messagePreviews.find(
+      (value): value is string => typeof value === 'string' && Boolean(value.trim()),
+    );
+    if (first) return compactMessagePreview(first, false);
+  }
+  const message = asRecord(details.message);
+  const text = typeof message.text === 'string' ? message.text : undefined;
+  const hasImage = Array.isArray(message.attachments) && message.attachments.length > 0;
+  if (text?.trim() || hasImage) return compactMessagePreview(text, hasImage);
+  return fallback;
+}
+
+function compactMessagePreview(text: string | undefined, hasImage: boolean): string {
+  const normalized = text?.replace(/\s+/gu, ' ').trim();
+  if (normalized) return [...normalized].slice(0, 8).join('');
+  return hasImage ? '[图片]' : '—';
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

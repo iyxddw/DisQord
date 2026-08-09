@@ -37,6 +37,8 @@ export const cardThemeLayoutSchema = z.enum([
   'compact',
   'desktop',
   'board',
+  'editorial',
+  'minimal',
 ]);
 export type CardThemeLayout = z.infer<typeof cardThemeLayoutSchema>;
 
@@ -205,8 +207,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   dark(
     'ink-black',
     '墨黑',
-    '更纯粹的 OLED 深黑。',
-    'classic',
+    '无多余框线的 OLED 极简黑。',
+    'minimal',
     ['#101113', '#08090b', '#000000'],
     '#d2d6dc',
     'rgba(255,255,255,0.08)',
@@ -261,8 +263,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'porcelain',
     '白瓷',
-    '清洁且中性的产品白。',
-    'compact',
+    '清洁且留白充分的极简产品白。',
+    'minimal',
     ['#ffffff', '#f8f9fa', '#f1f3f5'],
     '#667085',
     '#22262b',
@@ -272,8 +274,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'cloud-blue',
     '云蓝',
-    '柔和浅蓝，适合日常消息。',
-    'timeline',
+    '标准信息层级下的柔和浅蓝。',
+    'classic',
     ['#fbfdff', '#f1f7ff', '#e8f2ff'],
     '#5e8fc9',
     '#25364a',
@@ -294,8 +296,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'peach-soda',
     '蜜桃苏打',
-    '偏暖的轻橙粉主题。',
-    'classic',
+    '大标题与右置头像的暖色刊物版。',
+    'editorial',
     ['#fffdf9', '#fff4ea', '#ffeadb'],
     '#cb7b4e',
     '#493126',
@@ -349,8 +351,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'warm-sand',
     '暖砂',
-    '低饱和米棕，视觉更安静。',
-    'classic',
+    '低饱和米棕的刊物式排版。',
+    'editorial',
     ['#fffefa', '#f8f3e9', '#efe7d8'],
     '#927553',
     '#3c352c',
@@ -360,8 +362,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'rose-milk',
     '玫瑰牛乳',
-    '灰粉色的柔和消息卡。',
-    'support',
+    '灰粉色的大标题刊物卡。',
+    'editorial',
     ['#fffcfd', '#f9f1f4', '#f2e7eb'],
     '#a66c80',
     '#422f36',
@@ -371,8 +373,8 @@ export const cardThemes: readonly CardThemeDefinition[] = [
   light(
     'mono-light',
     '单色白',
-    '最少装饰、最高通用性。',
-    'compact',
+    '隐藏头像装饰，只保留消息层级。',
+    'minimal',
     ['#ffffff', '#f7f7f7', '#eeeeee'],
     '#4b5563',
     '#202124',

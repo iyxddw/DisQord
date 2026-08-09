@@ -40,4 +40,19 @@ describe('NodeConfigStore', () => {
 
     await expect(store.loadOrCreate('discord')).rejects.toThrow('Node config belongs to qq');
   });
+
+  it('persists the central upload-session whitelist', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'disqord-node-config-'));
+    directories.push(directory);
+    const store = new NodeConfigStore(join(directory, 'node.json'));
+    const config = await store.loadOrCreate('qq');
+    await store.save({
+      ...config,
+      uploadSessions: [{ spaceId: 'group-1', channelId: 'group-1' }],
+    });
+
+    await expect(store.loadOrCreate('qq')).resolves.toMatchObject({
+      uploadSessions: [{ spaceId: 'group-1', channelId: 'group-1' }],
+    });
+  });
 });

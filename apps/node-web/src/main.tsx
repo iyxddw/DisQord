@@ -9,6 +9,8 @@ import {
   FileClock,
   KeyRound,
   Link2,
+  Pause,
+  Play,
   RefreshCw,
   Save,
   Server,
@@ -70,6 +72,8 @@ function App() {
   const [logPage, setLogPage] = useState(1);
   const [logError, setLogError] = useState('');
   const [logsLoading, setLogsLoading] = useState(true);
+  const [logsLive, setLogsLive] = useState(true);
+  const [logsReloadKey, setLogsReloadKey] = useState(0);
   const [activeSection, setActiveSection] = useState<NodeSection>('overview');
   const load = async (background = false) => {
     if (!background) setStatusLoading(true);
@@ -121,9 +125,10 @@ function App() {
       }
     };
     void loadLogs();
+    if (!logsLive) return;
     const timer = setInterval(() => void loadLogs(true), 5000);
     return () => clearInterval(timer);
-  }, [logLevel, logPage, logSearch, status?.configured, token]);
+  }, [logLevel, logPage, logSearch, logsLive, logsReloadKey, status?.configured, token]);
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -324,26 +329,47 @@ function App() {
                     <option value="warn">Warn</option>
                     <option value="error">Error</option>
                   </select>
+                  <button
+                    className="icon-button"
+                    title="立即刷新"
+                    onClick={() => setLogsReloadKey((current) => current + 1)}
+                  >
+                    <RefreshCw size={16} />
+                  </button>
                 </div>
               }
             />
+            <div className="node-log-viewbar">
+              <span>原始事件</span>
+              <button
+                className={`live-toggle ${logsLive ? 'active' : ''}`}
+                onClick={() => setLogsLive((current) => !current)}
+              >
+                {logsLive ? <Pause size={14} /> : <Play size={14} />}
+                {logsLive ? '自动刷新' : '已暂停'}
+              </button>
+            </div>
             {logError && <div className="alert compact">{logError}</div>}
             {logsLoading && <LoadingProgress text="正在读取客户端日志" />}
             <div className="node-log-list">
               {logs.items.map((record, index) => (
-                <article
-                  className={`node-log ${record.level}`}
+                <details
+                  className={`raw-log-record ${record.level}`}
                   key={`${record.createdAt}-${index}`}
                 >
-                  <div>
+                  <summary>
+                    <span className={`log-level ${record.level}`}>
+                      {record.level.toUpperCase()}
+                    </span>
                     <strong>{translateLogEvent(record.event)}</strong>
-                    <span>{record.level.toUpperCase()}</span>
+                    <span className="log-message-preview">{nodeLogMessagePreview(record)}</span>
                     <time>
                       {new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}
                     </time>
-                  </div>
-                  {record.details && <pre>{JSON.stringify(record.details, null, 2)}</pre>}
-                </article>
+                    <ChevronRight size={14} />
+                  </summary>
+                  <pre>{JSON.stringify(record, null, 2)}</pre>
+                </details>
               ))}
               {!logs.items.length && !logError && !logsLoading && (
                 <p className="empty">暂无匹配日志</p>
@@ -648,6 +674,31 @@ function stateLabel(state?: Status['state']) {
   }[state ?? 'starting'];
 }
 
+function nodeLogMessagePreview(record: NodeLogRecord): string {
+  const details = record.details ?? {};
+  const direct = typeof details.messagePreview === 'string' ? details.messagePreview : '';
+  if (direct.trim()) return compactMessagePreview(direct, false);
+  if (Array.isArray(details.messagePreviews)) {
+    const first = details.messagePreviews.find(
+      (value): value is string => typeof value === 'string' && Boolean(value.trim()),
+    );
+    if (first) return compactMessagePreview(first, false);
+  }
+  const message =
+    details.message && typeof details.message === 'object' && !Array.isArray(details.message)
+      ? (details.message as Record<string, unknown>)
+      : {};
+  const text = typeof message.text === 'string' ? message.text : undefined;
+  const hasImage = Array.isArray(message.attachments) && message.attachments.length > 0;
+  return text?.trim() || hasImage ? compactMessagePreview(text, hasImage) : '—';
+}
+
+function compactMessagePreview(text: string | undefined, hasImage: boolean): string {
+  const normalized = text?.replace(/\s+/gu, ' ').trim();
+  if (normalized) return [...normalized].slice(0, 8).join('');
+  return hasImage ? '[图片]' : '—';
+}
+
 const logEventLabels: Record<string, string> = {
   runtime_starting: '节点启动',
   runtime_stopped: '节点已停止',
@@ -655,6 +706,7 @@ const logEventLabels: Record<string, string> = {
   central_connected: '已连接中央服务',
   pairing_started: '开始配对',
   pairing_completed: '配对完成',
+  runtime_settings_applied: '运行设置已同步',
   session_candidates_ready: '会话列表已更新',
   verification_requested: '收到验证请求',
   verification_sent: '验证码已发送',

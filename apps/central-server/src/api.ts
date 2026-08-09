@@ -30,6 +30,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { CentralAuthService } from './auth.js';
+import { resolveNodeRuntimeSettings } from './runtime-settings.js';
 import { type SecretStore, type StateStore } from './state-store.js';
 
 const passwordBodySchema = z.object({ password: z.string().min(12).max(256) });
@@ -249,10 +250,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     if (!valid) await reply.code(401).send({ error: 'Authentication required.' });
   };
 
-  const broadcastRuntimeSettings = async (
-    fastMode: boolean,
-    fastDeliveryIntervalMs: number,
-  ): Promise<void> => {
+  const broadcastRuntimeSettings = async (): Promise<void> => {
     if (!gateway) return;
     const nodes = await options.store.list<NodeSession>('node-session');
     const online = nodes.filter(
@@ -261,10 +259,11 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     await Promise.allSettled(
       online.map(async (entry) => {
         try {
-          await gateway!.sendToNode(entry.value.nodeId, 'node.runtime.settings', {
-            fastMode,
-            fastDeliveryIntervalMs,
-          });
+          await gateway!.sendToNode(
+            entry.value.nodeId,
+            'node.runtime.settings',
+            await resolveNodeRuntimeSettings(options.store, entry.value.nodeId),
+          );
         } catch (error) {
           // A node may disconnect while settings are being saved.  It will
           // request the current value again after its next reconnect.
@@ -419,7 +418,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         }),
       );
       await options.store.set('settings', 'llm', settings);
-      void broadcastRuntimeSettings(settings.fastMode, settings.fastDeliveryIntervalMs);
+      void broadcastRuntimeSettings();
       return {
         ...settings,
         providers: await Promise.all(
@@ -647,6 +646,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         return await reply.code(404).send({ error: 'Chat session not found.' });
       }
       await options.store.delete('verification', id);
+      void broadcastRuntimeSettings();
       return { ok: true };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
@@ -746,6 +746,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         });
         await options.store.set('chat-session', id, verified);
         await options.store.delete('verification', id);
+        void broadcastRuntimeSettings();
         return verified;
       } catch (error) {
         return await reply.code(400).send({ error: errorMessage(error) });
@@ -806,6 +807,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         updatedAt: new Date().toISOString(),
       });
       await options.store.set('blueprint', id, updated);
+      void broadcastRuntimeSettings();
       return updated;
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
@@ -822,6 +824,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         await options.store.delete('blueprint-version', version.key);
       }
       await options.store.delete('blueprint', id);
+      void broadcastRuntimeSettings();
       return { ok: true };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
@@ -934,6 +937,7 @@ export function createCentralApplication(options: CentralApplicationOptions) {
           enabled: true,
           updatedAt: new Date().toISOString(),
         });
+        void broadcastRuntimeSettings();
         return { ...validation, version: published };
       } catch (error) {
         return await reply.code(400).send({ error: errorMessage(error) });

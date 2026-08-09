@@ -78,6 +78,8 @@ export async function renderMessageCards(
   candidate: MessageCardInput | MessageCardRenderSpec,
 ): Promise<Buffer[]> {
   const input = await normalizeCanvasInput(candidate);
+  const theme = getCardTheme(input.themeId);
+  const metrics = getThemeLayoutMetrics(theme);
   const inlineEmojiReplacements = createInlineEmojiReplacements([
     ...(input.inlineEmojis ?? []),
     ...(input.reply?.inlineEmojis ?? []),
@@ -102,7 +104,7 @@ export async function renderMessageCards(
           : {}),
       }
     : undefined;
-  const primaryPages = paginateText(displayText, 34);
+  const primaryPages = paginateText(displayText, 34, metrics.primaryColumns);
   const originalPages = originalText ? paginateText(originalText, 28) : [[]];
   const pageCount = Math.max(primaryPages.length, originalPages.length, 1);
   const cards: Buffer[] = [];
@@ -127,7 +129,7 @@ export async function renderMessageCards(
     // Page 0 is the chrome card plus a pure-image tile card per leftover band.
     const sizedImages = await loadSizedImages(input.images);
     const bands = buildImageBands(sizedImages, IMAGE_TILE_HEIGHT);
-    const { chromeHeight } = computeLayout(pageInput);
+    const { chromeHeight } = computeLayout(pageInput, metrics);
     const { card1Bands, tileBands } = planImageBands(bands, chromeHeight);
     cards.push(await renderMessageCardCanvas(pageInput, card1Bands));
     for (const band of tileBands) {
@@ -218,6 +220,8 @@ async function renderMessageCardCanvas(
   bands: readonly ImageBand[],
 ): Promise<Buffer> {
   const language = input.targetLanguage ?? 'en';
+  const theme = getCardTheme(input.themeId);
+  const metrics = getThemeLayoutMetrics(theme);
   const inlineEmojiImages =
     input.inlineEmojiImages ?? (await loadInlineEmojiImages(input.inlineEmojiReplacements ?? []));
   const inlineEmojiFallbacks = new Map(
@@ -232,7 +236,7 @@ async function renderMessageCardCanvas(
     primaryHeight,
     originalHeight,
     chromeHeight,
-  } = computeLayout(input);
+  } = computeLayout(input, metrics);
   let imageHeight = 0;
   for (const [index, band] of bands.entries()) {
     imageHeight += band.h;
@@ -242,7 +246,6 @@ async function renderMessageCardCanvas(
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   ctx.textBaseline = 'alphabetic';
-  const theme = getCardTheme(input.themeId);
   const colors = theme.colors;
 
   const background = ctx.createLinearGradient(0, 0, width, height);
@@ -254,34 +257,60 @@ async function renderMessageCardCanvas(
   ctx.fill();
   drawThemeChrome(ctx, theme, height, input.sourcePlatform);
 
-  const avatar = input.senderAvatar ? await loadDataImage(input.senderAvatar) : undefined;
-  if (avatar) {
-    ctx.save();
-    circleClip(ctx, horizontalPadding + 38, 86, 38);
-    drawCover(ctx, avatar, horizontalPadding, 48, 76, 76);
-    ctx.restore();
-  } else {
-    ctx.fillStyle = colors.accent;
-    ctx.beginPath();
-    ctx.arc(horizontalPadding + 38, 86, 38, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.font = `700 32px ${fontFamily}`;
-    ctx.fillStyle = theme.dark ? '#ffffff' : colors.backgroundStart;
-    ctx.textAlign = 'center';
-    ctx.fillText(input.senderName.slice(0, 1).toUpperCase(), horizontalPadding + 38, 98);
-    ctx.textAlign = 'start';
+  if (metrics.showAvatar) {
+    const avatar = input.senderAvatar ? await loadDataImage(input.senderAvatar) : undefined;
+    const avatarRadius = metrics.avatarSize / 2;
+    const avatarCenterX = metrics.avatarX + avatarRadius;
+    const avatarCenterY = metrics.avatarY + avatarRadius;
+    if (avatar) {
+      ctx.save();
+      circleClip(ctx, avatarCenterX, avatarCenterY, avatarRadius);
+      drawCover(
+        ctx,
+        avatar,
+        metrics.avatarX,
+        metrics.avatarY,
+        metrics.avatarSize,
+        metrics.avatarSize,
+      );
+      ctx.restore();
+    } else {
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(avatarCenterX, avatarCenterY, avatarRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = `700 ${Math.round(metrics.avatarSize * 0.42)}px ${fontFamily}`;
+      ctx.fillStyle = theme.dark ? '#ffffff' : colors.backgroundStart;
+      ctx.textAlign = 'center';
+      ctx.fillText(
+        input.senderName.slice(0, 1).toUpperCase(),
+        avatarCenterX,
+        avatarCenterY + metrics.avatarSize * 0.16,
+      );
+      ctx.textAlign = 'start';
+    }
   }
 
-  ctx.font = `700 30px ${fontFamily}`;
+  ctx.font = `700 ${metrics.nameFontSize}px ${fontFamily}`;
   ctx.fillStyle = colors.text;
-  ctx.fillText(input.senderName, horizontalPadding + 98, 78);
+  ctx.fillText(
+    fitCanvasText(ctx, input.senderName, metrics.nameMaxWidth),
+    metrics.nameX,
+    metrics.nameY,
+  );
   ctx.font = `20px ${fontFamily}`;
   ctx.fillStyle = colors.muted;
-  ctx.fillText(`${input.sourceName} · ${input.sentAt}`, horizontalPadding + 98, 112);
+  ctx.fillText(
+    fitCanvasText(ctx, `${input.sourceName} · ${input.sentAt}`, metrics.metaMaxWidth),
+    metrics.metaX,
+    metrics.metaY,
+  );
   ctx.font = `700 19px ${fontFamily}`;
   ctx.fillStyle = colors.accentText;
   ctx.textAlign = 'right';
-  ctx.fillText(input.sourcePlatform.toUpperCase(), width - horizontalPadding, 76);
+  if (theme.layout !== 'board') {
+    ctx.fillText(input.sourcePlatform.toUpperCase(), width - horizontalPadding, metrics.platformY);
+  }
   ctx.textAlign = 'start';
 
   if (input.nonReplyable) {
@@ -293,7 +322,7 @@ async function renderMessageCardCanvas(
     const badgeWidth = textWidth + padX * 2;
     const badgeHeight = 24 + padY * 2;
     const badgeX = width - horizontalPadding - badgeWidth;
-    const badgeY = 126;
+    const badgeY = Math.max(76, metrics.contentTop - badgeHeight - 12);
     ctx.fillStyle = colors.dangerSurface;
     roundedRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, badgeHeight / 2);
     ctx.fill();
@@ -306,7 +335,7 @@ async function renderMessageCardCanvas(
     ctx.textAlign = 'start';
   }
 
-  let cursorY = 170;
+  let cursorY = metrics.contentTop;
   if (input.reply) {
     const top = cursorY;
     cursorY += replyHeight + 24;
@@ -318,7 +347,11 @@ async function renderMessageCardCanvas(
     ctx.fill();
     ctx.font = `700 24px ${fontFamily}`;
     ctx.fillStyle = colors.accentText;
-    ctx.fillText(input.reply.senderName, horizontalPadding + 24, top + 34);
+    ctx.fillText(
+      fitCanvasText(ctx, input.reply.senderName, contentWidth - 48),
+      horizontalPadding + 24,
+      top + 34,
+    );
     drawLines(
       ctx,
       replyLines,
@@ -352,8 +385,8 @@ async function renderMessageCardCanvas(
     primaryLines.length ? primaryLines : [' '],
     horizontalPadding,
     primaryTop + 38,
-    lineHeight,
-    `500 34px ${fontFamily}`,
+    metrics.primaryLineHeight,
+    `500 ${metrics.primaryFontSize}px ${fontFamily}`,
     colors.text,
     inlineEmojiImages,
     inlineEmojiFallbacks,
@@ -417,7 +450,11 @@ async function renderMessageCardCanvas(
 
   ctx.font = `17px ${fontFamily}`;
   ctx.fillStyle = colors.muted;
-  ctx.fillText(`DisQord · ${input.traceLabel ?? ''}`, horizontalPadding, height - 38);
+  ctx.fillText(
+    fitCanvasText(ctx, `DisQord · ${input.traceLabel ?? ''}`, contentWidth),
+    horizontalPadding,
+    height - 38,
+  );
   return canvas.toBuffer('image/png');
 }
 
@@ -473,15 +510,27 @@ function drawThemeChrome(
   }
   if (layout === 'board') {
     ctx.fillStyle = colors.panel;
-    roundedRect(ctx, 18, 18, 120, height - 36, 20);
+    roundedRect(ctx, 18, 18, 26, height - 36, 13);
     ctx.fill();
     ctx.save();
-    ctx.translate(44, Math.min(height - 96, 188));
+    ctx.translate(37, Math.min(height - 96, 188));
     ctx.rotate(Math.PI / 2);
-    ctx.font = `700 16px ${fontFamily}`;
+    ctx.font = `700 14px ${fontFamily}`;
     ctx.fillStyle = colors.accentText;
     ctx.fillText(platform.toUpperCase(), 0, 0);
     ctx.restore();
+    return;
+  }
+  if (layout === 'editorial') {
+    ctx.fillStyle = colors.accent;
+    ctx.fillRect(horizontalPadding, 144, 112, 5);
+    ctx.fillStyle = colors.panelBorder;
+    ctx.fillRect(horizontalPadding + 128, 146, contentWidth - 128, 1);
+    return;
+  }
+  if (layout === 'minimal') {
+    ctx.fillStyle = colors.panelBorder;
+    ctx.fillRect(horizontalPadding, 104, contentWidth, 1);
   }
 }
 
@@ -573,11 +622,149 @@ type CardLayout = {
   readonly chromeHeight: number;
 };
 
-function computeLayout(input: CanvasCardInput): CardLayout {
+type ThemeLayoutMetrics = {
+  readonly showAvatar: boolean;
+  readonly avatarX: number;
+  readonly avatarY: number;
+  readonly avatarSize: number;
+  readonly nameX: number;
+  readonly nameY: number;
+  readonly nameFontSize: number;
+  readonly nameMaxWidth: number;
+  readonly metaX: number;
+  readonly metaY: number;
+  readonly metaMaxWidth: number;
+  readonly platformY: number;
+  readonly contentTop: number;
+  readonly primaryFontSize: number;
+  readonly primaryLineHeight: number;
+  readonly primaryColumns: number;
+};
+
+function getThemeLayoutMetrics(theme: CardThemeDefinition): ThemeLayoutMetrics {
+  switch (theme.layout) {
+    case 'support':
+      return {
+        showAvatar: true,
+        avatarX: 856,
+        avatarY: 42,
+        avatarSize: 72,
+        nameX: 68,
+        nameY: 74,
+        nameFontSize: 31,
+        nameMaxWidth: 680,
+        metaX: 68,
+        metaY: 109,
+        metaMaxWidth: 680,
+        platformY: 108,
+        contentTop: 170,
+        primaryFontSize: 34,
+        primaryLineHeight: 48,
+        primaryColumns: 42,
+      };
+    case 'compact':
+      return {
+        showAvatar: true,
+        avatarX: 56,
+        avatarY: 36,
+        avatarSize: 58,
+        nameX: 132,
+        nameY: 62,
+        nameFontSize: 27,
+        nameMaxWidth: 590,
+        metaX: 132,
+        metaY: 91,
+        metaMaxWidth: 650,
+        platformY: 58,
+        contentTop: 126,
+        primaryFontSize: 30,
+        primaryLineHeight: 42,
+        primaryColumns: 48,
+      };
+    case 'desktop':
+      return {
+        showAvatar: true,
+        avatarX: 56,
+        avatarY: 64,
+        avatarSize: 70,
+        nameX: 146,
+        nameY: 91,
+        nameFontSize: 29,
+        nameMaxWidth: 585,
+        metaX: 146,
+        metaY: 123,
+        metaMaxWidth: 640,
+        platformY: 86,
+        contentTop: 174,
+        primaryFontSize: 33,
+        primaryLineHeight: 47,
+        primaryColumns: 43,
+      };
+    case 'editorial':
+      return {
+        showAvatar: true,
+        avatarX: 860,
+        avatarY: 46,
+        avatarSize: 76,
+        nameX: 56,
+        nameY: 82,
+        nameFontSize: 38,
+        nameMaxWidth: 748,
+        metaX: 56,
+        metaY: 118,
+        metaMaxWidth: 730,
+        platformY: 151,
+        contentTop: 184,
+        primaryFontSize: 36,
+        primaryLineHeight: 52,
+        primaryColumns: 38,
+      };
+    case 'minimal':
+      return {
+        showAvatar: false,
+        avatarX: 0,
+        avatarY: 0,
+        avatarSize: 0,
+        nameX: 56,
+        nameY: 58,
+        nameFontSize: 28,
+        nameMaxWidth: 650,
+        metaX: 56,
+        metaY: 89,
+        metaMaxWidth: 650,
+        platformY: 57,
+        contentTop: 126,
+        primaryFontSize: 32,
+        primaryLineHeight: 46,
+        primaryColumns: 44,
+      };
+    default:
+      return {
+        showAvatar: true,
+        avatarX: 56,
+        avatarY: 48,
+        avatarSize: 76,
+        nameX: 154,
+        nameY: 78,
+        nameFontSize: 30,
+        nameMaxWidth: 570,
+        metaX: 154,
+        metaY: 112,
+        metaMaxWidth: 630,
+        platformY: 76,
+        contentTop: 170,
+        primaryFontSize: 34,
+        primaryLineHeight: 48,
+        primaryColumns: 42,
+      };
+  }
+}
+
+function computeLayout(input: CanvasCardInput, metrics: ThemeLayoutMetrics): CardLayout {
   const language = input.targetLanguage ?? 'en';
   const primaryLines = wrapText(
     input.unsupportedType ? unsupportedMessage(input.unsupportedType, language) : input.primaryText,
-    42,
+    metrics.primaryColumns,
   );
   const replyLines = input.reply
     ? wrapText(
@@ -595,8 +782,10 @@ function computeLayout(input: CanvasCardInput): CardLayout {
   const replyHeight = input.reply
     ? 64 + replyLines.length * 32 + replyImageHeight + (replyImageHeight ? 16 : 0)
     : 0;
-  const primaryHeight = Math.max(1, primaryLines.length) * lineHeight;
+  const primaryHeight = Math.max(1, primaryLines.length) * metrics.primaryLineHeight;
   const originalHeight = input.originalText ? 88 + Math.max(1, originalLines.length) * 36 : 0;
+  const replyBlockHeight = input.reply ? replyHeight + 24 : 0;
+  const originalBlockHeight = input.originalText ? originalHeight + 8 : 0;
   return {
     primaryLines,
     replyLines,
@@ -605,7 +794,8 @@ function computeLayout(input: CanvasCardInput): CardLayout {
     replyHeight,
     primaryHeight,
     originalHeight,
-    chromeHeight: 208 + replyHeight + primaryHeight + originalHeight + 96,
+    chromeHeight:
+      metrics.contentTop + replyBlockHeight + primaryHeight + 32 + originalBlockHeight + 102,
   };
 }
 
@@ -707,6 +897,24 @@ async function loadInlineEmojiImages(
     }),
   );
   return new Map(loaded.filter((entry): entry is readonly [string, Image] => Boolean(entry)));
+}
+
+function fitCanvasText(ctx: SKRSContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  const suffix = '…';
+  const characters = Array.from(text);
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = `${characters.slice(0, middle).join('')}${suffix}`;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return `${characters.slice(0, low).join('')}${suffix}`;
 }
 
 function roundedRect(
@@ -1075,8 +1283,8 @@ function wrapText(text: string, maxColumns: number): string[] {
   return lines;
 }
 
-function paginateText(text: string, maxLines: number): string[][] {
-  const lines = wrapText(text, 42);
+function paginateText(text: string, maxLines: number, maxColumns = 42): string[][] {
+  const lines = wrapText(text, maxColumns);
   const pages: string[][] = [];
   for (let index = 0; index < lines.length; index += maxLines) {
     pages.push(lines.slice(index, index + maxLines));

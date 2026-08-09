@@ -87,4 +87,16 @@ describe('FileTaskQueue', () => {
     });
     queue.close();
   });
+
+  it('removes discarded work from the recoverable queue', () => {
+    const queue = new FileTaskQueue(createQueuePath());
+    const itemId = randomUUID();
+    queue.enqueue({ id: itemId, kind: 'message-upload', payload: {} });
+
+    queue.markDiscarded(itemId);
+
+    expect(queue.get(itemId)?.status).toBe('discarded');
+    expect(queue.listRecoverable()).toEqual([]);
+    queue.close();
+  });
 });

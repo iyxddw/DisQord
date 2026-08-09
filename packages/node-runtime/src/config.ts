@@ -2,11 +2,13 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 import { generateNodeIdentity, nodeIdentitySchema, type NodeIdentity } from '@disqord/transport';
+import { uploadSessionFilterSchema } from '@disqord/shared';
 import { z } from 'zod';
 
 const persistedNodeConfigSchema = z.object({
   identity: nodeIdentitySchema,
   sessionToken: z.string().min(32).optional(),
+  uploadSessions: z.array(uploadSessionFilterSchema).max(10_000).optional(),
 });
 
 export type PersistedNodeConfig = z.infer<typeof persistedNodeConfigSchema>;

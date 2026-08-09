@@ -36,6 +36,7 @@ import {
 import { type ReceivedNodeFrame } from '@disqord/transport';
 import { z } from 'zod';
 
+import { resolveNodeRuntimeSettings } from './runtime-settings.js';
 import { type SecretStore, type StateStore } from './state-store.js';
 
 const deliveredFrameSchema = z.object({
@@ -74,7 +75,6 @@ const MAX_DELIVERY_BATCH_BYTES = 6 * 1024 * 1024;
 const MESSAGE_UPLOAD_BATCH_NAMESPACE = 'message-upload-batch';
 const AVATAR_SOURCE_NAMESPACE = 'avatar-source';
 const MAX_MESSAGE_UPLOAD_BATCH_ATTEMPTS = 3;
-const FAST_DELIVERY_INTERVAL_MS = 1_500;
 
 const avatarSourceRecordSchema = z.object({ sourceUrl: z.url() });
 
@@ -396,10 +396,11 @@ export class MessageOrchestrator {
   }
 
   async #sendRuntimeSettings(nodeId: string): Promise<void> {
-    await this.#commandBus.sendToNode(nodeId, 'node.runtime.settings', {
-      fastMode: await this.#fastMode(),
-      fastDeliveryIntervalMs: await this.#fastDeliveryInterval(),
-    });
+    await this.#commandBus.sendToNode(
+      nodeId,
+      'node.runtime.settings',
+      await resolveNodeRuntimeSettings(this.#store, nodeId),
+    );
   }
 
   async #handleAvatarRequest(frame: ReceivedNodeFrame): Promise<void> {
@@ -1165,13 +1166,6 @@ export class MessageOrchestrator {
     if (!entry) return false;
     const parsed = llmSettingsSchema.safeParse(entry.value);
     return parsed.success ? parsed.data.fastMode : false;
-  }
-
-  async #fastDeliveryInterval(): Promise<number> {
-    const entry = await this.#store.get('settings', 'llm');
-    if (!entry) return FAST_DELIVERY_INTERVAL_MS;
-    const parsed = llmSettingsSchema.safeParse(entry.value);
-    return parsed.success ? parsed.data.fastDeliveryIntervalMs : FAST_DELIVERY_INTERVAL_MS;
   }
 
   async #executeBlueprint(

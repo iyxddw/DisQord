@@ -6,4 +6,5 @@ export * from './message.js';
 export * from './program.js';
 export * from './prompt.js';
 export * from './render-spec.js';
+export * from './runtime-settings.js';
 export * from './task.js';

@@ -8,13 +8,15 @@ import {
   avatarResponseSchema,
   messageCardRenderSpecSchema,
   messageEnvelopeSchema,
+  nodeRuntimeSettingsSchema,
   type MessageCardRenderSpec,
   type MessageEnvelope,
+  type UploadSessionFilter,
 } from '@disqord/shared';
 import { AuthenticatedNodeClient, type NodeIdentity } from '@disqord/transport';
 import { z } from 'zod';
 
-import { NodeConfigStore } from './config.js';
+import { NodeConfigStore, type PersistedNodeConfig } from './config.js';
 import { NodeLogger, type NodeLogPage, type NodeLogQuery } from './logger.js';
 
 const UPLOAD_BATCH_DELAYS_MS = [2_500, 2_000, 1_500, 1_000, 0] as const;
@@ -95,11 +97,6 @@ const nodeLogRequestSchema = z.object({
   level: z.enum(['all', 'warn', 'error']).default('all'),
   search: z.string().trim().max(200).default(''),
 });
-const runtimeSettingsSchema = z.object({
-  fastMode: z.boolean().default(false),
-  fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(FAST_DELIVERY_INTERVAL_MS),
-});
-
 type DeliveryCommand = z.infer<typeof deliverCommandSchema>;
 
 interface PendingAvatarRequest {
@@ -135,6 +132,7 @@ export class NodeBridgeRuntime {
   readonly #inlineEmojiDirectory: string | undefined;
   readonly #inlineEmojiDataUriCache = new Map<string, string | undefined>();
   #queue: FileTaskQueue | undefined;
+  #nodeConfig: PersistedNodeConfig | undefined;
   #client: AuthenticatedNodeClient | undefined;
   #adapter: PlatformAdapter | undefined;
   #draining = false;
@@ -143,6 +141,8 @@ export class NodeBridgeRuntime {
   #uploadBatchStage = 0;
   #fastMode = false;
   #fastDeliveryIntervalMs = FAST_DELIVERY_INTERVAL_MS;
+  #uploadFilterReady = false;
+  #uploadSessions: Set<string> | undefined;
   readonly #fastUploadTasks = new Map<string, Promise<boolean>>();
   readonly #deliveryChains = new Map<string, Promise<void>>();
   readonly #deliveryTasks = new Map<string, Promise<void>>();
@@ -179,6 +179,11 @@ export class NodeBridgeRuntime {
     await mkdir(dirname(this.#options.queuePath), { recursive: true });
     this.#queue = new FileTaskQueue(this.#options.queuePath);
     const config = await this.#configStore.loadOrCreate(this.#options.nodeType);
+    this.#nodeConfig = config;
+    if (config.uploadSessions !== undefined) {
+      this.#uploadFilterReady = true;
+      this.#uploadSessions = uploadSessionSet(config.uploadSessions);
+    }
     this.#adapter = this.#options.createAdapter(config.identity);
     let sessionToken = config.sessionToken;
     if (!sessionToken) {
@@ -190,7 +195,8 @@ export class NodeBridgeRuntime {
           ? {}
           : { allowInsecure: this.#options.allowInsecureCentral }),
       });
-      await this.#configStore.save({ identity: config.identity, sessionToken });
+      this.#nodeConfig = { ...config, sessionToken };
+      await this.#configStore.save(this.#nodeConfig);
       this.#log('info', 'pairing_completed', { nodeId: config.identity.nodeId });
     }
 
@@ -223,6 +229,7 @@ export class NodeBridgeRuntime {
       try {
         const validated = messageEnvelopeSchema.parse(message);
         if (this.#isDeliveredEcho(validated.source.messageId)) return;
+        if (!this.#shouldUpload(validated)) return;
         const queued = this.#queue?.enqueue({
           id: validated.eventId,
           kind: 'message.upload',
@@ -234,6 +241,7 @@ export class NodeBridgeRuntime {
           messageId: validated.source.messageId,
           duplicate: queued === false,
           fastMode: this.#fastMode,
+          messagePreview: messagePreview(validated),
         });
         if (queued !== false) {
           if (this.#fastMode) void this.#startFastUpload(validated.eventId);
@@ -302,13 +310,33 @@ export class NodeBridgeRuntime {
       return;
     }
     if (kind === 'node.runtime.settings') {
-      const settings = runtimeSettingsSchema.parse(payload);
+      const settings = nodeRuntimeSettingsSchema.parse(payload);
       const wasFast = this.#fastMode;
       this.#fastMode = settings.fastMode;
       this.#fastDeliveryIntervalMs = settings.fastDeliveryIntervalMs;
+      this.#uploadFilterReady = true;
+      this.#uploadSessions =
+        settings.uploadSessions === undefined
+          ? undefined
+          : uploadSessionSet(settings.uploadSessions);
+      if (this.#nodeConfig) {
+        const updated: PersistedNodeConfig = {
+          identity: this.#nodeConfig.identity,
+          ...(this.#nodeConfig.sessionToken ? { sessionToken: this.#nodeConfig.sessionToken } : {}),
+          ...(settings.uploadSessions === undefined
+            ? {}
+            : { uploadSessions: settings.uploadSessions }),
+        };
+        await this.#configStore.save(updated);
+        this.#nodeConfig = updated;
+      }
+      const discardedUploads = this.#discardFilteredUploads();
       this.#log('info', 'runtime_settings_applied', {
         fastMode: this.#fastMode,
         fastDeliveryIntervalMs: this.#fastDeliveryIntervalMs,
+        uploadFilterMode: settings.uploadSessions === undefined ? 'legacy-all' : 'whitelist',
+        uploadSessionCount: settings.uploadSessions?.length,
+        discardedUploads,
       });
       if (this.#fastMode) {
         if (this.#uploadBatchTimer) clearTimeout(this.#uploadBatchTimer);
@@ -316,7 +344,9 @@ export class NodeBridgeRuntime {
         this.#uploadBatchStage = 0;
         if (!wasFast) {
           for (const item of this.#queue?.listRecoverable(100) ?? []) {
-            if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
+            if (item.kind === 'message.upload' && this.#uploadFilterReady) {
+              void this.#startFastUpload(item.id);
+            }
           }
         }
       } else if (wasFast) {
@@ -325,6 +355,9 @@ export class NodeBridgeRuntime {
           .some((item) => item.kind === 'message.upload');
         if (hasUploads) this.#scheduleUploadBatch();
       }
+      void this.#drainQueue().catch((error: unknown) => {
+        this.#log('error', 'queue_drain_failed', { error: describeError(error) });
+      });
       return;
     }
     if (kind === 'session.discover') {
@@ -374,6 +407,7 @@ export class NodeBridgeRuntime {
             }
           : { cardCount: command.cards.length }),
         mode: command.mode,
+        messagePreview: deliveryPreview(command),
       });
       // Persist and schedule in the background.  The command acknowledgement
       // is an acceptance acknowledgement, not a platform delivery receipt.
@@ -395,6 +429,7 @@ export class NodeBridgeRuntime {
       this.#log('info', 'delivery_batch_queued', {
         batchId: batch.batchId,
         count: batch.deliveries.length,
+        messagePreviews: batch.deliveries.map(deliveryPreview),
       });
       // Persist every task before starting any of them.  The per-session
       // delivery chain then preserves the order from the central batch even
@@ -467,6 +502,7 @@ export class NodeBridgeRuntime {
         taskId,
         targetSessionId: item.payload.targetSessionId,
         attempt,
+        messagePreview: deliveryPreview(item.payload),
       });
       try {
         await this.#waitForDeliveryGap(item.payload.targetSessionId, item.payload.fastMode);
@@ -766,8 +802,9 @@ export class NodeBridgeRuntime {
     if (!this.#queue || !this.#client) return;
     if (this.#fastMode) {
       for (const item of this.#queue.listRecoverable(100)) {
-        if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
-        else if (item.kind === 'message.deliver') {
+        if (item.kind === 'message.upload' && this.#uploadFilterReady) {
+          void this.#startFastUpload(item.id);
+        } else if (item.kind === 'message.deliver') {
           void this.#scheduleDelivery(item.id).catch((error: unknown) => {
             this.#log('error', 'delivery_recovery_failed', {
               taskId: item.id,
@@ -783,7 +820,7 @@ export class NodeBridgeRuntime {
     try {
       const recoverable = this.#queue.listRecoverable(100);
       const uploads = recoverable
-        .filter((item) => item.kind === 'message.upload')
+        .filter((item) => item.kind === 'message.upload' && this.#uploadFilterReady)
         .slice(0, MAX_UPLOAD_BATCH_SIZE) as QueueItem<MessageEnvelope>[];
       if (uploads.length) {
         const completed = await this.#processUploadBatch(uploads);
@@ -803,13 +840,14 @@ export class NodeBridgeRuntime {
       this.#draining = false;
       const hasUploads = this.#queue
         ?.listRecoverable(100)
-        .some((item) => item.kind === 'message.upload');
+        .some((item) => item.kind === 'message.upload' && this.#uploadFilterReady);
       if (hasUploads && !this.#retryTimer) this.#scheduleUploadBatch();
       else if (!hasUploads) this.#uploadBatchStage = 0;
     }
   }
 
   #startFastUpload(taskId: string): void {
+    if (!this.#uploadFilterReady) return;
     if (this.#fastUploadTasks.has(taskId)) return;
     const task = (async () => {
       const item = this.#queue?.get<MessageEnvelope>(taskId);
@@ -832,37 +870,58 @@ export class NodeBridgeRuntime {
   async #processUploadBatch(items: readonly QueueItem<MessageEnvelope>[]): Promise<boolean> {
     if (!this.#queue || !this.#client) return false;
     if (!items.length) return true;
-    const eventIds = items.map((item) => item.id);
+    if (!this.#uploadFilterReady) return false;
+    const eligible: QueueItem<MessageEnvelope>[] = [];
+    for (const item of items) {
+      if (this.#shouldUpload(item.payload)) {
+        eligible.push(item);
+        continue;
+      }
+      if (item.status === 'processing') this.#queue.markRetrying(item.id);
+      const current = this.#queue.get(item.id);
+      if (current && (current.status === 'queued' || current.status === 'retrying')) {
+        this.#queue.markDiscarded(item.id);
+      }
+    }
+    if (!eligible.length) return true;
+    const eventIds = eligible.map((item) => item.id);
     try {
-      for (const item of items) {
+      for (const item of eligible) {
         if (item.status === 'processing') this.#queue.markRetrying(item.id);
         this.#queue.markProcessing(item.id);
       }
       this.#log('debug', 'message_upload_attempt_started', {
         eventIds,
-        batchSize: items.length,
-        attempt: Math.max(...items.map((item) => this.#queue?.get(item.id)?.attempts ?? 1)),
+        batchSize: eligible.length,
+        attempt: Math.max(...eligible.map((item) => this.#queue?.get(item.id)?.attempts ?? 1)),
+        messagePreviews: eligible.map((item) => messagePreview(item.payload)),
       });
-      if (this.#fastMode && items.length === 1) {
-        await this.#client.send('message.upload', items[0]!.payload);
+      if (this.#fastMode && eligible.length === 1) {
+        await this.#client.send('message.upload', eligible[0]!.payload);
       } else {
         await this.#client.send('message.upload.batch', {
           batchId: randomUUID(),
-          messages: items.map((item) => item.payload),
+          messages: eligible.map((item) => item.payload),
         });
       }
-      for (const item of items) this.#queue.markAcknowledged(item.id);
+      for (const item of eligible) this.#queue.markAcknowledged(item.id);
       this.#log(
         'info',
-        items.length === 1 ? 'message_upload_acknowledged' : 'message_upload_batch_acknowledged',
-        items.length === 1 ? { eventId: eventIds[0] } : { eventIds, batchSize: items.length },
+        eligible.length === 1 ? 'message_upload_acknowledged' : 'message_upload_batch_acknowledged',
+        eligible.length === 1
+          ? { eventId: eventIds[0], messagePreview: messagePreview(eligible[0]!.payload) }
+          : {
+              eventIds,
+              batchSize: eligible.length,
+              messagePreviews: eligible.map((item) => messagePreview(item.payload)),
+            },
       );
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       let maxAttempts = 0;
       let deadLettered = false;
-      for (const item of items) {
+      for (const item of eligible) {
         const current = this.#queue.get(item.id);
         if (current?.status === 'processing') {
           maxAttempts = Math.max(maxAttempts, current.attempts);
@@ -879,7 +938,7 @@ export class NodeBridgeRuntime {
         deadLettered ? 'message_upload_dead_letter' : 'message_upload_retry_scheduled',
         {
           eventIds,
-          batchSize: items.length,
+          batchSize: eligible.length,
           attempts: maxAttempts,
           error: message,
           ...(deadLettered ? {} : { nextDelayMs: retryDelay(maxAttempts) }),
@@ -892,6 +951,7 @@ export class NodeBridgeRuntime {
   }
 
   #scheduleUploadBatch(delayOverride?: number): void {
+    if (!this.#uploadFilterReady) return;
     if (this.#fastMode) {
       for (const item of this.#queue?.listRecoverable(100) ?? []) {
         if (item.kind === 'message.upload') void this.#startFastUpload(item.id);
@@ -979,6 +1039,52 @@ export class NodeBridgeRuntime {
       // Logging must never stop message delivery.
     }
   }
+
+  #shouldUpload(message: MessageEnvelope): boolean {
+    if (!this.#uploadFilterReady) return false;
+    if (!this.#uploadSessions) return true;
+    return this.#uploadSessions.has(
+      uploadSessionKey(message.source.spaceId, message.source.channelId),
+    );
+  }
+
+  #discardFilteredUploads(): number {
+    if (!this.#queue || !this.#uploadFilterReady || !this.#uploadSessions) return 0;
+    let discarded = 0;
+    for (const item of this.#queue.listRecoverable<MessageEnvelope>(10_000)) {
+      if (item.kind !== 'message.upload' || item.status === 'processing') continue;
+      const parsed = messageEnvelopeSchema.safeParse(item.payload);
+      if (parsed.success && this.#shouldUpload(parsed.data)) continue;
+      this.#queue.markDiscarded(item.id);
+      discarded += 1;
+    }
+    return discarded;
+  }
+}
+
+function uploadSessionKey(spaceId: string, channelId: string): string {
+  return `${spaceId}\u001f${channelId}`;
+}
+
+function uploadSessionSet(filters: readonly UploadSessionFilter[]): Set<string> {
+  return new Set(filters.map((filter) => uploadSessionKey(filter.spaceId, filter.channelId)));
+}
+
+function messagePreview(message: MessageEnvelope): string {
+  return compactPreview(message.text, message.attachments.length > 0);
+}
+
+function deliveryPreview(command: DeliveryCommand): string {
+  return compactPreview(
+    command.text ?? command.render?.primaryText ?? command.render?.originalText,
+    command.cards.length > 0 || Boolean(command.render?.images.length),
+  );
+}
+
+function compactPreview(text: string | undefined, hasImage: boolean): string {
+  const normalized = text?.replace(/\s+/gu, ' ').trim();
+  if (normalized) return [...normalized].slice(0, 8).join('');
+  return hasImage ? '[图片]' : '—';
 }
 
 function retryDelay(attempt: number): number {
