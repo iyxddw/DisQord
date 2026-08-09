@@ -118,6 +118,118 @@ describe('central control-plane API', () => {
     await central.app.close();
   });
 
+  it('persists client instance names and lists every instance separately', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const firstNodeId = randomUUID();
+    const secondNodeId = randomUUID();
+    await central.store.set('node-session', firstNodeId, {
+      nodeId: firstNodeId,
+      nodeType: 'qq',
+      revoked: false,
+    });
+    await central.store.set('node-session', secondNodeId, {
+      nodeId: secondNodeId,
+      nodeType: 'qq',
+      revoked: false,
+    });
+
+    const renamed = await central.app.inject({
+      method: 'PATCH',
+      url: `/api/nodes/${secondNodeId}`,
+      cookies: { disqord_session: token },
+      payload: { name: '备用 QQ' },
+    });
+    expect(renamed.statusCode).toBe(200);
+
+    const nodes = await central.app.inject({
+      method: 'GET',
+      url: '/api/nodes',
+      cookies: { disqord_session: token },
+    });
+    expect(nodes.json()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ nodeId: firstNodeId, nodeType: 'qq' }),
+        expect.objectContaining({ nodeId: secondNodeId, nodeType: 'qq', name: '备用 QQ' }),
+      ]),
+    );
+    await central.app.close();
+  });
+
+  it('reports only non-self messages in overview activity', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const nodeId = randomUUID();
+    const sessionId = randomUUID();
+    const now = new Date().toISOString();
+    await central.store.set('chat-session', sessionId, {
+      id: sessionId,
+      nodeId,
+      platform: 'qq',
+      externalId: '123456',
+      spaceId: '123456',
+      displayName: '测试群',
+      status: 'verified',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const message = (fromSelf: boolean, messageId: string) => ({
+      schemaVersion: 1 as const,
+      eventId: randomUUID(),
+      source: {
+        nodeId,
+        platform: 'qq' as const,
+        spaceId: '123456',
+        channelId: '123456',
+        messageId,
+      },
+      sender: { id: fromSelf ? 'bot' : 'person-1', displayName: fromSelf ? '机器人' : '用户' },
+      sentAt: now,
+      fromSelf,
+      kind: 'text' as const,
+      text: '测试消息',
+      attachments: [],
+      traceId: randomUUID(),
+    });
+    await central.store.set('message-history', randomUUID(), {
+      sessionId,
+      message: message(false, 'message-1'),
+    });
+    await central.store.set('message-history', randomUUID(), {
+      sessionId,
+      message: message(false, 'message-2'),
+    });
+    await central.store.set('message-history', randomUUID(), {
+      sessionId,
+      message: message(true, 'message-self'),
+    });
+
+    const response = await central.app.inject({
+      method: 'GET',
+      url: '/api/overview/activity?range=24h&offsetMinutes=480',
+      cookies: { disqord_session: token },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      totalMessages: 2,
+      activeSenders: 1,
+      topSessions: [
+        expect.objectContaining({
+          sessionId,
+          name: '测试群',
+          messages: 2,
+          activeSenders: 1,
+        }),
+      ],
+    });
+    expect(
+      response
+        .json<{ buckets: Array<{ qqMessages: number }> }>()
+        .buckets.reduce((total, bucket) => total + bucket.qqMessages, 0),
+    ).toBe(2);
+    await central.app.close();
+  });
+
   it('lists, versions, disables, and deletes saved blueprints', async () => {
     const central = createTestApplication();
     const token = await configureAdministrator(central);

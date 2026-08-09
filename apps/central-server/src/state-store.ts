@@ -168,6 +168,7 @@ const TRACE_LOG_ENTRY_LIMIT = 16 * 1024;
 const APPEND_NAMESPACE_CAPS: Record<string, number> = {
   'trace-log': TRACE_LOG_ENTRY_LIMIT,
   'message-history': 5_000,
+  'message-activity': 64 * 1024,
   'blueprint-activity': 5_000,
 };
 

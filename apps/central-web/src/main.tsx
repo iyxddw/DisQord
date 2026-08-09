@@ -36,6 +36,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Clock3,
   Copy,
   FileClock,
   FlaskConical,
@@ -56,6 +57,7 @@ import {
   Settings,
   ShieldCheck,
   Trash2,
+  Users,
 } from 'lucide-react';
 
 import '@xyflow/react/dist/style.css';
@@ -63,6 +65,8 @@ import './styles.css';
 import {
   api,
   apiRetry,
+  type ActivityBucket,
+  type ActivityOverview,
   type AuthStatus,
   type Blueprint,
   type BlueprintActivity,
@@ -537,16 +541,164 @@ function CentralSetupGuide({ onDone }: { onDone: () => void }) {
   );
 }
 
+function nodeDisplayName(node: NodeRuntime, nodes: readonly NodeRuntime[]): string {
+  if (node.name?.trim()) return node.name.trim();
+  const platformName = node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端';
+  const sameType = nodes
+    .filter((item) => item.nodeType === node.nodeType)
+    .sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+  if (sameType.length <= 1) return platformName;
+  return `${platformName} ${sameType.findIndex((item) => item.nodeId === node.nodeId) + 1}`;
+}
+
+function activityTimeLabel(value: string, unit: ActivityOverview['unit']): string {
+  const date = new Date(value);
+  return unit === 'hour'
+    ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+    : date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+function ActivityChart({
+  title,
+  subtitle,
+  buckets,
+  unit,
+  metric,
+}: {
+  title: string;
+  subtitle: string;
+  buckets: ActivityBucket[];
+  unit: ActivityOverview['unit'];
+  metric: 'messages' | 'senders';
+}) {
+  const width = 720;
+  const height = 224;
+  const padding = { top: 18, right: 14, bottom: 38, left: 38 };
+  const qqValues = buckets.map((bucket) =>
+    metric === 'messages' ? bucket.qqMessages : bucket.qqSenders,
+  );
+  const discordValues = buckets.map((bucket) =>
+    metric === 'messages' ? bucket.discordMessages : bucket.discordSenders,
+  );
+  const maxValue = Math.max(1, ...qqValues, ...discordValues);
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (index: number) =>
+    padding.left + (buckets.length <= 1 ? 0 : (index / (buckets.length - 1)) * plotWidth);
+  const y = (value: number) => padding.top + plotHeight - (value / maxValue) * plotHeight;
+  const points = (values: number[]) =>
+    values.map((value, index) => `${x(index)},${y(value)}`).join(' ');
+  const labelIndexes = new Set(
+    [0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.round(Math.max(0, buckets.length - 1) * ratio)),
+  );
+  const hasData = qqValues.some(Boolean) || discordValues.some(Boolean);
+
+  return (
+    <section className="activity-chart-card">
+      <div className="activity-chart-heading">
+        <div>
+          <h3>{title}</h3>
+          <p>{subtitle}</p>
+        </div>
+        <div className="chart-legend" aria-label="图例">
+          <span className="qq">QQ</span>
+          <span className="discord">Discord</span>
+        </div>
+      </div>
+      <div className="activity-chart-wrap">
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+            const value = Math.round(maxValue * (1 - ratio));
+            const lineY = padding.top + plotHeight * ratio;
+            return (
+              <g key={ratio}>
+                <line
+                  className="chart-grid-line"
+                  x1={padding.left}
+                  x2={width - padding.right}
+                  y1={lineY}
+                  y2={lineY}
+                />
+                <text
+                  className="chart-axis-label"
+                  x={padding.left - 9}
+                  y={lineY + 4}
+                  textAnchor="end"
+                >
+                  {value}
+                </text>
+              </g>
+            );
+          })}
+          {buckets.map((bucket, index) =>
+            labelIndexes.has(index) ? (
+              <text
+                className="chart-axis-label"
+                key={bucket.start}
+                x={x(index)}
+                y={height - 10}
+                textAnchor={index === 0 ? 'start' : index === buckets.length - 1 ? 'end' : 'middle'}
+              >
+                {activityTimeLabel(bucket.start, unit)}
+              </text>
+            ) : null,
+          )}
+          <polyline className="chart-line qq" points={points(qqValues)} />
+          <polyline className="chart-line discord" points={points(discordValues)} />
+          {buckets.map((bucket, index) => (
+            <g key={`${bucket.start}-points`}>
+              <circle className="chart-point qq" cx={x(index)} cy={y(qqValues[index] ?? 0)} r="3">
+                <title>{`${activityTimeLabel(bucket.start, unit)} · QQ ${qqValues[index] ?? 0}`}</title>
+              </circle>
+              <circle
+                className="chart-point discord"
+                cx={x(index)}
+                cy={y(discordValues[index] ?? 0)}
+                r="3"
+              >
+                <title>{`${activityTimeLabel(bucket.start, unit)} · Discord ${discordValues[index] ?? 0}`}</title>
+              </circle>
+            </g>
+          ))}
+        </svg>
+        {!hasData && <div className="chart-empty">这个时间段还没有收到来自其他用户的消息</div>}
+      </div>
+    </section>
+  );
+}
+
 function Overview() {
   const nodes = useLoad<NodeRuntime[]>('/nodes', []);
   const sessions = useLoad<ChatSession[]>('/chat-sessions', []);
   const reviews = useLoad<unknown[]>('/reviews', []);
+  const [range, setRange] = useState<'24h' | '7d' | '30d'>('24h');
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  const activity = useLoad<ActivityOverview>(
+    `/overview/activity?range=${range}&offsetMinutes=${offsetMinutes}`,
+    {
+      range,
+      unit: range === '24h' ? 'hour' : 'day',
+      buckets: [],
+      totalMessages: 0,
+      activeSenders: 0,
+      peak: null,
+      topSessions: [],
+    },
+  );
+  useEffect(() => {
+    const timer = window.setInterval(() => void activity.reload({ background: true }), 30_000);
+    return () => window.clearInterval(timer);
+  }, [activity.reload]);
   const online = nodes.data.filter((node) => node.online).length;
   if (nodes.loading || sessions.loading || reviews.loading) {
     return <LoadingState text="正在汇总运行状态" />;
   }
+  const sortedNodes = [...nodes.data].sort(
+    (left, right) =>
+      left.nodeType.localeCompare(right.nodeType) || left.nodeId.localeCompare(right.nodeId),
+  );
   return (
-    <>
+    <div className="overview-page">
       <section className="overview-summary">
         <div>
           <span className="system-state">
@@ -580,33 +732,109 @@ function Overview() {
           </div>
         </dl>
       </section>
-      <div className="panel">
-        <PanelTitle title="客户端连接" subtitle="QQ 与 Discord 节点的当前连接状态" />
-        <div className="node-grid">
-          {(['qq', 'discord'] as const).map((type) => {
-            const node = nodes.data.find((item) => item.nodeType === type);
-            return (
-              <div className="node-card" key={type}>
-                <Bot className={`platform-icon ${type}`} size={18} />
+      <section className="panel activity-panel">
+        <PanelTitle
+          title="聊天活跃趋势"
+          subtitle="仅统计需要转发的会话，并严格排除 QQ 与 Discord 机器人自己发送的消息"
+          action={
+            <div className="range-switch" aria-label="统计时间范围">
+              {(['24h', '7d', '30d'] as const).map((item) => (
+                <button
+                  className={range === item ? 'active' : ''}
+                  key={item}
+                  onClick={() => setRange(item)}
+                >
+                  {item === '24h' ? '24 小时' : item === '7d' ? '7 天' : '30 天'}
+                </button>
+              ))}
+            </div>
+          }
+        />
+        <div className="activity-facts">
+          <div>
+            <MessagesSquare size={16} />
+            <span>收到消息</span>
+            <strong>{activity.data.totalMessages}</strong>
+          </div>
+          <div>
+            <Users size={16} />
+            <span>活跃人数</span>
+            <strong>{activity.data.activeSenders}</strong>
+          </div>
+          <div>
+            <Clock3 size={16} />
+            <span>最高峰</span>
+            <strong>
+              {activity.data.peak
+                ? `${activityTimeLabel(activity.data.peak.start, activity.data.unit)} · ${activity.data.peak.messages} 条`
+                : '暂无'}
+            </strong>
+          </div>
+        </div>
+        {activity.loading && <LoadingProgress text="正在读取聊天趋势" />}
+        {activity.error && <div className="panel-error">{activity.error}</div>}
+        <div className="activity-chart-grid">
+          <ActivityChart
+            title="收到的消息"
+            subtitle="观察每个时段的聊天消息量"
+            buckets={activity.data.buckets}
+            unit={activity.data.unit}
+            metric="messages"
+          />
+          <ActivityChart
+            title="活跃发言人数"
+            subtitle="同一用户在一个时段内只计算一次"
+            buckets={activity.data.buckets}
+            unit={activity.data.unit}
+            metric="senders"
+          />
+        </div>
+      </section>
+      <div className="overview-detail-grid">
+        <section className="panel overview-client-panel">
+          <PanelTitle title="客户端实例" subtitle="同一平台的多个实例会分别显示" />
+          <div className="overview-node-list">
+            {sortedNodes.map((node) => (
+              <div className="overview-node-card" key={node.nodeId}>
+                <Bot className={`platform-icon ${node.nodeType}`} size={18} />
                 <div>
-                  <strong>{type === 'qq' ? 'QQ / NapCat' : 'Discord Bot'}</strong>
+                  <strong>{nodeDisplayName(node, nodes.data)}</strong>
                   <span>
-                    {node
-                      ? node.online
-                        ? '客户端在线'
-                        : `最后活动 ${formatTime(node.lastSeenAt)}`
-                      : '等待节点首次连接'}
+                    {node.nodeType === 'qq' ? 'QQ / NapCat' : 'Discord Bot'} ·{' '}
+                    {node.configuredSessions?.length ?? 0} 个会话
                   </span>
                 </div>
-                <b className={node?.online ? 'ok' : 'muted'}>
-                  {node?.online ? '在线' : node ? '等待连接' : '未连接'}
+                <b className={node.online ? 'ok' : 'muted'}>
+                  {node.online ? '在线' : `离线 · ${formatTime(node.lastSeenAt)}`}
                 </b>
               </div>
-            );
-          })}
-        </div>
+            ))}
+            {!sortedNodes.length && <Empty text="尚无客户端实例" />}
+          </div>
+        </section>
+        <section className="panel overview-session-panel">
+          <PanelTitle title="活跃会话" subtitle="按当前时间范围内的非机器人消息排序" />
+          <div className="overview-active-list">
+            {activity.data.topSessions.map((session, index) => (
+              <div key={session.sessionId}>
+                <span className="activity-rank">{index + 1}</span>
+                <div>
+                  <strong>{session.name}</strong>
+                  <span>
+                    {session.platform === 'qq' ? 'QQ 群' : 'Discord 频道'} · {session.activeSenders}{' '}
+                    人发言
+                  </span>
+                </div>
+                <b>{session.messages}</b>
+              </div>
+            ))}
+            {!activity.loading && !activity.data.topSessions.length && (
+              <Empty text="当前时间范围还没有活跃会话" />
+            )}
+          </div>
+        </section>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -615,6 +843,7 @@ function Sessions() {
     '/chat-sessions',
     [],
   );
+  const nodes = useLoad<NodeRuntime[]>('/nodes', []);
   const [editingId, setEditingId] = useState('');
   const [remark, setRemark] = useState('');
   const saveRemark = async (session: ChatSession) => {
@@ -678,87 +907,115 @@ function Sessions() {
     }
   };
   return (
-    <div className="panel">
-      <PanelTitle
-        title="已配置聊天会话"
-        subtitle="会话在绑定页面完成验证码验证后自动保存；只有已验证会话可用于蓝图"
-        action={
-          <button className="icon-button" onClick={() => void reload()}>
-            <RefreshCw size={16} />
-          </button>
-        }
-      />
-      {error && <div className="panel-error">{error}</div>}
-      {loading && <LoadingState text="正在读取聊天会话" />}
-      <div className="list">
-        {data.map((session) => (
-          <div className="session-row" key={session.id}>
-            <div className={`platform ${session.platform}`}>
-              <MessagesSquare size={18} />
-            </div>
-            <div className="grow">
-              <strong>{sessionLabel(session)}</strong>
-              {session.fetchOnly && <em className="session-fetch-only">只读 · 机器人不发送</em>}
-              {session.remark && <em className="session-remark">原名：{session.displayName}</em>}
-              <span>
-                {session.platform === 'discord'
-                  ? `服务器 ${session.spaceId} · 频道 ${session.externalId}`
-                  : `群号 ${session.externalId}`}
-              </span>
-            </div>
-            {editingId === session.id ? (
-              <div className="remark-editor">
-                <input
-                  autoFocus
-                  value={remark}
-                  placeholder="输入备注，留空可清除"
-                  onChange={(event) => setRemark(event.target.value)}
-                  onKeyDown={(event) => event.key === 'Enter' && void saveRemark(session)}
-                />
-                <button onClick={() => void saveRemark(session)}>保存</button>
-                <button onClick={() => setEditingId('')}>取消</button>
-              </div>
-            ) : (
-              <div className="session-actions">
-                <button
-                  className={session.fetchOnly ? 'fetch-only active' : 'fetch-only'}
-                  title={
-                    session.fetchOnly
-                      ? '只读频道：机器人不会向此频道发送消息'
-                      : '设为只读（机器人不向此频道发送消息）'
-                  }
-                  onClick={() => void toggleFetchOnly(session)}
-                >
-                  <ArrowRightLeft size={14} />
-                </button>
-                <button
-                  title={session.remark ? '编辑备注' : '添加备注'}
-                  onClick={() => {
-                    setEditingId(session.id);
-                    setRemark(session.remark ?? '');
-                  }}
-                >
-                  <Pencil size={14} />
-                </button>
-                <button title="删除会话" onClick={() => void remove(session)}>
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            )}
-            <span className={`badge ${session.status === 'verified' ? 'success' : ''}`}>
-              {session.status === 'verified' && <Check size={13} />}
-              {session.status === 'verified'
-                ? '已验证'
-                : session.status === 'pending'
-                  ? '等待验证码'
-                  : session.status === 'stale'
-                    ? '已失效'
-                    : '已禁用'}
-            </span>
-          </div>
-        ))}
-        {!loading && !data.length && <Empty text="还没有聊天会话，请先到绑定会话完成验证" />}
-      </div>
+    <div className="management-page">
+      <section className="panel management-panel">
+        <PanelTitle
+          title="已配置聊天会话"
+          subtitle="每张卡片代表一个 QQ 群或 Discord 频道；可重命名、设为只读或移除"
+          action={
+            <button
+              className="icon-button"
+              title="刷新"
+              onClick={() => void Promise.all([reload(), nodes.reload()])}
+            >
+              <RefreshCw size={16} />
+            </button>
+          }
+        />
+        {error && <div className="panel-error">{error}</div>}
+        {(loading || nodes.loading) && <LoadingState text="正在读取聊天会话" />}
+        <div className="session-card-grid">
+          {data.map((session) => {
+            const owner = nodes.data.find((node) => node.nodeId === session.nodeId);
+            return (
+              <article className="session-card" key={session.id}>
+                <header>
+                  <div className={`platform ${session.platform}`}>
+                    <MessagesSquare size={18} />
+                  </div>
+                  <div className="grow">
+                    <strong>{sessionLabel(session)}</strong>
+                    <span>{session.platform === 'qq' ? 'QQ 群聊' : 'Discord 频道'}</span>
+                  </div>
+                  <span className={`badge ${session.status === 'verified' ? 'success' : ''}`}>
+                    {session.status === 'verified' && <Check size={13} />}
+                    {session.status === 'verified'
+                      ? '已验证'
+                      : session.status === 'pending'
+                        ? '等待验证码'
+                        : session.status === 'stale'
+                          ? '已失效'
+                          : '已禁用'}
+                  </span>
+                </header>
+                <div className="session-card-details">
+                  <div>
+                    <span>所属实例</span>
+                    <strong>
+                      {owner ? nodeDisplayName(owner, nodes.data) : session.nodeId.slice(0, 8)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>{session.platform === 'discord' ? '频道 ID' : '群号'}</span>
+                    <strong>{session.externalId}</strong>
+                  </div>
+                  {session.platform === 'discord' && (
+                    <div>
+                      <span>服务器 ID</span>
+                      <strong>{session.spaceId}</strong>
+                    </div>
+                  )}
+                </div>
+                {session.remark && (
+                  <p className="session-original-name">原始名称：{session.displayName}</p>
+                )}
+                {session.fetchOnly && (
+                  <div className="session-mode-note">
+                    只读取这里的消息，机器人不会向这里发送内容
+                  </div>
+                )}
+                {editingId === session.id ? (
+                  <div className="remark-editor session-card-editor">
+                    <input
+                      autoFocus
+                      value={remark}
+                      placeholder="输入会话名称，留空恢复原名"
+                      onChange={(event) => setRemark(event.target.value)}
+                      onKeyDown={(event) => event.key === 'Enter' && void saveRemark(session)}
+                    />
+                    <button onClick={() => void saveRemark(session)}>保存</button>
+                    <button onClick={() => setEditingId('')}>取消</button>
+                  </div>
+                ) : (
+                  <footer className="session-card-actions">
+                    <button
+                      className={session.fetchOnly ? 'fetch-only active' : 'fetch-only'}
+                      onClick={() => void toggleFetchOnly(session)}
+                    >
+                      <ArrowRightLeft size={14} />
+                      {session.fetchOnly ? '取消只读' : '设为只读'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditingId(session.id);
+                        setRemark(session.remark ?? '');
+                      }}
+                    >
+                      <Pencil size={14} />
+                      重命名
+                    </button>
+                    <button className="danger" onClick={() => void remove(session)}>
+                      <Trash2 size={14} />
+                      移除
+                    </button>
+                  </footer>
+                )}
+              </article>
+            );
+          })}
+          {!loading && !data.length && <Empty text="还没有聊天会话，请先到绑定会话完成验证" />}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2366,12 +2623,38 @@ function Nodes() {
   const [notices, setNotices] = useState<Record<string, string>>({});
   const [sending, setSending] = useState<Record<string, boolean>>({});
   const [verifying, setVerifying] = useState<Record<string, boolean>>({});
+  const [editingNodeId, setEditingNodeId] = useState('');
+  const [nodeName, setNodeName] = useState('');
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  const saveNodeName = async (node: NodeRuntime) => {
+    const nextName = nodeName.trim();
+    if (!nextName) return;
+    const previous = nodes.data;
+    nodes.setData((current) =>
+      current.map((item) => (item.nodeId === node.nodeId ? { ...item, name: nextName } : item)),
+    );
+    setEditingNodeId('');
+    try {
+      await apiRetry(
+        `/nodes/${node.nodeId}`,
+        { method: 'PATCH', json: { name: nextName } },
+        { attempts: 3 },
+      );
+      setNotices((current) => ({ ...current, [node.nodeId]: '实例名称已保存。' }));
+    } catch (cause) {
+      nodes.setData(previous);
+      setNotices((current) => ({
+        ...current,
+        [node.nodeId]: cause instanceof Error ? cause.message : '实例名称保存失败',
+      }));
+    }
+  };
 
   const configure = async (node: NodeRuntime) => {
     const draft = drafts[node.nodeId] ?? { externalId: '', spaceId: '' };
@@ -2479,175 +2762,263 @@ function Nodes() {
   }
 
   return (
-    <div className="panel binding-panel">
-      <PanelTitle
-        title="客户端与会话"
-        subtitle="填写目标会话 ID 后发送验证码；已绑定会话请在“聊天会话”页面查看和管理"
-        action={
-          <button className="icon-button" title="刷新" onClick={() => void reload()}>
-            <RefreshCw size={16} />
-          </button>
-        }
-      />
-      <div className="node-list">
-        {nodes.data.map((node) => {
-          const pending = sessions.data.filter(
-            (session) => session.nodeId === node.nodeId && session.status === 'pending',
-          );
-          const draft = drafts[node.nodeId] ?? { externalId: '', spaceId: '' };
-          return (
-            <section className="node-setup" key={node.nodeId}>
-              <div className="binding-head">
-                <Bot className={`platform-icon ${node.nodeType}`} size={20} />
-                <div>
-                  <h2>{node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'}</h2>
-                  <p>{node.nodeId}</p>
-                </div>
-              </div>
-              <div className="connection-state">
-                <i className={node.online ? 'online' : ''} />
-                {node.online ? '在线' : '离线'} · 可从客户端发现并绑定会话
-              </div>
-
-              {pending.map((session) => (
-                <div className="verify-box" key={session.id}>
-                  <div className="verify-title">
-                    <strong>{sessionLabel(session)}</strong>
-                    <span>
-                      {session.verificationExpiresAt &&
-                      Date.parse(session.verificationExpiresAt) > now
-                        ? `验证码有效至 ${formatTime(session.verificationExpiresAt)}`
-                        : '验证码已过期，请重新发送'}
+    <div className="management-page">
+      <section className="panel management-panel binding-card-panel">
+        <PanelTitle
+          title="客户端实例与会话绑定"
+          subtitle="每张卡片代表一个独立客户端实例；同一平台可以同时连接多个实例，并分别管理会话"
+          action={
+            <button className="icon-button" title="刷新" onClick={() => void reload()}>
+              <RefreshCw size={16} />
+            </button>
+          }
+        />
+        {(nodes.error || sessions.error) && (
+          <div className="panel-error">{nodes.error || sessions.error}</div>
+        )}
+        <div className="node-instance-grid">
+          {[...nodes.data]
+            .sort(
+              (left, right) =>
+                left.nodeType.localeCompare(right.nodeType) ||
+                left.nodeId.localeCompare(right.nodeId),
+            )
+            .map((node) => {
+              const nodeSessions = sessions.data.filter(
+                (session) => session.nodeId === node.nodeId,
+              );
+              const verified = nodeSessions.filter((session) => session.status === 'verified');
+              const pending = nodeSessions.filter((session) => session.status === 'pending');
+              const draft = drafts[node.nodeId] ?? { externalId: '', spaceId: '' };
+              return (
+                <article className="node-instance-card" key={node.nodeId}>
+                  <header className="node-instance-header">
+                    <div className="node-instance-icon">
+                      <Bot className={`platform-icon ${node.nodeType}`} size={20} />
+                    </div>
+                    <div className="grow">
+                      {editingNodeId === node.nodeId ? (
+                        <div className="node-name-editor">
+                          <input
+                            autoFocus
+                            value={nodeName}
+                            maxLength={64}
+                            onChange={(event) => setNodeName(event.target.value)}
+                            onKeyDown={(event) => event.key === 'Enter' && void saveNodeName(node)}
+                          />
+                          <button
+                            disabled={!nodeName.trim()}
+                            onClick={() => void saveNodeName(node)}
+                          >
+                            保存
+                          </button>
+                          <button onClick={() => setEditingNodeId('')}>取消</button>
+                        </div>
+                      ) : (
+                        <>
+                          <h2>{nodeDisplayName(node, nodes.data)}</h2>
+                          <p>{node.nodeType === 'qq' ? 'QQ / NapCat' : 'Discord Bot'}</p>
+                        </>
+                      )}
+                    </div>
+                    {editingNodeId !== node.nodeId && (
+                      <button
+                        className="node-rename"
+                        title="重命名实例"
+                        onClick={() => {
+                          setEditingNodeId(node.nodeId);
+                          setNodeName(nodeDisplayName(node, nodes.data));
+                        }}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    )}
+                    <span className={`instance-status ${node.online ? 'online' : ''}`}>
+                      {node.online ? '在线' : '离线'}
                     </span>
-                  </div>
-                  <input
-                    placeholder="回填频道或群内的验证码"
-                    value={verificationCodes[session.id] ?? ''}
-                    onChange={(event) =>
-                      setVerificationCodes((current) => ({
-                        ...current,
-                        [session.id]: event.target.value,
-                      }))
-                    }
-                  />
-                  <button
-                    className="verify-submit"
-                    disabled={
-                      Boolean(verifying[session.id]) || !verificationCodes[session.id]?.trim()
-                    }
-                    onClick={() => void verify(node, session)}
-                  >
-                    {verifying[session.id] && <LoaderCircle className="spin" size={15} />}
-                    {verifying[session.id] ? '验证中' : '完成验证'}
-                  </button>
-                  <button
-                    className="verify-resend"
-                    disabled={Boolean(sending[session.id])}
-                    onClick={() => void resend(node, session)}
-                  >
-                    {sending[session.id] && <LoaderCircle className="spin" size={14} />}
-                    {sending[session.id] ? '发送中' : '重新发送验证码'}
-                  </button>
-                </div>
-              ))}
+                  </header>
 
-              {adding[node.nodeId] ? (
-                <div className="binding-form">
-                  {node.nodeType === 'qq' ? (
-                    <label>
-                      QQ 群号
+                  <div className="node-instance-summary">
+                    <div>
+                      <span>已绑定会话</span>
+                      <strong>{verified.length}</strong>
+                    </div>
+                    <div>
+                      <span>等待验证</span>
+                      <strong>{pending.length}</strong>
+                    </div>
+                    <div>
+                      <span>最后活动</span>
+                      <strong>{node.online ? '刚刚' : formatTime(node.lastSeenAt)}</strong>
+                    </div>
+                  </div>
+                  <div className="node-instance-id">
+                    <span>实例 ID</span>
+                    <code>{node.nodeId}</code>
+                  </div>
+
+                  {verified.length > 0 && (
+                    <div className="instance-session-list">
+                      <h3>已绑定到这个实例</h3>
+                      {verified.map((session) => (
+                        <div key={session.id}>
+                          <MessagesSquare size={15} />
+                          <div>
+                            <strong>{sessionLabel(session)}</strong>
+                            <span>
+                              {session.platform === 'discord'
+                                ? `频道 ${session.externalId}`
+                                : `群号 ${session.externalId}`}
+                            </span>
+                          </div>
+                          {session.fetchOnly && <em>只读</em>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {pending.map((session) => (
+                    <div className="verify-box instance-verify-box" key={session.id}>
+                      <div className="verify-title">
+                        <strong>{sessionLabel(session)}</strong>
+                        <span>
+                          {session.verificationExpiresAt &&
+                          Date.parse(session.verificationExpiresAt) > now
+                            ? `验证码有效至 ${formatTime(session.verificationExpiresAt)}`
+                            : '验证码已过期，请重新发送'}
+                        </span>
+                      </div>
                       <input
-                        inputMode="numeric"
-                        autoComplete="off"
-                        placeholder="例如 736770364"
-                        value={draft.externalId}
+                        placeholder="填写群或频道中的验证码"
+                        value={verificationCodes[session.id] ?? ''}
                         onChange={(event) =>
-                          setDrafts((current) => ({
+                          setVerificationCodes((current) => ({
                             ...current,
-                            [node.nodeId]: {
-                              externalId: event.target.value,
-                              spaceId: event.target.value,
-                            },
+                            [session.id]: event.target.value,
                           }))
                         }
                       />
-                    </label>
-                  ) : (
-                    <div className="binding-fields">
-                      <label>
-                        Discord 服务器 ID
-                        <input
-                          inputMode="numeric"
-                          autoComplete="off"
-                          placeholder="例如 1108054453749301268"
-                          value={draft.spaceId}
-                          onChange={(event) =>
-                            setDrafts((current) => ({
-                              ...current,
-                              [node.nodeId]: { ...draft, spaceId: event.target.value },
-                            }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Discord 频道 ID
-                        <input
-                          inputMode="numeric"
-                          autoComplete="off"
-                          placeholder="例如 1108054453749301271"
-                          value={draft.externalId}
-                          onChange={(event) =>
-                            setDrafts((current) => ({
-                              ...current,
-                              [node.nodeId]: { ...draft, externalId: event.target.value },
-                            }))
-                          }
-                        />
-                      </label>
+                      <button
+                        className="verify-submit"
+                        disabled={
+                          Boolean(verifying[session.id]) || !verificationCodes[session.id]?.trim()
+                        }
+                        onClick={() => void verify(node, session)}
+                      >
+                        {verifying[session.id] && <LoaderCircle className="spin" size={15} />}
+                        {verifying[session.id] ? '验证中' : '完成验证'}
+                      </button>
+                      <button
+                        className="verify-resend"
+                        disabled={Boolean(sending[session.id])}
+                        onClick={() => void resend(node, session)}
+                      >
+                        {sending[session.id] && <LoaderCircle className="spin" size={14} />}
+                        {sending[session.id] ? '发送中' : '重发验证码'}
+                      </button>
                     </div>
+                  ))}
+
+                  {adding[node.nodeId] ? (
+                    <div className="binding-form instance-binding-form">
+                      {node.nodeType === 'qq' ? (
+                        <label>
+                          QQ 群号
+                          <input
+                            inputMode="numeric"
+                            autoComplete="off"
+                            placeholder="例如 736770364"
+                            value={draft.externalId}
+                            onChange={(event) =>
+                              setDrafts((current) => ({
+                                ...current,
+                                [node.nodeId]: {
+                                  externalId: event.target.value,
+                                  spaceId: event.target.value,
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                      ) : (
+                        <div className="binding-fields">
+                          <label>
+                            Discord 服务器 ID
+                            <input
+                              inputMode="numeric"
+                              autoComplete="off"
+                              placeholder="服务器 ID"
+                              value={draft.spaceId}
+                              onChange={(event) =>
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [node.nodeId]: { ...draft, spaceId: event.target.value },
+                                }))
+                              }
+                            />
+                          </label>
+                          <label>
+                            Discord 频道 ID
+                            <input
+                              inputMode="numeric"
+                              autoComplete="off"
+                              placeholder="频道 ID"
+                              value={draft.externalId}
+                              onChange={(event) =>
+                                setDrafts((current) => ({
+                                  ...current,
+                                  [node.nodeId]: { ...draft, externalId: event.target.value },
+                                }))
+                              }
+                            />
+                          </label>
+                        </div>
+                      )}
+                      <small>
+                        {node.nodeType === 'qq'
+                          ? '验证码会由这个 QQ 实例发送到目标群。'
+                          : '这个 Discord Bot 必须拥有目标频道的查看和发送消息权限。'}
+                      </small>
+                      <div className="binding-actions">
+                        <button
+                          className="primary"
+                          disabled={
+                            !node.online ||
+                            !draft.externalId.trim() ||
+                            (node.nodeType === 'discord' && !draft.spaceId.trim()) ||
+                            Boolean(sending[node.nodeId])
+                          }
+                          onClick={() => void configure(node)}
+                        >
+                          {sending[node.nodeId] && <LoaderCircle className="spin" size={15} />}
+                          {sending[node.nodeId] ? '发送中' : '发送验证码'}
+                        </button>
+                        <button
+                          onClick={() =>
+                            setAdding((current) => ({ ...current, [node.nodeId]: false }))
+                          }
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      className="add-binding instance-add-binding"
+                      disabled={!node.online}
+                      onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: true }))}
+                    >
+                      <Plus size={15} />
+                      绑定新会话
+                    </button>
                   )}
-                  <small>
-                    {node.nodeType === 'qq'
-                      ? '验证码会发送到这个 QQ 群。'
-                      : '机器人必须已加入服务器，并拥有该频道的查看和发送消息权限；验证码发送失败时会显示具体原因。'}
-                  </small>
-                  <div className="binding-actions">
-                    <button
-                      className="primary"
-                      disabled={
-                        !node.online ||
-                        !draft.externalId.trim() ||
-                        (node.nodeType === 'discord' && !draft.spaceId.trim()) ||
-                        Boolean(sending[node.nodeId])
-                      }
-                      onClick={() => void configure(node)}
-                    >
-                      {sending[node.nodeId] && <LoaderCircle className="spin" size={15} />}
-                      {sending[node.nodeId] ? '发送中' : '发送验证码'}
-                    </button>
-                    <button
-                      onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: false }))}
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  className="add-binding"
-                  disabled={!node.online}
-                  onClick={() => setAdding((current) => ({ ...current, [node.nodeId]: true }))}
-                >
-                  <Plus size={15} />
-                  绑定另一个会话
-                </button>
-              )}
-              {notices[node.nodeId] && <div className="notice">{notices[node.nodeId]}</div>}
-            </section>
-          );
-        })}
-        {!nodes.data.length && <Empty text="尚无客户端；启动 QQ 或 Discord 客户端后会自动出现" />}
-      </div>
+                  {notices[node.nodeId] && <div className="notice">{notices[node.nodeId]}</div>}
+                </article>
+              );
+            })}
+          {!nodes.data.length && <Empty text="尚无客户端；启动 QQ 或 Discord 客户端后会自动出现" />}
+        </div>
+      </section>
     </div>
   );
 }

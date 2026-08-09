@@ -133,6 +133,22 @@ async function waitForAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000
 }
 
 describe('blueprint message pipeline', () => {
+  it('never records the bot own messages in overview activity', async () => {
+    const setup = await fixture([], [], {});
+    const incoming = { ...message(setup.sourceSession.nodeId), fromSelf: true };
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    await waitForAsync(async () => (await setup.store.list('message-history')).length === 1);
+    expect(await setup.store.list('message-activity')).toHaveLength(0);
+  });
+
   it('sends each node only the active chat-input sessions it should upload', async () => {
     const input = randomUUID();
     const output = randomUUID();
@@ -322,6 +338,11 @@ describe('blueprint message pipeline', () => {
     expect(new Set(batchActivities.map((activity) => activity.batchIndex))).toEqual(
       new Set([0, 1]),
     );
+    expect(
+      (
+        await setup.store.list<{ messages: number; senderHashes: string[] }>('message-activity')
+      ).map((entry) => entry.value),
+    ).toEqual([expect.objectContaining({ messages: 2, senderHashes: [expect.any(String)] })]);
   });
 
   it('sends a client render spec instead of central PNG bytes', async () => {

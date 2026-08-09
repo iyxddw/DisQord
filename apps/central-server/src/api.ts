@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -50,6 +50,13 @@ const sessionUpdateSchema = z
   .refine((value) => value.remark !== undefined || value.fetchOnly !== undefined, {
     message: 'At least one session field must be updated.',
   });
+const nodeUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(64).nullable(),
+});
+const overviewActivityQuerySchema = z.object({
+  range: z.enum(['24h', '7d', '30d']).default('24h'),
+  offsetMinutes: z.coerce.number().int().min(-720).max(840).default(480),
+});
 const simulationSettingsSchema = z.object({
   delayMs: z.number().int().min(0).max(10_000).default(1_000),
 });
@@ -336,7 +343,9 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.get('/api/nodes', { preHandler: requireAdmin }, async () => {
     const runtime = await options.store.list<Record<string, unknown>>('node-runtime');
     const sessions = await options.store.list<Record<string, unknown>>('node-session');
+    const metadata = await options.store.list<{ name?: string }>('node-metadata');
     const chatSessions = await options.store.list<ChatSession>('chat-session');
+    const metadataById = new Map(metadata.map((entry) => [entry.key, entry.value]));
     const verifiedByNode = new Map<string, ChatSession[]>();
     for (const session of chatSessions.map((entry) => entry.value)) {
       if (session.status !== 'verified') continue;
@@ -355,6 +364,9 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     }
     return [...byId.values()].map((node) => ({
       ...node,
+      ...(typeof node.nodeId === 'string' && metadataById.get(node.nodeId)?.name
+        ? { name: metadataById.get(node.nodeId)?.name }
+        : {}),
       verificationStatus:
         typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId) ? 'verified' : 'pending',
       ...(typeof node.nodeId === 'string' && verifiedByNode.has(node.nodeId)
@@ -363,6 +375,167 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       online:
         typeof node.nodeId === 'string' ? (gateway?.isNodeConnected(node.nodeId) ?? false) : false,
     }));
+  });
+
+  app.patch('/api/nodes/:id', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const { id } = z.object({ id: z.uuid() }).parse(request.params);
+      const { name } = nodeUpdateSchema.parse(request.body);
+      const session = await options.store.get<NodeSession>('node-session', id);
+      if (!session) return await reply.code(404).send({ error: 'Client not found.' });
+      if (name === null) await options.store.delete('node-metadata', id);
+      else {
+        await options.store.set('node-metadata', id, {
+          name,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return { nodeId: id, ...(name === null ? {} : { name }) };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get('/api/overview/activity', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const query = overviewActivityQuerySchema.parse(request.query);
+      const now = Date.now();
+      const hourMs = 60 * 60 * 1_000;
+      const dayMs = 24 * hourMs;
+      const bucketMs = query.range === '24h' ? hourMs : dayMs;
+      const bucketCount = query.range === '24h' ? 24 : query.range === '7d' ? 7 : 30;
+      const offsetMs = query.offsetMinutes * 60 * 1_000;
+      const currentBucket = Math.floor((now + offsetMs) / bucketMs) * bucketMs - offsetMs;
+      const firstBucket = currentBucket - (bucketCount - 1) * bucketMs;
+      const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+        startMs: firstBucket + index * bucketMs,
+        qqMessages: 0,
+        discordMessages: 0,
+        qqSenders: new Set<string>(),
+        discordSenders: new Set<string>(),
+      }));
+      const sessions = (await options.store.list<ChatSession>('chat-session')).map(
+        (entry) => entry.value,
+      );
+      const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+      const sessionActivity = new Map<
+        string,
+        { messages: number; senders: Set<string>; session: ChatSession }
+      >();
+      const senders = new Set<string>();
+      let totalMessages = 0;
+
+      const addActivity = (
+        platform: 'qq' | 'discord',
+        sessionId: string,
+        timestamp: number,
+        messages: number,
+        senderHashes: readonly string[],
+      ) => {
+        if (
+          !Number.isFinite(timestamp) ||
+          timestamp < firstBucket ||
+          timestamp >= currentBucket + bucketMs
+        ) {
+          return;
+        }
+        const index = Math.floor((timestamp - firstBucket) / bucketMs);
+        const bucket = buckets[index];
+        if (!bucket) return;
+        if (platform === 'qq') {
+          bucket.qqMessages += messages;
+          for (const sender of senderHashes) bucket.qqSenders.add(sender);
+        } else {
+          bucket.discordMessages += messages;
+          for (const sender of senderHashes) bucket.discordSenders.add(sender);
+        }
+        totalMessages += messages;
+        for (const sender of senderHashes) senders.add(sender);
+
+        const session = sessionsById.get(sessionId);
+        if (!session) return;
+        const activity = sessionActivity.get(session.id) ?? {
+          messages: 0,
+          senders: new Set<string>(),
+          session,
+        };
+        activity.messages += messages;
+        for (const sender of senderHashes) activity.senders.add(sender);
+        sessionActivity.set(session.id, activity);
+      };
+
+      const coveredHours = new Set<string>();
+      const storedActivity = await options.store.list<{
+        hourStart: string;
+        sessionId: string;
+        platform: 'qq' | 'discord';
+        messages: number;
+        senderHashes: string[];
+      }>('message-activity');
+      for (const entry of storedActivity) {
+        const value = entry.value;
+        const timestamp = Date.parse(value.hourStart);
+        if (!Number.isFinite(timestamp)) continue;
+        coveredHours.add(`${timestamp}|${value.sessionId}`);
+        addActivity(value.platform, value.sessionId, timestamp, value.messages, value.senderHashes);
+      }
+
+      const history = await options.store.list<{
+        sessionId: string;
+        message: z.infer<typeof messageEnvelopeSchema>;
+      }>('message-history');
+      for (const entry of history) {
+        const parsed = messageEnvelopeSchema.safeParse(entry.value.message);
+        if (!parsed.success || parsed.data.fromSelf) continue;
+        const sentAt = Date.parse(parsed.data.sentAt);
+        const hourStart = Math.floor(sentAt / hourMs) * hourMs;
+        if (coveredHours.has(`${hourStart}|${entry.value.sessionId}`)) continue;
+        const senderHash = createHash('sha256')
+          .update(`${parsed.data.source.platform}:${parsed.data.sender.id}`)
+          .digest('hex')
+          .slice(0, 24);
+        addActivity(parsed.data.source.platform, entry.value.sessionId, sentAt, 1, [senderHash]);
+      }
+
+      const normalizedBuckets = buckets.map((bucket) => ({
+        start: new Date(bucket.startMs).toISOString(),
+        qqMessages: bucket.qqMessages,
+        discordMessages: bucket.discordMessages,
+        qqSenders: bucket.qqSenders.size,
+        discordSenders: bucket.discordSenders.size,
+      }));
+      const peak = normalizedBuckets.reduce<(typeof normalizedBuckets)[number] | undefined>(
+        (current, bucket) =>
+          !current ||
+          bucket.qqMessages + bucket.discordMessages > current.qqMessages + current.discordMessages
+            ? bucket
+            : current,
+        undefined,
+      );
+      return {
+        range: query.range,
+        unit: query.range === '24h' ? 'hour' : 'day',
+        buckets: normalizedBuckets,
+        totalMessages,
+        activeSenders: senders.size,
+        peak:
+          peak && peak.qqMessages + peak.discordMessages > 0
+            ? { start: peak.start, messages: peak.qqMessages + peak.discordMessages }
+            : null,
+        topSessions: [...sessionActivity.values()]
+          .sort((left, right) => right.messages - left.messages)
+          .slice(0, 5)
+          .map(({ session, messages, senders: sessionSenders }) => ({
+            sessionId: session.id,
+            platform: session.platform,
+            name: session.remark?.trim() || session.displayName,
+            messages,
+            activeSenders: sessionSenders.size,
+          })),
+      };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
   });
 
   app.post('/api/nodes/:id/revoke', { preHandler: requireAdmin }, async (request, reply) => {

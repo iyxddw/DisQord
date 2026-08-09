@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { validateBlueprint } from '@disqord/blueprint';
 import { AvatarCache, downloadExternalImage, renderMessageCards } from '@disqord/card-renderer';
@@ -316,6 +316,7 @@ export class MessageOrchestrator {
   readonly #messageBatchWorkers = new Map<string, Promise<void>>();
   readonly #messageBatchRetryTimers = new Map<string, NodeJS.Timeout>();
   #activitySequence = 0;
+  #messageActivityWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(store: StateStore, commandBus: NodeCommandBus, processor: MessageProcessor) {
     this.#store = store;
@@ -782,6 +783,7 @@ export class MessageOrchestrator {
       message,
     });
     await this.#log(message.traceId, 'debug', 'source_session_matched', { sourceSession });
+    if (!message.fromSelf) await this.#recordMessageActivity(sourceSession, message);
 
     const recentMessages = await this.#recentMessages(sourceSession.id);
     await this.#store.set('message-history', randomUUID(), {
@@ -2183,6 +2185,72 @@ export class MessageOrchestrator {
       .slice(0, 5)
       .map((entry) => messageEnvelopeSchema.parse(entry.value.message))
       .reverse();
+  }
+
+  async #recordMessageActivity(
+    sourceSession: ChatSession,
+    message: MessageEnvelope,
+  ): Promise<void> {
+    const operation = this.#messageActivityWriteQueue.then(async () => {
+      const hourMs = 60 * 60 * 1_000;
+      const sentAt = Date.parse(message.sentAt);
+      if (!Number.isFinite(sentAt)) return;
+      const hourStart = new Date(Math.floor(sentAt / hourMs) * hourMs).toISOString();
+      const key = `${hourStart}|${sourceSession.id}`;
+      const existing = await this.#store.get<{
+        hourStart: string;
+        sessionId: string;
+        platform: 'qq' | 'discord';
+        messages: number;
+        senderHashes: string[];
+      }>('message-activity', key);
+      let messages = existing?.value.messages ?? 0;
+      const senderHashes = new Set(existing?.value.senderHashes ?? []);
+
+      // The first bucket written after an upgrade includes messages already kept
+      // in history for this same hour, so enabling analytics does not split a bucket.
+      if (!existing) {
+        const history = await this.#store.list<{ sessionId: string; message: MessageEnvelope }>(
+          'message-history',
+        );
+        for (const entry of history) {
+          const parsed = messageEnvelopeSchema.safeParse(entry.value.message);
+          if (
+            entry.value.sessionId !== sourceSession.id ||
+            !parsed.success ||
+            parsed.data.fromSelf ||
+            Math.floor(Date.parse(parsed.data.sentAt) / hourMs) * hourMs !==
+              Math.floor(sentAt / hourMs) * hourMs
+          ) {
+            continue;
+          }
+          messages += 1;
+          senderHashes.add(
+            createHash('sha256')
+              .update(`${parsed.data.source.platform}:${parsed.data.sender.id}`)
+              .digest('hex')
+              .slice(0, 24),
+          );
+        }
+      }
+
+      messages += 1;
+      senderHashes.add(
+        createHash('sha256')
+          .update(`${message.source.platform}:${message.sender.id}`)
+          .digest('hex')
+          .slice(0, 24),
+      );
+      await this.#store.set('message-activity', key, {
+        hourStart,
+        sessionId: sourceSession.id,
+        platform: sourceSession.platform,
+        messages,
+        senderHashes: [...senderHashes],
+      });
+    });
+    this.#messageActivityWriteQueue = operation.catch(() => undefined);
+    await operation;
   }
 
   async #log(traceId: string, level: LogLevel, event: string, details: unknown): Promise<void> {

@@ -87,12 +87,37 @@ export interface SessionCandidate {
 export interface NodeRuntime {
   nodeId: string;
   nodeType: 'qq' | 'discord';
+  name?: string;
   verificationStatus?: 'pending' | 'verified';
   configuredSessions?: ChatSession[];
   lastFrameKind?: string;
   lastSeenAt?: string;
   online?: boolean;
   revoked?: boolean;
+}
+
+export interface ActivityBucket {
+  start: string;
+  qqMessages: number;
+  discordMessages: number;
+  qqSenders: number;
+  discordSenders: number;
+}
+
+export interface ActivityOverview {
+  range: '24h' | '7d' | '30d';
+  unit: 'hour' | 'day';
+  buckets: ActivityBucket[];
+  totalMessages: number;
+  activeSenders: number;
+  peak: { start: string; messages: number } | null;
+  topSessions: Array<{
+    sessionId: string;
+    platform: 'qq' | 'discord';
+    name: string;
+    messages: number;
+    activeSenders: number;
+  }>;
 }
 
 export interface BlueprintNode {
