@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 更新 DisQord 代码、依赖并构建指定部署角色。
 #
-# 交互使用：
+# 自动识别或交互使用：
 #   bash update.sh
 #
 # 服务器使用：
@@ -22,7 +22,7 @@ usage() {
   cat <<'EOF'
 用法：bash update.sh [目标] [选项]
 
-目标（不指定目标时进入交互菜单）：
+目标（不指定目标时先根据同级 *.env 自动识别，未识别到时进入交互菜单）：
   central       更新并构建中央服务端 + 中央 Web
   qq            更新并构建 QQ 节点 + 节点 Web
   discord       更新并构建 Discord 节点 + 节点 Web
@@ -37,7 +37,7 @@ usage() {
   -h, --help    显示帮助
 
 示例：
-  bash update.sh                       # 交互选择部署角色
+  bash update.sh                       # 根据 central.env / qq.env / discord.env 自动选择
   bash update.sh central --yes         # 更新中央服务器
   bash update.sh qq --yes              # 更新并启动/重启 QQ 节点
   bash update.sh all --yes --verify    # 更新全部并验证
@@ -84,6 +84,14 @@ should_restart=true
 should_verify=false
 assume_yes=false
 selection_confirmed=false
+auto_detected_selection=false
+declare -a detected_env_files=()
+
+clear_selection() {
+  central_selected=false
+  qq_selected=false
+  discord_selected=false
+}
 
 select_all() {
   central_selected=true
@@ -99,6 +107,26 @@ select_target() {
     all) select_all ;;
     *) die "未知目标：$1。可用目标为 central、qq、discord、all。" ;;
   esac
+}
+
+detect_targets_from_env() {
+  clear_selection
+  detected_env_files=()
+
+  if [[ -f "$project_root/central.env" ]]; then
+    central_selected=true
+    detected_env_files+=('central.env')
+  fi
+  if [[ -f "$project_root/qq.env" ]]; then
+    qq_selected=true
+    detected_env_files+=('qq.env')
+  fi
+  if [[ -f "$project_root/discord.env" ]]; then
+    discord_selected=true
+    detected_env_files+=('discord.env')
+  fi
+
+  ((${#detected_env_files[@]} > 0))
 }
 
 parse_arguments() {
@@ -132,8 +160,15 @@ parse_arguments() {
   done
 
   if [[ "$has_target" == false ]]; then
-    [[ -t 0 && -t 1 ]] || die "非交互运行时必须指定目标，例如：bash update.sh central --yes。"
-    choose_interactively
+    if detect_targets_from_env; then
+      auto_detected_selection=true
+      if [[ ! -t 0 || ! -t 1 ]]; then
+        [[ "$assume_yes" == true ]] || die '非交互自动识别需要加 --yes；也可以显式指定目标。'
+      fi
+    else
+      [[ -t 0 && -t 1 ]] || die "未检测到部署环境文件；非交互运行时必须指定目标，例如：bash update.sh central --yes。"
+      choose_interactively
+    fi
   fi
 
   [[ "$central_selected" == true || "$qq_selected" == true || "$discord_selected" == true ]] || die "至少选择一个更新目标。"
@@ -213,7 +248,15 @@ choose_interactively() {
 }
 
 show_selection() {
+  local env_file
+
   info "项目目录：$project_root"
+  if [[ "$auto_detected_selection" == true ]]; then
+    info '自动识别到同级环境文件：'
+    for env_file in "${detected_env_files[@]}"; do
+      printf '  - %s\n' "$env_file"
+    done
+  fi
   info '更新目标：'
   [[ "$central_selected" == true ]] && printf '  - 中央端（中央服务端 + 中央 Web）\n'
   [[ "$qq_selected" == true ]] && printf '  - QQ 节点（QQ Node + 节点 Web）\n'
@@ -224,11 +267,49 @@ show_selection() {
   [[ "$should_verify" == true ]] && info '验证：执行完整 typecheck 和 test' || info '验证：跳过完整 typecheck/test'
 }
 
+countdown_auto_update() {
+  local remaining key _discarded_key
+
+  printf '\n'
+  for ((remaining = 5; remaining > 0; remaining--)); do
+    printf '\r[update] %d 秒后自动开始更新；按任意键进入手动选择，按 q 取消。\033[K' "$remaining"
+    key=''
+    if IFS= read -r -s -n 1 -t 1 key; then
+      printf '\n'
+      if [[ "$key" == $'\x1b' ]]; then
+        # 方向键会继续发送两个字符；进入菜单前先丢弃，避免残留按键触发“全选”。
+        IFS= read -r -s -n 2 -t 0.05 _discarded_key || true
+      fi
+      case "$key" in
+        q|Q)
+          info '已取消更新。'
+          exit 0
+          ;;
+        *)
+          auto_detected_selection=false
+          detected_env_files=()
+          clear_selection
+          choose_interactively
+          show_selection
+          return
+          ;;
+      esac
+    fi
+  done
+  printf '\r[update] 倒计时结束，开始更新。\033[K\n'
+  selection_confirmed=true
+}
+
 confirm_plan() {
   local answer
 
   [[ "$assume_yes" == true || "$selection_confirmed" == true ]] && return
   [[ -t 0 && -t 1 ]] || die '非交互运行需要加 --yes。'
+
+  if [[ "$auto_detected_selection" == true ]]; then
+    countdown_auto_update
+    return
+  fi
 
   read -r -p '确认执行？[y/N] ' answer
   case "$answer" in
