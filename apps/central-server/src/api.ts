@@ -732,18 +732,26 @@ export function createCentralApplication(options: CentralApplicationOptions) {
 
   app.get('/api/chat-sessions', { preHandler: requireAdmin }, async () => {
     const entries = await options.store.list<ChatSession>('chat-session');
-    return await Promise.all(
-      entries.map(async (entry) => {
-        if (entry.value.status !== 'pending') return entry.value;
-        const verification = await options.store.get<VerificationRecord>('verification', entry.key);
-        return {
-          ...entry.value,
-          ...(verification?.value.expiresAt
-            ? { verificationExpiresAt: verification.value.expiresAt }
-            : {}),
-        };
-      }),
-    );
+    const sessions: Array<ChatSession & { verificationExpiresAt?: string }> = [];
+    for (const entry of entries) {
+      if (entry.value.status !== 'pending') {
+        sessions.push(entry.value);
+        continue;
+      }
+      const verification = await options.store.get<VerificationRecord>('verification', entry.key);
+      if (verification && Date.parse(verification.value.expiresAt) <= Date.now()) {
+        await options.store.delete('chat-session', entry.key);
+        await options.store.delete('verification', entry.key);
+        continue;
+      }
+      sessions.push({
+        ...entry.value,
+        ...(verification?.value.expiresAt
+          ? { verificationExpiresAt: verification.value.expiresAt }
+          : {}),
+      });
+    }
+    return sessions;
   });
 
   app.get('/api/chat-sessions/candidates', { preHandler: requireAdmin }, async () => {

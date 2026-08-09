@@ -374,6 +374,41 @@ describe('central control-plane API', () => {
     await central.app.close();
   });
 
+  it('removes pending chat sessions after their verification code expires', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    await central.store.set('chat-session', id, {
+      id,
+      nodeId: randomUUID(),
+      platform: 'discord',
+      externalId: '123456',
+      spaceId: '654321',
+      displayName: '过期频道',
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await central.store.set('verification', id, {
+      digest: 'expired-digest',
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      sentAt: new Date(Date.now() - 11 * 60_000).toISOString(),
+      attemptCount: 0,
+    });
+
+    const listed = await central.app.inject({
+      method: 'GET',
+      url: '/api/chat-sessions',
+      cookies: { disqord_session: token },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual([]);
+    expect(await central.store.get('chat-session', id)).toBeUndefined();
+    expect(await central.store.get('verification', id)).toBeUndefined();
+    await central.app.close();
+  });
+
   it('clears all manual review records', async () => {
     const central = createTestApplication();
     const token = await configureAdministrator(central);

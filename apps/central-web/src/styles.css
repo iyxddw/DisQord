@@ -921,6 +921,17 @@ h1 {
   border: 1px solid var(--line);
   background: #14171a;
 }
+.instance-verify-box {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto auto;
+}
+.instance-verify-box .verify-title {
+  grid-column: 1 / -1;
+}
+.instance-verify-box input {
+  width: auto;
+  min-width: 0;
+}
 .instance-binding-form {
   gap: 11px;
 }
@@ -1443,7 +1454,8 @@ h1 {
   font-size: 11px;
 }
 .verify-box .verify-submit,
-.verify-box .verify-resend {
+.verify-box .verify-resend,
+.verify-box .verify-cancel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1454,6 +1466,13 @@ h1 {
   color: #c3c8cc;
   background: #1b1e21;
   border-color: #424950;
+  font-weight: 500;
+}
+.verify-box .verify-cancel {
+  min-width: 58px;
+  color: #c9a6ad;
+  border-color: #51383e;
+  background: #21191c;
   font-weight: 500;
 }
 .verify-box button:hover:not(:disabled) {
@@ -3180,7 +3199,7 @@ code {
 .mobile-flow-route-divider {
   height: 1px;
   margin: 24px 0;
-  background: #41474e;
+  background: #f2f3f4;
 }
 .mobile-flow-step {
   display: grid;
@@ -4014,10 +4033,15 @@ input[type='checkbox']:disabled {
   }
   .instance-verify-box {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .instance-verify-box .verify-title,
   .instance-verify-box input {
     grid-column: 1 / -1;
+  }
+  .instance-verify-box button {
+    min-width: 0;
+    padding-inline: 5px;
+    font-size: 11px;
   }
 }

@@ -1397,11 +1397,19 @@ function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
       <div className="mobile-flow-path">
         {pathViews.map((path, routeIndex) => (
           <div className="mobile-flow-route" key={path.rootId}>
-            {routeIndex > 0 && <div className="mobile-flow-route-divider" aria-hidden="true" />}
             {path.nodes.map((node, index) => {
               const branches = outgoing.get(node.id) ?? [];
+              const nextNode = path.nodes[index + 1];
+              const nodeIsEntry =
+                node.data.kind === 'input' || node.data.kind === 'simulated-input';
+              const nextNodeIsEntry =
+                nextNode?.data.kind === 'input' || nextNode?.data.kind === 'simulated-input';
+              const isFirstNode = routeIndex === 0 && index === 0;
               return (
                 <div className="mobile-flow-step" key={node.id}>
+                  {nodeIsEntry && !isFirstNode && (
+                    <div className="mobile-flow-route-divider" aria-hidden="true" />
+                  )}
                   <MobileFlowCard node={node} allNodes={nodes} outgoing={branches} />
                   {branches.length > 1 && (
                     <div className="mobile-branch-picker">
@@ -1421,7 +1429,7 @@ function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
                       </div>
                     </div>
                   )}
-                  {index < path.nodes.length - 1 && (
+                  {nextNode && !nextNodeIsEntry && (
                     <div className="mobile-flow-connector" aria-hidden="true">
                       ↓
                     </div>
@@ -2659,11 +2667,71 @@ function Nodes() {
   const [editingNodeId, setEditingNodeId] = useState('');
   const [nodeName, setNodeName] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const cancellingSessions = useRef(new Set<string>());
+
+  const cancelPendingSession = useCallback(
+    async (nodeId: string, session: ChatSession, reason: 'expired' | 'manual') => {
+      if (cancellingSessions.current.has(session.id)) return;
+      cancellingSessions.current.add(session.id);
+      sessions.setData((current) => current.filter((item) => item.id !== session.id));
+      setVerificationCodes((current) => {
+        const next = { ...current };
+        delete next[session.id];
+        return next;
+      });
+      setSending((current) => {
+        const next = { ...current };
+        delete next[session.id];
+        return next;
+      });
+      setVerifying((current) => {
+        const next = { ...current };
+        delete next[session.id];
+        return next;
+      });
+      setNotices((current) => {
+        const next = { ...current };
+        delete next[nodeId];
+        return next;
+      });
+      try {
+        await apiRetry(`/chat-sessions/${session.id}`, { method: 'DELETE' }, { attempts: 3 });
+        if (reason === 'manual') {
+          setNotices((current) => ({ ...current, [nodeId]: '已取消本次会话绑定。' }));
+        }
+      } catch (cause) {
+        if (reason === 'manual') {
+          sessions.setData((current) =>
+            current.some((item) => item.id === session.id) ? current : [...current, session],
+          );
+          setNotices((current) => ({
+            ...current,
+            [nodeId]: cause instanceof Error ? cause.message : '取消绑定失败',
+          }));
+        }
+      } finally {
+        cancellingSessions.current.delete(session.id);
+      }
+    },
+    [sessions.setData],
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    for (const session of sessions.data) {
+      if (
+        session.status === 'pending' &&
+        session.verificationExpiresAt &&
+        Date.parse(session.verificationExpiresAt) <= now
+      ) {
+        void cancelPendingSession(session.nodeId, session, 'expired');
+      }
+    }
+  }, [cancelPendingSession, now, sessions.data]);
 
   const saveNodeName = async (node: NodeRuntime) => {
     const nextName = nodeName.trim();
@@ -2948,6 +3016,13 @@ function Nodes() {
                       >
                         {sending[session.id] && <LoaderCircle className="spin" size={14} />}
                         {sending[session.id] ? '发送中' : '重发验证码'}
+                      </button>
+                      <button
+                        className="verify-cancel"
+                        disabled={Boolean(sending[session.id]) || Boolean(verifying[session.id])}
+                        onClick={() => void cancelPendingSession(node.nodeId, session, 'manual')}
+                      >
+                        取消
                       </button>
                     </div>
                   ))}
