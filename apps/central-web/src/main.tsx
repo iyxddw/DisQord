@@ -1068,6 +1068,40 @@ const FLOW_ACTIVITY_POPUP_TTL_MS = 5_500;
 const FLOW_ACTIVITY_COALESCE_MS = 80;
 const FLOW_ACTIVITY_NOTE_LIMIT = 4;
 
+function useReassuringProgress(active: boolean): number {
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setProgress(0);
+      return;
+    }
+
+    let timer: number | undefined;
+    setProgress(6);
+    const scheduleStep = () => {
+      timer = window.setTimeout(
+        () => {
+          setProgress((current) => {
+            const remaining = 92 - current;
+            if (remaining <= 0) return current;
+            const step = Math.max(1, Math.round(remaining * (0.08 + Math.random() * 0.12)));
+            return Math.min(92, current + step);
+          });
+          scheduleStep();
+        },
+        650 + Math.random() * 1_200,
+      );
+    };
+    scheduleStep();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [active]);
+
+  return progress;
+}
+
 function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
   const { deleteElements, updateNodeData } = useReactFlow();
   const [testText, setTestText] = useState('');
@@ -1081,10 +1115,11 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
     updateNodeData(id, patch);
     data.onDraftChange?.();
   };
+  const reassuringProgress = useReassuringProgress(data.simulation?.state === 'active');
   const progressStyle =
     data.simulation?.state === 'active'
       ? ({
-          '--simulation-progress': `${Math.max(0, Math.min(100, data.simulation.progress ?? 0))}%`,
+          '--simulation-progress': `${reassuringProgress}%`,
         } as CSSProperties)
       : undefined;
   return (
@@ -1112,21 +1147,22 @@ function FlowNode({ id, data }: NodeProps<Node<FlowData>>) {
           </div>
         </div>
       )}
-      {(data.simulation?.message || data.simulation?.messages?.length) && (
-        <div className="flow-simulation-stack" role="status">
-          {(data.simulation?.messages ?? []).map((message) => (
-            <div className={`flow-simulation-note ${message.kind}`} key={message.id}>
-              {message.text}
-            </div>
-          ))}
-          {data.simulation.message &&
-            data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
-              <div className={`flow-simulation-note ${data.simulation.state}`}>
-                {data.simulation.message}
+      {data.simulation &&
+        (Boolean(data.simulation.message) || (data.simulation.messages?.length ?? 0) > 0) && (
+          <div className="flow-simulation-stack" role="status">
+            {(data.simulation?.messages ?? []).map((message) => (
+              <div className={`flow-simulation-note ${message.kind}`} key={message.id}>
+                {message.text}
               </div>
-            )}
-        </div>
-      )}
+            ))}
+            {data.simulation.message &&
+              data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
+                <div className={`flow-simulation-note ${data.simulation.state}`}>
+                  {data.simulation.message}
+                </div>
+              )}
+          </div>
+        )}
       {hasInput && <Handle type="target" position={Position.Left} />}
       {hasOutput && <Handle type="source" position={Position.Right} />}
       {data.kind === 'moderation' && (
@@ -1429,8 +1465,9 @@ function MobileFlowCard({
   outgoing: Edge[];
 }) {
   const { data } = node;
+  const reassuringProgress = useReassuringProgress(data.simulation?.state === 'active');
   const cardStyle = {
-    '--simulation-progress': `${Math.max(0, Math.min(100, data.simulation?.state === 'active' ? (data.simulation.progress ?? 0) : 0))}%`,
+    '--simulation-progress': `${reassuringProgress}%`,
   } as CSSProperties;
   return (
     <article
@@ -1441,21 +1478,22 @@ function MobileFlowCard({
         <span className="mobile-flow-kind">{flowKindLabel(data.kind)}</span>
       </div>
       <strong>{data.label}</strong>
-      {(data.simulation?.message || data.simulation?.messages?.length) && (
-        <div className="mobile-flow-activity-stack">
-          {(data.simulation?.messages ?? []).map((message) => (
-            <div className="mobile-flow-activity" key={message.id}>
-              <p>{message.text}</p>
-            </div>
-          ))}
-          {data.simulation.message &&
-            data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
-              <div className="mobile-flow-activity">
-                <p>{data.simulation.message}</p>
+      {data.simulation &&
+        (Boolean(data.simulation.message) || (data.simulation.messages?.length ?? 0) > 0) && (
+          <div className="mobile-flow-activity-stack">
+            {(data.simulation?.messages ?? []).map((message) => (
+              <div className="mobile-flow-activity" key={message.id}>
+                <p>{message.text}</p>
               </div>
-            )}
-        </div>
-      )}
+            ))}
+            {data.simulation.message &&
+              data.simulation.activeMessageId !== data.simulation.messages?.at(-1)?.id && (
+                <div className="mobile-flow-activity">
+                  <p>{data.simulation.message}</p>
+                </div>
+              )}
+          </div>
+        )}
       {data.kind === 'simulated-input' && <div className="mobile-flow-output">模拟输入</div>}
       {data.kind === 'simulated-output' &&
         ((data.simulation?.outputs?.length ?? 0) > 0 || data.outputText) && (

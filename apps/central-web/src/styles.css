@@ -1842,7 +1842,7 @@ button.fit {
   background: #181b1f;
   box-shadow: none;
   transition:
-    --simulation-progress 180ms linear,
+    --simulation-progress 360ms ease-out,
     border-color 140ms ease,
     background 140ms ease;
 }
@@ -1860,7 +1860,7 @@ button.fit {
   height: 3px;
   background: #f2f3f4;
   content: '';
-  transition: width 180ms linear;
+  transition: width 360ms ease-out;
   pointer-events: none;
 }
 .flow-node.done {
@@ -3125,7 +3125,7 @@ code {
   color: #d7dadd;
   background: #171a1d;
   transition:
-    --simulation-progress 180ms linear,
+    --simulation-progress 360ms ease-out,
     transform 120ms ease,
     border-color 140ms ease,
     background 140ms ease,
@@ -3145,7 +3145,7 @@ code {
   height: 3px;
   background: #f2f3f4;
   content: '';
-  transition: width 180ms linear;
+  transition: width 360ms ease-out;
   pointer-events: none;
 }
 .mobile-flow-card.done {
