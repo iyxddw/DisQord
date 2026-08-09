@@ -1504,10 +1504,50 @@ code {
 .provider-enabled input {
   width: auto;
 }
+.provider-purpose {
+  margin: 2px 0 4px;
+  padding: 13px 14px 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  border: 1px solid var(--line);
+}
+.provider-purpose legend {
+  padding: 0 6px;
+  color: #aeb4bb;
+  font-size: 11px;
+  font-weight: 700;
+}
+.provider-purpose label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #c5c9cd;
+  font-size: 12px;
+  cursor: pointer;
+}
+.provider-purpose input {
+  width: auto;
+}
+.provider-purpose > small {
+  width: 100%;
+  color: #747c84;
+  font-size: 10px;
+  line-height: 1.55;
+}
+.settings-notice {
+  padding: 10px 13px;
+  border: 1px solid #3b4249;
+  color: #b7bdc4;
+  background: #15181b;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .settings-section-panel {
   min-height: 360px;
 }
 .settings-savebar {
+  overflow: hidden;
   position: sticky;
   z-index: 7;
   bottom: 14px;
@@ -1521,10 +1561,60 @@ code {
   box-shadow: 0 8px 30px rgb(0 0 0 / 28%);
   backdrop-filter: blur(10px);
 }
+.settings-save-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38%;
+  height: 2px;
+  background: #d6dbe0;
+  animation: settings-save-progress 1.15s ease-in-out infinite;
+}
+@keyframes settings-save-progress {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(365%);
+  }
+}
 .settings-savebar span {
   color: #9299a1;
   font-size: 11px;
   line-height: 1.5;
+}
+.loading-progress {
+  padding: 10px 0 13px;
+  color: #858c94;
+  font-size: 11px;
+}
+.loading-progress > span {
+  display: block;
+  margin-bottom: 8px;
+}
+.loading-progress > div {
+  height: 2px;
+  overflow: hidden;
+  background: #24282d;
+}
+.loading-progress i {
+  width: 34%;
+  height: 100%;
+  display: block;
+  background: #aeb5bc;
+  animation: record-loading-progress 1.25s ease-in-out infinite;
+}
+@keyframes record-loading-progress {
+  0% {
+    transform: translateX(-105%);
+  }
+  55% {
+    width: 48%;
+  }
+  100% {
+    width: 34%;
+    transform: translateX(300%);
+  }
 }
 .theme-grid {
   display: grid;

@@ -67,8 +67,10 @@ export interface OpenAICompatibleClientOptions {
   readonly apiKey: string;
   readonly timeoutMs?: number;
   readonly maxRetries?: number;
+  readonly retryDelayMs?: number;
   /** Cap on completion output tokens; sent as `max_tokens` to prevent truncation. */
   readonly maxTokens?: number;
+  readonly responseFormatMode?: 'auto' | 'json-object' | 'json-schema';
   readonly fetchImplementation?: typeof fetch;
 }
 
@@ -92,7 +94,9 @@ export class OpenAICompatibleClient {
   readonly #apiKey: string;
   readonly #timeoutMs: number;
   readonly #maxRetries: number;
+  readonly #retryDelayMs: number;
   readonly #maxTokens: number | undefined;
+  readonly #responseFormatMode: 'auto' | 'json-object' | 'json-schema';
   readonly #fetch: typeof fetch;
 
   constructor(options: OpenAICompatibleClientOptions) {
@@ -100,7 +104,9 @@ export class OpenAICompatibleClient {
     this.#apiKey = options.apiKey;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#maxRetries = options.maxRetries ?? 2;
+    this.#retryDelayMs = options.retryDelayMs ?? 0;
     this.#maxTokens = options.maxTokens;
+    this.#responseFormatMode = options.responseFormatMode ?? 'auto';
     this.#fetch = options.fetchImplementation ?? fetch;
     if (!this.#baseUrl.startsWith('https://') && !this.#baseUrl.startsWith('http://127.0.0.1')) {
       throw new Error('LLM API must use HTTPS unless it is a local loopback service.');
@@ -148,6 +154,11 @@ export class OpenAICompatibleClient {
 
     let lastError: LlmRequestError | undefined;
     for (let attempt = 0; attempt <= this.#maxRetries; attempt += 1) {
+      if (attempt > 0 && this.#retryDelayMs > 0) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, Math.min(this.#retryDelayMs * 2 ** (attempt - 1), 30_000));
+        });
+      }
       try {
         const response = await this.#fetch(`${this.#baseUrl}/chat/completions`, {
           method: 'POST',
@@ -253,6 +264,17 @@ export class OpenAICompatibleClient {
   }
 
   #responseFormat(request: JsonCompletionRequest<z.ZodType>): Record<string, unknown> {
+    if (this.#responseFormatMode === 'json-object') return { type: 'json_object' };
+    if (this.#responseFormatMode === 'json-schema') {
+      return {
+        type: 'json_schema',
+        json_schema: {
+          name: request.schemaName,
+          strict: true,
+          schema: request.jsonSchema,
+        },
+      };
+    }
     // Google's OpenAI-compatible endpoint supports the structured-output form.
     // Using it prevents Gemini from appending prose after the JSON object.
     if (this.#baseUrl.includes('generativelanguage.googleapis.com')) {

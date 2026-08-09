@@ -87,6 +87,9 @@ const llmSettingsInputSchema = z.preprocess((candidate) => {
   const providerKeys = [
     'baseUrl',
     'apiKey',
+    'translationEnabled',
+    'moderationEnabled',
+    'imageModerationEnabled',
     'translationModel',
     'moderationModel',
     'imageModerationModel',
@@ -95,7 +98,11 @@ const llmSettingsInputSchema = z.preprocess((candidate) => {
     'maxImageBytes',
     'timeoutMs',
     'maxRetries',
+    'retryDelayMs',
     'maxTokens',
+    'translationTemperature',
+    'moderationTemperature',
+    'responseFormatMode',
   ] as const;
   const provider = Object.fromEntries(
     providerKeys.flatMap((key) => (value[key] === undefined ? [] : [[key, value[key]]])),

@@ -352,6 +352,15 @@ describe('blueprint message pipeline', () => {
     await setup.store.set('settings', 'llm', {
       providers: [
         {
+          id: 'moderation-only',
+          name: '仅审核模型',
+          enabled: true,
+          translationEnabled: false,
+          baseUrl: 'https://moderation-only.example.test/v1',
+          translationModel: 'unused-translate',
+          moderationModel: 'moderation-only',
+        },
+        {
           id: 'primary',
           name: '主模型',
           enabled: true,
@@ -369,6 +378,7 @@ describe('blueprint message pipeline', () => {
         },
       ],
     });
+    await secrets.set('llm-api-key:moderation-only', 'moderation-only-key');
     await secrets.set('llm-api-key:primary', 'primary-key');
     await secrets.set('llm-api-key:fallback', 'fallback-key');
     const request = vi.fn(async (input: string | URL | Request) => {
@@ -410,6 +420,9 @@ describe('blueprint message pipeline', () => {
       );
       expect(result).toMatchObject({ translatedText: 'Hello', model: 'fallback-translate' });
       expect(request).toHaveBeenCalledTimes(2);
+      expect(request.mock.calls.some(([input]) => String(input).includes('moderation-only'))).toBe(
+        false,
+      );
       expect(String(request.mock.calls[0]?.[0])).toContain('primary.example.test');
       expect(String(request.mock.calls[1]?.[0])).toContain('fallback.example.test');
     } finally {

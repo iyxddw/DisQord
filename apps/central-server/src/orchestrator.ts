@@ -2241,7 +2241,13 @@ export class CentralMessageProcessor implements MessageProcessor {
   ): Promise<TranslationResult> {
     const protectedText = protectCustomEmojiText(text, message.customEmojis);
     const failures: Error[] = [];
-    for (const { provider, client } of await this.#clients()) {
+    const connections = (await this.#clients()).filter(
+      ({ provider }) => provider.translationEnabled && Boolean(provider.translationModel.trim()),
+    );
+    if (!connections.length) {
+      throw new LlmProviderChainError('Translation', [new Error('没有启用翻译用途的模型配置。')]);
+    }
+    for (const { provider, client } of connections) {
       try {
         const result = await new LlmTranslationService(client).translate({
           text: protectedText.text,
@@ -2249,6 +2255,7 @@ export class CentralMessageProcessor implements MessageProcessor {
           model: provider.translationModel,
           prompt: { content: prompt, version: 1 },
           enableThinking,
+          temperature: provider.translationTemperature,
           ...(memoryMode
             ? {
                 recentMessages: recentMessages
@@ -2290,12 +2297,21 @@ export class CentralMessageProcessor implements MessageProcessor {
     const connections = await this.#clients();
     const failures: Error[] = [];
     if (!options?.imageReviewRequested) {
-      for (const { provider, client } of connections) {
+      const eligible = connections.filter(
+        ({ provider }) => provider.moderationEnabled && Boolean(provider.moderationModel.trim()),
+      );
+      if (!eligible.length) {
+        throw new LlmProviderChainError('Moderation', [
+          new Error('没有启用文本审核用途的模型配置。'),
+        ]);
+      }
+      for (const { provider, client } of eligible) {
         try {
           return await new LlmModerationService(client).moderate({
             text,
             model: provider.moderationModel,
             prompt: { content: prompt, version: 1 },
+            temperature: provider.moderationTemperature,
             ...(options?.enableThinking === undefined
               ? {}
               : { enableThinking: options.enableThinking }),
@@ -2315,7 +2331,9 @@ export class CentralMessageProcessor implements MessageProcessor {
     }
     const eligible = connections.filter(
       ({ provider }) =>
-        Boolean(provider.imageModerationModel.trim()) && imageUrls.length <= provider.maxImageCount,
+        provider.imageModerationEnabled &&
+        Boolean(provider.imageModerationModel.trim()) &&
+        imageUrls.length <= provider.maxImageCount,
     );
     if (!eligible.length) {
       throw new LlmProviderChainError('Image moderation', [
@@ -2350,6 +2368,7 @@ export class CentralMessageProcessor implements MessageProcessor {
           prompt: { content: prompt, version: 1 },
           images,
           imageDetail: provider.imageModerationDetail,
+          temperature: provider.moderationTemperature,
           ...(options?.enableThinking === undefined
             ? {}
             : { enableThinking: options.enableThinking }),
@@ -2537,6 +2556,8 @@ export class CentralMessageProcessor implements MessageProcessor {
             apiKey,
             timeoutMs: provider.timeoutMs,
             maxRetries: provider.maxRetries,
+            retryDelayMs: provider.retryDelayMs,
+            responseFormatMode: provider.responseFormatMode,
             ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens }),
           }),
         });

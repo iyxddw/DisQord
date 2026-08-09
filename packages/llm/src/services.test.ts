@@ -369,6 +369,38 @@ describe('LLM translation and moderation', () => {
     expect(uncappedBody.max_tokens).toBeUndefined();
   });
 
+  it('honors explicit structured-output mode and stage temperature', async () => {
+    const fetchImplementation = vi.fn(async () =>
+      jsonCompletion({
+        detectedLanguage: 'zh',
+        translatedText: 'Hello',
+        confidence: 0.99,
+      }),
+    );
+    const client = new OpenAICompatibleClient({
+      baseUrl: 'https://llm.example.test/v1',
+      apiKey: 'test-key',
+      responseFormatMode: 'json-schema',
+      fetchImplementation,
+    });
+    await new LlmTranslationService(client).translate({
+      text: '你好',
+      targetLanguage: 'en',
+      model: 'translation-model',
+      prompt: { content: '准确翻译。', version: 1 },
+      temperature: 0.2,
+    });
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]?.[1]?.body)) as {
+      temperature?: number;
+      response_format?: { type?: string; json_schema?: { strict?: boolean } };
+    };
+    expect(body.temperature).toBe(0.2);
+    expect(body.response_format).toMatchObject({
+      type: 'json_schema',
+      json_schema: { strict: true },
+    });
+  });
+
   it('instructs the model to preserve emoji tokens verbatim', async () => {
     const fetchImplementation = vi.fn(async () =>
       jsonCompletion({
@@ -414,6 +446,13 @@ describe('LLM translation and moderation', () => {
       moderationModel: 'moderate',
     });
     expect(withoutCap.providers[0]?.maxTokens).toBeUndefined();
+    expect(withoutCap.providers[0]).toMatchObject({
+      translationEnabled: true,
+      moderationEnabled: true,
+      imageModerationEnabled: true,
+      retryDelayMs: 0,
+      responseFormatMode: 'auto',
+    });
   });
 });
 

@@ -51,6 +51,7 @@ export interface TranslationRequest {
   readonly recentMessages?: readonly { sender: string; text: string }[];
   readonly repliedMessage?: { sender: string; text: string };
   readonly enableThinking?: boolean;
+  readonly temperature?: number;
 }
 
 export interface ModerationRequest {
@@ -60,6 +61,7 @@ export interface ModerationRequest {
   readonly images?: readonly string[];
   readonly imageDetail?: 'auto' | 'low' | 'high';
   readonly enableThinking?: boolean;
+  readonly temperature?: number;
 }
 
 export interface ViolationAssessment {
@@ -95,6 +97,7 @@ export class LlmTranslationService {
         repliedMessage: request.repliedMessage ?? null,
       },
       ...(request.enableThinking === undefined ? {} : { enableThinking: request.enableThinking }),
+      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     });
     return translationResultSchema.parse({
       ...result,
@@ -127,6 +130,7 @@ export class LlmModerationService {
         ? { images: request.images, imageDetail: request.imageDetail }
         : {}),
       ...(request.enableThinking === undefined ? {} : { enableThinking: request.enableThinking }),
+      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     });
     return {
       ...result,
@@ -139,9 +143,12 @@ export const llmProviderSettingsSchema = z.object({
   id: z.string().trim().min(1).max(128),
   name: z.string().trim().min(1).max(128),
   enabled: z.boolean().default(true),
+  translationEnabled: z.boolean().default(true),
+  moderationEnabled: z.boolean().default(true),
+  imageModerationEnabled: z.boolean().default(true),
   baseUrl: z.url(),
-  translationModel: z.string().trim().min(1).max(256),
-  moderationModel: z.string().trim().min(1).max(256),
+  translationModel: z.string().trim().max(256).default(''),
+  moderationModel: z.string().trim().max(256).default(''),
   imageModerationModel: z.string().trim().max(256).default(''),
   imageModerationDetail: z.enum(['auto', 'low', 'high']).default('auto'),
   maxImageCount: z.number().int().min(1).max(10).default(10),
@@ -153,7 +160,11 @@ export const llmProviderSettingsSchema = z.object({
     .default(10 * 1024 * 1024),
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
+  retryDelayMs: z.number().int().min(0).max(30_000).default(0),
   maxTokens: z.number().int().min(64).max(65_536).optional(),
+  translationTemperature: z.number().min(0).max(2).default(0),
+  moderationTemperature: z.number().min(0).max(2).default(0),
+  responseFormatMode: z.enum(['auto', 'json-object', 'json-schema']).default('auto'),
 });
 
 const normalizedLlmSettingsSchema = z.object({
@@ -185,6 +196,9 @@ export const llmSettingsSchema = z.preprocess((candidate) => {
   if (typeof value.baseUrl !== 'string') return value;
   const providerKeys = [
     'baseUrl',
+    'translationEnabled',
+    'moderationEnabled',
+    'imageModerationEnabled',
     'translationModel',
     'moderationModel',
     'imageModerationModel',
@@ -193,7 +207,11 @@ export const llmSettingsSchema = z.preprocess((candidate) => {
     'maxImageBytes',
     'timeoutMs',
     'maxRetries',
+    'retryDelayMs',
     'maxTokens',
+    'translationTemperature',
+    'moderationTemperature',
+    'responseFormatMode',
   ] as const;
   const provider = Object.fromEntries(
     providerKeys.flatMap((key) => (value[key] === undefined ? [] : [[key, value[key]]])),

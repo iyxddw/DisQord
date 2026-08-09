@@ -125,6 +125,7 @@ function useLoad<T>(path: string, fallback: T) {
   );
   useEffect(() => {
     let active = true;
+    if (!pageCache.has(path)) setLoading(true);
     void loadCached<T>(path).then(
       (value) => {
         if (!active) return;
@@ -2432,6 +2433,9 @@ interface LlmProviderForm {
   id: string;
   name: string;
   enabled: boolean;
+  translationEnabled: boolean;
+  moderationEnabled: boolean;
+  imageModerationEnabled: boolean;
   baseUrl: string;
   apiKey: string;
   apiKeyConfigured: boolean;
@@ -2443,7 +2447,11 @@ interface LlmProviderForm {
   maxImageBytes: number;
   timeoutMs: number;
   maxRetries: number;
+  retryDelayMs: number;
   maxTokens: number | '';
+  translationTemperature: number;
+  moderationTemperature: number;
+  responseFormatMode: 'auto' | 'json-object' | 'json-schema';
 }
 
 interface CardThemeView {
@@ -2477,6 +2485,9 @@ function createProvider(index = 0): LlmProviderForm {
         : `provider-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     name: `模型配置 ${index + 1}`,
     enabled: true,
+    translationEnabled: true,
+    moderationEnabled: true,
+    imageModerationEnabled: true,
     baseUrl: '',
     apiKey: '',
     apiKeyConfigured: false,
@@ -2488,7 +2499,11 @@ function createProvider(index = 0): LlmProviderForm {
     maxImageBytes: 10 * 1024 * 1024,
     timeoutMs: 30_000,
     maxRetries: 2,
+    retryDelayMs: 500,
     maxTokens: 2_048,
+    translationTemperature: 0,
+    moderationTemperature: 0,
+    responseFormatMode: 'auto',
   };
 }
 
@@ -2506,6 +2521,7 @@ function SettingsPage() {
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (!Object.keys(settings.data).length) return;
@@ -2537,8 +2553,19 @@ function SettingsPage() {
   );
 
   const selected = providers.find((provider) => provider.id === selectedProviderId) ?? providers[0];
+  const markDirty = () => {
+    setDirty(true);
+    setNotice('');
+  };
   const updateSelected = (patch: Partial<LlmProviderForm>) => {
     if (!selected) return;
+    if (
+      !Object.entries(patch).some(
+        ([key, value]) => selected[key as keyof LlmProviderForm] !== value,
+      )
+    )
+      return;
+    markDirty();
     setProviders((current) =>
       current.map((provider) =>
         provider.id === selected.id ? { ...provider, ...patch } : provider,
@@ -2547,6 +2574,14 @@ function SettingsPage() {
   };
   const moveSelected = (offset: -1 | 1) => {
     if (!selected) return;
+    const selectedIndex = providers.findIndex((provider) => provider.id === selected.id);
+    if (
+      selectedIndex < 0 ||
+      selectedIndex + offset < 0 ||
+      selectedIndex + offset >= providers.length
+    )
+      return;
+    markDirty();
     setProviders((current) => {
       const from = current.findIndex((provider) => provider.id === selected.id);
       const to = from + offset;
@@ -2560,6 +2595,7 @@ function SettingsPage() {
     const provider = createProvider(providers.length);
     setProviders((current) => [...current, provider]);
     setSelectedProviderId(provider.id);
+    markDirty();
   };
   const removeSelected = () => {
     if (!selected || providers.length <= 1) return;
@@ -2567,7 +2603,17 @@ function SettingsPage() {
     const next = providers.filter((provider) => provider.id !== selected.id);
     setProviders(next);
     setSelectedProviderId(next[Math.min(index, next.length - 1)]!.id);
+    markDirty();
   };
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [dirty]);
   const save = async () => {
     setSaving(true);
     setNotice('');
@@ -2582,6 +2628,9 @@ function SettingsPage() {
                 id: provider.id,
                 name: provider.name,
                 enabled: provider.enabled,
+                translationEnabled: provider.translationEnabled,
+                moderationEnabled: provider.moderationEnabled,
+                imageModerationEnabled: provider.imageModerationEnabled,
                 baseUrl: provider.baseUrl,
                 ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
                 translationModel: provider.translationModel,
@@ -2592,7 +2641,11 @@ function SettingsPage() {
                 maxImageBytes: provider.maxImageBytes,
                 timeoutMs: provider.timeoutMs,
                 maxRetries: provider.maxRetries,
+                retryDelayMs: provider.retryDelayMs,
                 ...(provider.maxTokens === '' ? {} : { maxTokens: provider.maxTokens }),
+                translationTemperature: provider.translationTemperature,
+                moderationTemperature: provider.moderationTemperature,
+                responseFormatMode: provider.responseFormatMode,
               })),
               concurrency,
               fastMode,
@@ -2616,6 +2669,7 @@ function SettingsPage() {
       cards.setData(savedCards);
       simulation.setData(savedSimulation);
       setNotice('全部设置已保存；模型会按列表顺序故障转移，API 密钥不会回传。');
+      setDirty(false);
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '保存失败');
     } finally {
@@ -2660,6 +2714,12 @@ function SettingsPage() {
           );
         })}
       </div>
+
+      {notice && (
+        <div className="settings-notice" role="status">
+          {notice}
+        </div>
+      )}
 
       {section === 'llm' && (
         <div className="settings-provider-layout">
@@ -2735,9 +2795,46 @@ function SettingsPage() {
                       checked={selected.enabled}
                       onChange={(event) => updateSelected({ enabled: event.target.checked })}
                     />
-                    参与故障转移
+                    启用此模型配置
                   </span>
+                  <small className="field-hint">关闭后不会用于任何任务，也不会进入备用队列。</small>
                 </label>
+                <fieldset className="wide provider-purpose">
+                  <legend>承担任务</legend>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selected.translationEnabled}
+                      onChange={(event) =>
+                        updateSelected({ translationEnabled: event.target.checked })
+                      }
+                    />
+                    翻译
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selected.moderationEnabled}
+                      onChange={(event) =>
+                        updateSelected({ moderationEnabled: event.target.checked })
+                      }
+                    />
+                    文本审核
+                  </label>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selected.imageModerationEnabled}
+                      onChange={(event) =>
+                        updateSelected({ imageModerationEnabled: event.target.checked })
+                      }
+                    />
+                    图片审核
+                  </label>
+                  <small>
+                    可以让便宜模型只翻译，让视觉模型只处理图片；每项都按左侧顺序独立故障转移。
+                  </small>
+                </fieldset>
                 <label className="wide">
                   API 基础地址
                   <input
@@ -2844,6 +2941,20 @@ function SettingsPage() {
                   <small className="field-hint">该项耗尽后才会切换下一配置。</small>
                 </label>
                 <label>
+                  重试退避（毫秒）
+                  <input
+                    type="number"
+                    min="0"
+                    max="30000"
+                    step="100"
+                    value={selected.retryDelayMs}
+                    onChange={(event) =>
+                      updateSelected({ retryDelayMs: Number(event.target.value) })
+                    }
+                  />
+                  <small className="field-hint">后续重试按该值指数递增，填 0 表示立即重试。</small>
+                </label>
+                <label>
                   最大输出 token
                   <input
                     type="number"
@@ -2857,6 +2968,55 @@ function SettingsPage() {
                       })
                     }
                   />
+                </label>
+                <label>
+                  翻译温度
+                  <input
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={selected.translationTemperature}
+                    onChange={(event) =>
+                      updateSelected({ translationTemperature: Number(event.target.value) })
+                    }
+                  />
+                  <small className="field-hint">
+                    建议 0；提高后措辞更多变，但 JSON 稳定性会降低。
+                  </small>
+                </label>
+                <label>
+                  审核温度
+                  <input
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    value={selected.moderationTemperature}
+                    onChange={(event) =>
+                      updateSelected({ moderationTemperature: Number(event.target.value) })
+                    }
+                  />
+                  <small className="field-hint">建议保持 0，让相同内容获得更稳定的判断。</small>
+                </label>
+                <label>
+                  结构化输出格式
+                  <select
+                    value={selected.responseFormatMode}
+                    onChange={(event) =>
+                      updateSelected({
+                        responseFormatMode: event.target
+                          .value as LlmProviderForm['responseFormatMode'],
+                      })
+                    }
+                  >
+                    <option value="auto">自动识别</option>
+                    <option value="json-object">JSON Object（兼容性高）</option>
+                    <option value="json-schema">JSON Schema（约束更强）</option>
+                  </select>
+                  <small className="field-hint">
+                    服务商报 response_format 错误时改成 JSON Object。
+                  </small>
                 </label>
               </div>
               <div className="safety-note">
@@ -2879,7 +3039,10 @@ function SettingsPage() {
                 min="1"
                 max="100"
                 value={concurrency}
-                onChange={(event) => setConcurrency(Number(event.target.value))}
+                onChange={(event) => {
+                  setConcurrency(Number(event.target.value));
+                  markDirty();
+                }}
               />
               <small className="field-hint">限制中央端同时处理的消息数。</small>
             </label>
@@ -2891,7 +3054,10 @@ function SettingsPage() {
                 max="60000"
                 step="100"
                 value={fastDeliveryIntervalMs}
-                onChange={(event) => setFastDeliveryIntervalMs(Number(event.target.value))}
+                onChange={(event) => {
+                  setFastDeliveryIntervalMs(Number(event.target.value));
+                  markDirty();
+                }}
               />
               <small className="field-hint">同一目标会话连续发送的最小间隔。</small>
             </label>
@@ -2900,7 +3066,10 @@ function SettingsPage() {
                 <input
                   type="checkbox"
                   checked={fastMode}
-                  onChange={(event) => setFastMode(event.target.checked)}
+                  onChange={(event) => {
+                    setFastMode(event.target.checked);
+                    markDirty();
+                  }}
                 />{' '}
                 疾速模式
               </span>
@@ -2923,7 +3092,11 @@ function SettingsPage() {
               <button
                 className={`theme-choice ${themeId === theme.id ? 'selected' : ''}`}
                 key={theme.id}
-                onClick={() => setThemeId(theme.id)}
+                onClick={() => {
+                  if (themeId === theme.id) return;
+                  setThemeId(theme.id);
+                  markDirty();
+                }}
                 style={
                   {
                     '--theme-a': theme.colors.backgroundStart,
@@ -2973,20 +3146,26 @@ function SettingsPage() {
                 max="10000"
                 step="100"
                 value={simulationDelayMs}
-                onChange={(event) => setSimulationDelayMs(Number(event.target.value))}
+                onChange={(event) => {
+                  setSimulationDelayMs(Number(event.target.value));
+                  markDirty();
+                }}
               />
             </label>
           </div>
         </section>
       )}
 
-      <div className="settings-savebar">
-        <span>{notice || '修改完成后统一保存；切换分栏不会丢失未保存内容。'}</span>
-        <button className="primary fit" disabled={saving} onClick={() => void save()}>
-          {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
-          {saving ? '保存中' : '保存全部设置'}
-        </button>
-      </div>
+      {dirty && (
+        <div className={`settings-savebar ${saving ? 'saving' : ''}`}>
+          {saving && <i className="settings-save-progress" aria-hidden="true" />}
+          <span>有尚未保存的修改；切换分栏不会丢失，离开页面前请保存。</span>
+          <button className="primary fit" disabled={saving} onClick={() => void save()}>
+            {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+            {saving ? '保存中' : '保存全部设置'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3047,10 +3226,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
       reviewRecords.setError(cause instanceof Error ? cause.message : '清除审核记录失败');
     }
   };
-  const refresh = () =>
-    void (kind === 'reviews'
-      ? reviewRecords.reload({ background: true })
-      : logs.reload({ background: true }));
+  const refresh = () => void (kind === 'reviews' ? reviewRecords.reload() : logs.reload());
   return (
     <div className="panel">
       <PanelTitle
@@ -3128,7 +3304,7 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
       />
       {records.error && <div className="error">{records.error}</div>}
       {(records.loading || (kind === 'logs' && logNodes.loading)) && (
-        <LoadingState text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
+        <LoadingProgress text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
       )}
       <div className="record-list">
         {visibleRecords.map((record, index) => (
@@ -3222,6 +3398,16 @@ function LoadingState({ text }: { text: string }) {
     <div className="loading-state" role="status" aria-live="polite">
       <LoaderCircle size={20} />
       <span>{text}</span>
+    </div>
+  );
+}
+function LoadingProgress({ text }: { text: string }) {
+  return (
+    <div className="loading-progress" role="status" aria-live="polite">
+      <span>{text}</span>
+      <div aria-hidden="true">
+        <i />
+      </div>
     </div>
   );
 }
