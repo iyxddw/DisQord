@@ -53,6 +53,15 @@ interface NodeLogPage {
 }
 
 type NodeSection = 'overview' | 'diagnostics' | 'logs' | 'access';
+type NodeLogView = 'tasks' | 'events';
+
+interface NodeLogTaskGroup {
+  id: string;
+  kind: 'upload' | 'delivery' | 'batch';
+  records: NodeLogRecord[];
+  preview: string;
+  createdAt: string;
+}
 
 function App() {
   const [status, setStatus] = useState<Status>();
@@ -68,6 +77,7 @@ function App() {
     totalPages: 1,
   });
   const [logLevel, setLogLevel] = useState('all');
+  const [logView, setLogView] = useState<NodeLogView>('tasks');
   const [logSearch, setLogSearch] = useState('');
   const [logPage, setLogPage] = useState(1);
   const [logError, setLogError] = useState('');
@@ -106,8 +116,8 @@ function App() {
       if (!background) setLogsLoading(true);
       try {
         const query = new URLSearchParams({
-          page: String(logPage),
-          pageSize: '50',
+          page: String(logView === 'tasks' ? 1 : logPage),
+          pageSize: logView === 'tasks' ? '200' : '50',
           level: logLevel,
           search: logSearch,
         });
@@ -128,7 +138,7 @@ function App() {
     if (!logsLive) return;
     const timer = setInterval(() => void loadLogs(true), 5000);
     return () => clearInterval(timer);
-  }, [logLevel, logPage, logSearch, logsLive, logsReloadKey, status?.configured, token]);
+  }, [logLevel, logPage, logSearch, logView, logsLive, logsReloadKey, status?.configured, token]);
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -165,6 +175,7 @@ function App() {
 
   const nodeName = status?.program === 'discord-node' ? 'Discord 消息节点' : 'QQ 消息节点';
   const nodeKind = status?.program === 'discord-node' ? 'Discord Node' : 'QQ / NapCat Node';
+  const logTaskGroups = groupNodeLogTasks(logs.items);
 
   if (!status && error === '需要节点面板令牌') {
     return <NodeAccessGuide token={token} onTokenChange={saveToken} />;
@@ -305,7 +316,11 @@ function App() {
           <section className="panel node-logs" id="logs">
             <PanelHead
               title="客户端日志"
-              subtitle={`本机 JSONL 日志：${status?.logPath ?? '等待启动'}`}
+              subtitle={
+                logView === 'tasks'
+                  ? '把同一条消息的上传或发送步骤整理在一起；需要查看完整字段时可切换到逐条记录'
+                  : `按时间顺序显示本机记录的每一步操作：${status?.logPath ?? '等待启动'}`
+              }
               action={
                 <div className="log-controls">
                   <input
@@ -340,7 +355,27 @@ function App() {
               }
             />
             <div className="node-log-viewbar">
-              <span>原始事件</span>
+              <div className="node-log-view-switch" aria-label="客户端日志显示方式">
+                <button
+                  className={logView === 'tasks' ? 'active' : ''}
+                  onClick={() => {
+                    setLogView('tasks');
+                    setLogPage(1);
+                  }}
+                >
+                  消息任务
+                </button>
+                <button
+                  className={logView === 'events' ? 'active' : ''}
+                  onClick={() => {
+                    setLogView('events');
+                    setLogPage(1);
+                  }}
+                >
+                  逐条记录
+                </button>
+              </div>
+              {logView === 'tasks' && <span>根据最近 200 条本机记录整理</span>}
               <button
                 className={`live-toggle ${logsLive ? 'active' : ''}`}
                 onClick={() => setLogsLive((current) => !current)}
@@ -351,31 +386,42 @@ function App() {
             </div>
             {logError && <div className="alert compact">{logError}</div>}
             {logsLoading && <LoadingProgress text="正在读取客户端日志" />}
-            <div className="node-log-list">
-              {logs.items.map((record, index) => (
-                <details
-                  className={`raw-log-record ${record.level}`}
-                  key={`${record.createdAt}-${index}`}
-                >
-                  <summary>
-                    <span className={`log-level ${record.level}`}>
-                      {record.level.toUpperCase()}
-                    </span>
-                    <strong>{translateLogEvent(record.event)}</strong>
-                    <span className="log-message-preview">{nodeLogMessagePreview(record)}</span>
-                    <time>
-                      {new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}
-                    </time>
-                    <ChevronRight size={14} />
-                  </summary>
-                  <pre>{JSON.stringify(record, null, 2)}</pre>
-                </details>
-              ))}
-              {!logs.items.length && !logError && !logsLoading && (
-                <p className="empty">暂无匹配日志</p>
-              )}
-            </div>
-            {logs.totalPages > 1 && (
+            {logView === 'tasks' ? (
+              <div className="node-task-list">
+                {logTaskGroups.map((group) => (
+                  <NodeLogTask key={group.id} group={group} />
+                ))}
+                {!logTaskGroups.length && !logError && !logsLoading && (
+                  <p className="empty">最近的记录中没有消息任务</p>
+                )}
+              </div>
+            ) : (
+              <div className="node-log-list">
+                {logs.items.map((record, index) => (
+                  <details
+                    className={`raw-log-record ${record.level}`}
+                    key={`${record.createdAt}-${index}`}
+                  >
+                    <summary>
+                      <span className={`log-level ${record.level}`}>
+                        {logLevelLabel(record.level)}
+                      </span>
+                      <strong>{translateLogEvent(record.event)}</strong>
+                      <span className="log-message-preview">{nodeLogMessagePreview(record)}</span>
+                      <time>
+                        {new Date(record.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                      </time>
+                      <ChevronRight size={14} />
+                    </summary>
+                    <pre>{JSON.stringify(record, null, 2)}</pre>
+                  </details>
+                ))}
+                {!logs.items.length && !logError && !logsLoading && (
+                  <p className="empty">没有符合条件的记录</p>
+                )}
+              </div>
+            )}
+            {logView === 'events' && logs.totalPages > 1 && (
               <div className="node-log-pagination">
                 <span>
                   第 {logs.page} / {logs.totalPages} 页 · 共 {logs.total} 条
@@ -417,6 +463,130 @@ function App() {
       </main>
     </div>
   );
+}
+
+function NodeLogTask({ group }: { group: NodeLogTaskGroup }) {
+  const state = nodeLogTaskState(group);
+  const title = {
+    upload: '把消息上传到中央服务',
+    delivery: '把消息发送到目标会话',
+    batch: '处理一批消息',
+  }[group.kind];
+  return (
+    <details className={`node-task-card ${state.id}`}>
+      <summary>
+        <span className="node-task-state">
+          {state.id === 'error' || state.id === 'warn' ? (
+            <CircleAlert size={16} />
+          ) : (
+            <CheckCircle2 size={16} />
+          )}
+        </span>
+        <span className="node-task-primary">
+          <span>
+            <strong>{title}</strong>
+            <b>{state.label}</b>
+          </span>
+          <small>
+            {group.preview} · {group.records.length} 个步骤
+          </small>
+        </span>
+        <time>{new Date(group.createdAt).toLocaleString('zh-CN', { hour12: false })}</time>
+        <ChevronRight size={15} />
+      </summary>
+      <div className="node-task-steps">
+        {group.records.map((record, index) => (
+          <div className={record.level} key={`${record.createdAt}:${record.event}:${index}`}>
+            <i />
+            <time>{new Date(record.createdAt).toLocaleTimeString('zh-CN', { hour12: false })}</time>
+            <strong>{translateLogEvent(record.event)}</strong>
+            {(record.level === 'warn' || record.level === 'error') && (
+              <span className={`log-level ${record.level}`}>{logLevelLabel(record.level)}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function groupNodeLogTasks(records: NodeLogRecord[]): NodeLogTaskGroup[] {
+  const groups = new Map<string, NodeLogTaskGroup>();
+  for (const record of records) {
+    for (const { id, kind } of nodeLogTaskKeys(record)) {
+      const existing = groups.get(id);
+      if (existing) {
+        existing.records.push(record);
+        if (record.createdAt > existing.createdAt) existing.createdAt = record.createdAt;
+        if (existing.preview === '—') {
+          const preview = nodeLogMessagePreview(record);
+          if (preview !== '—') existing.preview = preview;
+        }
+        continue;
+      }
+      groups.set(id, {
+        id,
+        kind,
+        records: [record],
+        preview: nodeLogMessagePreview(record),
+        createdAt: record.createdAt,
+      });
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      records: group.records.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    }))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function nodeLogTaskKeys(
+  record: NodeLogRecord,
+): Array<{ id: string; kind: NodeLogTaskGroup['kind'] }> {
+  const details = record.details ?? {};
+  if (typeof details.traceId === 'string' && details.traceId) {
+    return [{ id: `trace:${details.traceId}`, kind: 'delivery' }];
+  }
+  if (typeof details.taskId === 'string' && details.taskId) {
+    return [{ id: `delivery:${details.taskId}`, kind: 'delivery' }];
+  }
+  if (typeof details.eventId === 'string' && details.eventId) {
+    return [{ id: `upload:${details.eventId}`, kind: 'upload' }];
+  }
+  if (Array.isArray(details.eventIds)) {
+    const eventIds = details.eventIds.filter(
+      (eventId): eventId is string => typeof eventId === 'string' && Boolean(eventId),
+    );
+    if (eventIds.length) {
+      return eventIds.map((eventId) => ({ id: `upload:${eventId}`, kind: 'upload' }));
+    }
+  }
+  if (typeof details.batchId === 'string' && details.batchId) {
+    return [{ id: `batch:${details.batchId}`, kind: 'batch' }];
+  }
+  return [];
+}
+
+function nodeLogTaskState(group: NodeLogTaskGroup): {
+  id: 'success' | 'running' | 'warn' | 'error';
+  label: string;
+} {
+  const events = new Set(group.records.map((record) => record.event));
+  const completed = [
+    'message_upload_acknowledged',
+    'message_upload_batch_acknowledged',
+    'delivery_batch_queued',
+    'delivery_platform_confirmed',
+    'delivery_acknowledged_by_central',
+  ].some((event) => events.has(event));
+  if (group.records.some((record) => record.level === 'error')) {
+    return completed ? { id: 'warn', label: '出错后仍然完成' } : { id: 'error', label: '没有完成' };
+  }
+  if (group.records.some((record) => record.level === 'warn')) {
+    return completed ? { id: 'warn', label: '重试后完成' } : { id: 'warn', label: '等待重试' };
+  }
+  return completed ? { id: 'success', label: '已经完成' } : { id: 'running', label: '正在处理' };
 }
 
 function NodeAccessGuide({
@@ -700,48 +870,63 @@ function compactMessagePreview(text: string | undefined, hasImage: boolean): str
 }
 
 const logEventLabels: Record<string, string> = {
-  runtime_starting: '节点启动',
-  runtime_stopped: '节点已停止',
-  runtime_retrying: '节点重试连接',
-  central_connected: '已连接中央服务',
-  pairing_started: '开始配对',
-  pairing_completed: '配对完成',
-  runtime_settings_applied: '运行设置已同步',
-  session_candidates_ready: '会话列表已更新',
-  verification_requested: '收到验证请求',
-  verification_sent: '验证码已发送',
-  message_queued: '消息已加入队列',
-  message_upload_attempt_started: '开始上传消息',
-  message_upload_acknowledged: '消息上传已确认',
-  message_upload_batch_acknowledged: '批量消息上传已确认',
-  message_upload_batch_accepted: '批量消息已持久化，后台处理中',
-  message_upload_batch_processing: '批量消息后台处理中',
-  message_upload_batch_completed: '批量消息后台处理完成',
-  message_upload_batch_retry_scheduled: '批量消息将自动重试',
-  message_upload_batch_retry_exhausted: '批量消息重试次数已用尽',
-  message_upload_batch_deduplicated: '批量消息已去重',
-  message_upload_batch_processed: '批量消息处理完成',
-  message_upload_batch_deliveries_queued: '批量发送任务已加入队列',
-  message_upload_batch_failed: '批量消息处理失败',
-  message_upload_batch_window_scheduled: '批量上传等待窗口已安排',
-  message_upload_retry_scheduled: '消息上传将重试',
-  message_upload_dead_letter: '消息上传进入死信队列',
-  delivery_queued: '发送任务已加入队列',
-  delivery_batch_queued: '批量发送任务已加入队列',
-  delivery_batch_item_failed: '批量发送中的消息失败',
-  delivery_interval_scheduled: '已安排下一条消息的发送间隔',
-  delivery_attempt_started: '开始发送消息',
-  delivery_platform_confirmed: '平台确认发送成功',
-  delivery_acknowledged_by_central: '中央服务已确认发送',
-  delivery_retry_scheduled: '发送失败，将重试',
-  delivery_dead_letter: '发送进入死信队列',
-  delivery_recovery_failed: '恢复发送任务失败',
-  delivery_failure_report_failed: '上报发送失败失败',
-  node_logs_sent: '客户端日志已回传',
+  runtime_starting: '客户端正在启动',
+  runtime_stopped: '客户端已经停止运行',
+  runtime_retrying: '连接没有成功，客户端正在重新连接',
+  central_connected: '客户端已经连接到中央服务',
+  pairing_started: '正在连接客户端和中央服务',
+  pairing_completed: '客户端连接设置已经完成',
+  runtime_settings_applied: '中央服务下发的运行设置已经生效',
+  session_candidates_ready: '客户端已经更新可用的会话列表',
+  verification_requested: '中央服务要求验证这个会话',
+  verification_sent: '验证码已经发送到会话中',
+  message_queued: '消息已收到，正在等待上传',
+  message_upload_attempt_started: '客户端正在把消息发送给中央服务',
+  message_upload_acknowledged: '中央服务已经收到这条消息',
+  message_upload_batch_acknowledged: '中央服务已经收到这一批消息',
+  message_upload_batch_accepted: '这一批消息已安全保存，中央服务会继续在后台处理',
+  message_upload_batch_processing: '中央服务正在处理这一批消息',
+  message_upload_batch_completed: '这一批消息已经全部处理完毕',
+  message_upload_batch_retry_scheduled: '这批消息处理没有成功，稍后会自动再试',
+  message_upload_batch_retry_exhausted: '多次重试仍未成功，已停止处理这一批消息',
+  message_upload_batch_deduplicated: '这批消息之前已经收到过，本次不再重复处理',
+  message_upload_batch_processed: '这一批消息的内容已经处理完毕',
+  message_upload_batch_deliveries_queued: '处理结果已经生成，正在等待发送到目标会话',
+  message_upload_batch_failed: '这一批消息处理失败',
+  message_upload_batch_window_scheduled: '正在稍等片刻，以便把相邻消息一起上传',
+  message_upload_retry_scheduled: '消息上传没有成功，稍后会自动再试',
+  message_upload_dead_letter: '多次上传仍未成功，已经停止自动重试这条消息',
+  delivery_queued: '消息已经准备好，正在等待发送',
+  delivery_batch_queued: '这一批消息已经准备好，正在等待逐条发送',
+  delivery_batch_item_failed: '这一批消息中有一条发送失败',
+  delivery_interval_scheduled: '正在等待发送下一条消息',
+  delivery_attempt_started: '客户端正在向目标会话发送消息',
+  delivery_platform_confirmed: 'QQ 或 Discord 已确认消息发送成功',
+  delivery_acknowledged_by_central: '中央服务已经记录本次发送结果',
+  delivery_retry_scheduled: '消息发送没有成功，稍后会自动再试',
+  delivery_dead_letter: '多次发送仍未成功，已经停止自动重试这条消息',
+  delivery_recovery_failed: '上次没有完成的发送任务无法恢复',
+  delivery_failure_report_failed: '消息发送失败，但结果没有成功报告给中央服务',
+  node_logs_sent: '客户端已经把最新日志发送给中央服务',
+  session_announcement_failed: '客户端没能把会话列表发送给中央服务',
+  runtime_settings_failed: '中央服务下发的运行设置没有成功应用',
+  queue_drain_failed: '客户端处理待办消息时发生错误，稍后会继续尝试',
+  message_ingest_failed: '客户端收到平台消息，但没能把它加入处理流程',
+  delivery_task_failed: '消息发送任务执行失败',
+  client_card_render_started: '客户端正在生成消息卡片',
+  client_card_render_succeeded: '客户端已经生成消息卡片',
+  client_card_render_failed_forwarding_as_text: '卡片生成失败，已经改用原始文字继续发送',
+  avatar_fetch_failed: '头像下载失败，卡片将使用默认头像',
+  delivered_echo_suppressed: '已忽略机器人刚刚发出的消息，避免重复转发',
+  fast_upload_failed: '快速上传没有成功，消息将按照普通方式重试',
 };
 
 function translateLogEvent(event: string): string {
   return logEventLabels[event] ?? event.replaceAll('_', ' ');
+}
+
+function logLevelLabel(level: NodeLogRecord['level']): string {
+  return { debug: '细节', info: '正常', warn: '提醒', error: '错误' }[level];
 }
 
 const root = document.querySelector('#root');

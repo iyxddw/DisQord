@@ -2971,7 +2971,7 @@ function SettingsPage() {
   }
   const sections: Array<{ id: SettingsSection; label: string; hint: string; icon: typeof Bot }> = [
     { id: 'llm', label: '模型接入', hint: '多模型与故障转移', icon: Bot },
-    { id: 'delivery', label: '投递性能', hint: '并发与疾速模式', icon: Gauge },
+    { id: 'delivery', label: '发送性能', hint: '并发与疾速模式', icon: Gauge },
     {
       id: 'cards',
       label: '卡片主题',
@@ -3319,7 +3319,7 @@ function SettingsPage() {
 
       {section === 'delivery' && (
         <section className="panel settings-section-panel">
-          <PanelTitle title="投递与性能" subtitle="这些设置作用于整个中央端和所有已连接节点" />
+          <PanelTitle title="发送与性能" subtitle="这些设置作用于整个中央端和所有已连接客户端" />
           <div className="form-grid">
             <label>
               LLM 并发数
@@ -3363,7 +3363,7 @@ function SettingsPage() {
                 疾速模式
               </span>
               <small className="field-hint">
-                关闭图片下载与卡片合成，直接发文本。翻译与审核仍执行；任何处理故障会显示给收件人并继续投递。
+                关闭图片下载与卡片合成，直接发送文字。翻译与审核仍会执行；如果处理中发生错误，收件人会看到错误说明，消息也会继续发送。
               </small>
             </label>
           </div>
@@ -3650,8 +3650,8 @@ function LogRecords() {
         title="运行日志"
         subtitle={
           effectiveView === 'traces'
-            ? '每一项代表一条完整消息链路；点击任务查看处理时间线'
-            : '按写入顺序查看未经聚合的底层事件'
+            ? '每一项代表一条消息从接收到发送完成的全过程；点击后可以查看每一步发生了什么'
+            : '按时间顺序查看系统记录的每一步操作和完整字段'
         }
         action={
           <div className="log-actions">
@@ -3667,7 +3667,7 @@ function LogRecords() {
             <input
               className="log-search"
               value={logSearch}
-              placeholder="traceId、消息 ID、用户或事件"
+              placeholder="追踪号、消息 ID、用户或处理步骤"
               onChange={(event) => {
                 setLogSearch(event.target.value);
                 setLogPage(1);
@@ -3686,13 +3686,13 @@ function LogRecords() {
             disabled={!isCentral}
             onClick={() => setView('traces')}
           >
-            消息任务
+            消息处理过程
           </button>
           <button
             className={effectiveView === 'events' ? 'active' : ''}
             onClick={() => setView('events')}
           >
-            原始事件
+            逐条记录
           </button>
         </div>
         {effectiveView === 'traces' ? (
@@ -3702,7 +3702,7 @@ function LogRecords() {
                 ['all', '全部任务'],
                 ['problems', '仅异常'],
                 ['retry', '发生重试'],
-                ['slow', '慢处理 ≥ 2 秒'],
+                ['slow', '处理时间超过 2 秒'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -3727,10 +3727,10 @@ function LogRecords() {
             }}
           >
             <option value="all">全部级别</option>
-            {isCentral && <option value="debug">Debug</option>}
-            {isCentral && <option value="info">Info</option>}
-            <option value="warn">Warn</option>
-            <option value="error">Error</option>
+            {isCentral && <option value="debug">处理细节</option>}
+            {isCentral && <option value="info">正常记录</option>}
+            <option value="warn">需要注意</option>
+            <option value="error">处理错误</option>
           </select>
         )}
         <button
@@ -3875,7 +3875,7 @@ function TraceLogCard({
                     <time>+{formatDuration(delta)}</time>
                     <strong>{translateLogEvent(String(record.event ?? 'unknown'))}</strong>
                     {(level === 'warn' || level === 'error') && (
-                      <span className={`log-level ${level}`}>{level.toUpperCase()}</span>
+                      <span className={`log-level ${level}`}>{logLevelLabel(level)}</span>
                     )}
                     <code>{String(record.event ?? '')}</code>
                     <ChevronRight size={14} />
@@ -3908,7 +3908,7 @@ function RawLogList({
         return (
           <details className={`raw-log-record ${level}`} key={String(record.id ?? index)}>
             <summary>
-              <span className={`log-level ${level}`}>{level.toUpperCase()}</span>
+              <span className={`log-level ${level}`}>{logLevelLabel(level)}</span>
               <strong>{translateLogEvent(String(record.event ?? 'unknown'))}</strong>
               <span className="log-message-preview">{logMessagePreview(record)}</span>
               <code title={String(record.traceId ?? '')}>
@@ -4038,6 +4038,10 @@ function normalizeLogLevel(value: unknown): LogLevel {
   return level === 'debug' || level === 'warn' || level === 'error' ? level : 'info';
 }
 
+function logLevelLabel(level: LogLevel): string {
+  return { debug: '细节', info: '正常', warn: '提醒', error: '错误' }[level];
+}
+
 function shortTraceId(traceId: string): string {
   if (!traceId) return '无追踪号';
   return traceId.length > 12 ? `${traceId.slice(0, 8)}…` : traceId;
@@ -4101,69 +4105,74 @@ function formatTime(value?: string) {
 }
 
 const logEventLabels: Record<string, string> = {
-  runtime_starting: '节点启动',
-  runtime_stopped: '节点已停止',
-  runtime_retrying: '节点重试连接',
-  central_connected: '已连接中央服务',
-  pairing_started: '开始配对',
-  pairing_completed: '配对完成',
-  session_candidates_ready: '会话列表已更新',
-  verification_requested: '收到验证请求',
-  verification_sent: '验证码已发送',
-  message_queued: '消息已加入队列',
-  message_upload_attempt_started: '开始上传消息',
-  message_upload_acknowledged: '消息上传已确认',
-  message_upload_batch_acknowledged: '批量消息上传已确认',
-  message_upload_batch_accepted: '批量消息已持久化，后台处理中',
-  message_upload_batch_processing: '批量消息后台处理中',
-  message_upload_batch_completed: '批量消息后台处理完成',
-  message_upload_batch_retry_scheduled: '批量消息将自动重试',
-  message_upload_batch_retry_exhausted: '批量消息重试次数已用尽',
-  message_upload_batch_deduplicated: '批量消息已去重',
-  message_upload_batch_processed: '批量消息处理完成',
-  message_upload_batch_deliveries_queued: '批量发送任务已加入队列',
-  message_upload_batch_failed: '批量消息处理失败',
-  message_upload_batch_window_scheduled: '批量上传等待窗口已安排',
-  message_upload_retry_scheduled: '消息上传将重试',
-  message_upload_dead_letter: '消息上传进入死信队列',
-  delivery_queued: '发送任务已加入队列',
-  delivery_batch_queued: '批量发送任务已加入队列',
-  delivery_batch_item_failed: '批量发送中的消息失败',
-  delivery_interval_scheduled: '已安排下一条消息的发送间隔',
-  delivery_attempt_started: '开始发送消息',
-  delivery_platform_confirmed: '平台确认发送成功',
-  delivery_acknowledged_by_central: '中央服务已确认发送',
-  delivery_retry_scheduled: '发送失败，将重试',
-  delivery_dead_letter: '发送进入死信队列',
-  delivery_recovery_failed: '恢复发送任务失败',
-  delivery_failure_report_failed: '上报发送失败失败',
-  delivery_succeeded: '消息发送成功',
-  delivery_failed: '消息发送失败',
-  node_logs_sent: '客户端日志已回传',
-  blueprint_started: '蓝图开始处理',
-  blueprint_completed: '蓝图处理完成',
-  blueprint_failed: '蓝图处理失败',
-  blueprint_invalid: '蓝图配置无效',
-  blueprint_node_entered: '进入蓝图节点',
-  blueprint_paused: '蓝图已暂停',
-  message_received: '收到消息',
-  message_deduplicated: '重复消息已忽略',
-  message_discarded: '消息已丢弃',
-  source_session_matched: '已匹配来源会话',
-  unmatched_blueprint: '没有匹配的蓝图',
-  unmatched_session: '没有匹配的会话',
-  translation_requested: '请求翻译',
-  translation_response: '收到翻译结果',
-  translation_failed: '翻译失败',
-  llm_request_failed: '大模型请求失败',
-  moderation_requested: '请求审核',
-  moderation_response: '收到审核结果',
-  moderation_failed: '审核失败',
-  manual_review_created: '已创建人工审核任务',
-  manual_review_resolved: '人工审核任务已处理',
-  render_succeeded: '图片合成成功',
-  fixed_text_applied: '已替换为固定文本',
-  delivery_command_failed: '发送命令失败',
+  runtime_starting: '客户端正在启动',
+  runtime_stopped: '客户端已经停止运行',
+  runtime_retrying: '连接没有成功，客户端正在重新连接',
+  central_connected: '客户端已经连接到中央服务',
+  pairing_started: '正在连接客户端和中央服务',
+  pairing_completed: '客户端连接设置已经完成',
+  session_candidates_ready: '客户端已经更新可用的会话列表',
+  verification_requested: '中央服务要求验证这个会话',
+  verification_sent: '验证码已经发送到会话中',
+  message_queued: '消息已收到，正在等待上传',
+  message_upload_attempt_started: '客户端正在把消息发送给中央服务',
+  message_upload_acknowledged: '中央服务已经收到这条消息',
+  message_upload_batch_acknowledged: '中央服务已经收到这一批消息',
+  message_upload_batch_accepted: '这一批消息已安全保存，中央服务会继续在后台处理',
+  message_upload_batch_processing: '中央服务正在处理这一批消息',
+  message_upload_batch_completed: '这一批消息已经全部处理完毕',
+  message_upload_batch_retry_scheduled: '这批消息处理没有成功，稍后会自动再试',
+  message_upload_batch_retry_exhausted: '多次重试仍未成功，已停止处理这一批消息',
+  message_upload_batch_deduplicated: '这批消息之前已经收到过，本次不再重复处理',
+  message_upload_batch_processed: '这一批消息的内容已经处理完毕',
+  message_upload_batch_deliveries_queued: '处理结果已经生成，正在等待发送到目标会话',
+  message_upload_batch_failed: '这一批消息处理失败',
+  message_upload_batch_window_scheduled: '正在稍等片刻，以便把相邻消息一起上传',
+  message_upload_retry_scheduled: '消息上传没有成功，稍后会自动再试',
+  message_upload_dead_letter: '多次上传仍未成功，已经停止自动重试这条消息',
+  delivery_queued: '消息已经准备好，正在等待发送',
+  delivery_batch_queued: '这一批消息已经准备好，正在等待逐条发送',
+  delivery_batch_item_failed: '这一批消息中有一条发送失败',
+  delivery_interval_scheduled: '正在等待发送下一条消息',
+  delivery_attempt_started: '客户端正在向目标会话发送消息',
+  delivery_platform_confirmed: 'QQ 或 Discord 已确认消息发送成功',
+  delivery_acknowledged_by_central: '中央服务已经记录本次发送结果',
+  delivery_retry_scheduled: '消息发送没有成功，稍后会自动再试',
+  delivery_dead_letter: '多次发送仍未成功，已经停止自动重试这条消息',
+  delivery_recovery_failed: '上次没有完成的发送任务无法恢复',
+  delivery_failure_report_failed: '消息发送失败，但结果没有成功报告给中央服务',
+  delivery_succeeded: '消息已经发送到目标会话',
+  delivery_failed: '消息没有发送成功',
+  node_logs_sent: '客户端已经把最新日志发送给中央服务',
+  blueprint_started: '已经找到转发规则，开始处理消息',
+  blueprint_completed: '转发规则中的所有步骤已经处理完成',
+  blueprint_failed: '按照转发规则处理消息时发生错误',
+  blueprint_invalid: '转发规则配置有误，无法处理这条消息',
+  blueprint_node_entered: '正在执行转发规则中的下一步',
+  blueprint_paused: '消息处理已暂停，正在等待人工处理',
+  message_received: '中央服务已经收到消息',
+  message_deduplicated: '这条消息之前处理过，本次不再重复处理',
+  message_discarded: '这条消息不会继续处理',
+  source_session_matched: '已经找到这条消息所属的会话',
+  unmatched_blueprint: '这个会话没有可用的转发规则，消息不会继续处理',
+  unmatched_session: '没有找到这条消息所属的已绑定会话',
+  translation_requested: '正在请求大模型翻译消息',
+  translation_response: '大模型已经返回翻译结果',
+  translation_failed: '消息翻译失败，将按照错误处理规则继续',
+  llm_request_failed: '大模型接口请求失败',
+  moderation_requested: '正在请求大模型检查消息内容',
+  moderation_response: '大模型已经返回内容检查结果',
+  moderation_failed: '内容检查失败，将按照审核失败规则继续',
+  manual_review_created: '这条消息需要人工检查，已经加入待审核列表',
+  manual_review_resolved: '人工检查已经完成，消息将继续处理',
+  render_succeeded: '消息卡片已经生成',
+  render_skipped_fast_mode: '当前使用快速模式，不生成消息卡片，直接发送文字',
+  central_card_render_failed_forwarding: '中央服务生成卡片失败，已经改用原始文字继续发送',
+  fixed_text_applied: '消息内容已经替换为配置中的固定文字',
+  delivery_command_failed: '中央服务没能把发送任务交给客户端',
+  delivery_suppressed_fetch_only: '目标会话只接收消息，不允许向其中发送内容',
+  delivery_error_notice_sent: '发送失败，已经把错误说明发回原会话',
+  delivery_error_notice_failed: '发送失败，而且错误说明也没能发回原会话',
 };
 
 function translateLogEvent(event: string): string {
