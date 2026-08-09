@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { platformSchema } from './program.js';
+import { cardThemeIdSchema, defaultCardThemeId } from './card-theme.js';
 
 const imageDataUriPattern = /^data:image\/(?:png|jpeg|webp|gif);base64,/u;
 
@@ -65,6 +66,7 @@ export const messageCardInlineEmojiSchema = z
   });
 
 export const messageCardRenderSpecSchema = z.object({
+  themeId: cardThemeIdSchema.default(defaultCardThemeId),
   sourcePlatform: platformSchema,
   targetLanguage: z.enum(['zh', 'en']),
   sourceName: z.string().trim().min(1).max(256),

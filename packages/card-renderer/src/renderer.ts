@@ -1,10 +1,18 @@
 import { createCanvas, loadImage, type Image, type SKRSContext2D } from '@napi-rs/canvas';
-import { messageCardRenderSpecSchema, type MessageCardRenderSpec } from '@disqord/shared';
+import {
+  cardThemeIdSchema,
+  defaultCardThemeId,
+  getCardTheme,
+  messageCardRenderSpecSchema,
+  type CardThemeDefinition,
+  type MessageCardRenderSpec,
+} from '@disqord/shared';
 import { z } from 'zod';
 
 const dataImageSchema = z.string().regex(/^data:image\/(?:png|jpeg|webp|gif);base64,/u);
 
 export const messageCardInputSchema = z.object({
+  themeId: cardThemeIdSchema.default(defaultCardThemeId),
   sourcePlatform: z.enum(['qq', 'discord']),
   targetLanguage: z.enum(['zh', 'en']).optional(),
   sourceName: z.string().trim().min(1).max(256),
@@ -123,7 +131,7 @@ export async function renderMessageCards(
     const { card1Bands, tileBands } = planImageBands(bands, chromeHeight);
     cards.push(await renderMessageCardCanvas(pageInput, card1Bands));
     for (const band of tileBands) {
-      cards.push(renderImageTileCard(band));
+      cards.push(renderImageTileCard(band, getCardTheme(input.themeId)));
     }
   }
   return cards;
@@ -178,6 +186,7 @@ async function normalizeCanvasInput(
     emoji.dataUri ? [{ token: emoji.token, dataUri: emoji.dataUri }] : [],
   );
   return {
+    themeId: spec.themeId,
     sourcePlatform: spec.sourcePlatform,
     targetLanguage: spec.targetLanguage,
     sourceName: spec.sourceName,
@@ -233,14 +242,17 @@ async function renderMessageCardCanvas(
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
   ctx.textBaseline = 'alphabetic';
+  const theme = getCardTheme(input.themeId);
+  const colors = theme.colors;
 
   const background = ctx.createLinearGradient(0, 0, width, height);
-  background.addColorStop(0, '#151925');
-  background.addColorStop(0.55, '#11131a');
-  background.addColorStop(1, '#1c1730');
+  background.addColorStop(0, colors.backgroundStart);
+  background.addColorStop(0.55, colors.backgroundMid);
+  background.addColorStop(1, colors.backgroundEnd);
   ctx.fillStyle = background;
   roundedRect(ctx, 0, 0, width, height, 28);
   ctx.fill();
+  drawThemeChrome(ctx, theme, height, input.sourcePlatform);
 
   const avatar = input.senderAvatar ? await loadDataImage(input.senderAvatar) : undefined;
   if (avatar) {
@@ -249,25 +261,25 @@ async function renderMessageCardCanvas(
     drawCover(ctx, avatar, horizontalPadding, 48, 76, 76);
     ctx.restore();
   } else {
-    ctx.fillStyle = '#5262a8';
+    ctx.fillStyle = colors.accent;
     ctx.beginPath();
     ctx.arc(horizontalPadding + 38, 86, 38, 0, Math.PI * 2);
     ctx.fill();
     ctx.font = `700 32px ${fontFamily}`;
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = theme.dark ? '#ffffff' : colors.backgroundStart;
     ctx.textAlign = 'center';
     ctx.fillText(input.senderName.slice(0, 1).toUpperCase(), horizontalPadding + 38, 98);
     ctx.textAlign = 'start';
   }
 
   ctx.font = `700 30px ${fontFamily}`;
-  ctx.fillStyle = '#f7f8ff';
+  ctx.fillStyle = colors.text;
   ctx.fillText(input.senderName, horizontalPadding + 98, 78);
   ctx.font = `20px ${fontFamily}`;
-  ctx.fillStyle = '#aeb6cc';
+  ctx.fillStyle = colors.muted;
   ctx.fillText(`${input.sourceName} · ${input.sentAt}`, horizontalPadding + 98, 112);
   ctx.font = `700 19px ${fontFamily}`;
-  ctx.fillStyle = '#91a7ff';
+  ctx.fillStyle = colors.accentText;
   ctx.textAlign = 'right';
   ctx.fillText(input.sourcePlatform.toUpperCase(), width - horizontalPadding, 76);
   ctx.textAlign = 'start';
@@ -282,13 +294,13 @@ async function renderMessageCardCanvas(
     const badgeHeight = 24 + padY * 2;
     const badgeX = width - horizontalPadding - badgeWidth;
     const badgeY = 126;
-    ctx.fillStyle = 'rgba(255, 77, 79, 0.16)';
+    ctx.fillStyle = colors.dangerSurface;
     roundedRect(ctx, badgeX, badgeY, badgeWidth, badgeHeight, badgeHeight / 2);
     ctx.fill();
-    ctx.strokeStyle = '#ff5c5c';
+    ctx.strokeStyle = colors.danger;
     ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = '#ff5c5c';
+    ctx.fillStyle = colors.danger;
     ctx.textAlign = 'center';
     ctx.fillText(badgeText, badgeX + badgeWidth / 2, badgeY + padY + 17);
     ctx.textAlign = 'start';
@@ -298,14 +310,14 @@ async function renderMessageCardCanvas(
   if (input.reply) {
     const top = cursorY;
     cursorY += replyHeight + 24;
-    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillStyle = colors.panel;
     roundedRect(ctx, horizontalPadding, top, contentWidth, replyHeight, 18);
     ctx.fill();
-    ctx.fillStyle = '#91a7ff';
+    ctx.fillStyle = colors.accent;
     roundedRect(ctx, horizontalPadding, top, 5, replyHeight, 3);
     ctx.fill();
     ctx.font = `700 24px ${fontFamily}`;
-    ctx.fillStyle = '#aab8ff';
+    ctx.fillStyle = colors.accentText;
     ctx.fillText(input.reply.senderName, horizontalPadding + 24, top + 34);
     drawLines(
       ctx,
@@ -314,7 +326,7 @@ async function renderMessageCardCanvas(
       top + 70,
       30,
       `25px ${fontFamily}`,
-      '#c8cede',
+      colors.muted,
       inlineEmojiImages,
       inlineEmojiFallbacks,
     );
@@ -342,7 +354,7 @@ async function renderMessageCardCanvas(
     primaryTop + 38,
     lineHeight,
     `500 34px ${fontFamily}`,
-    '#f7f8ff',
+    colors.text,
     inlineEmojiImages,
     inlineEmojiFallbacks,
   );
@@ -357,7 +369,7 @@ async function renderMessageCardCanvas(
       band.last ? radius : 0,
       band.last ? radius : 0,
     ];
-    ctx.fillStyle = '#0b0d13';
+    ctx.fillStyle = colors.imageBackground;
     roundedRectRadii(ctx, horizontalPadding, imageY, band.w, band.h, corners);
     ctx.fill();
     ctx.save();
@@ -381,14 +393,14 @@ async function renderMessageCardCanvas(
 
   if (input.originalText) {
     const top = cursorY + 8;
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillStyle = colors.panel;
     roundedRect(ctx, horizontalPadding, top, contentWidth, originalHeight, 22);
     ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.strokeStyle = colors.panelBorder;
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.font = `700 18px ${fontFamily}`;
-    ctx.fillStyle = '#aeb6cc';
+    ctx.fillStyle = colors.muted;
     ctx.fillText(language === 'zh' ? '原文' : 'ORIGINAL', horizontalPadding + 28, top + 38);
     drawLines(
       ctx,
@@ -397,16 +409,80 @@ async function renderMessageCardCanvas(
       top + 80,
       36,
       `26px ${fontFamily}`,
-      '#e2e5ef',
+      colors.text,
       inlineEmojiImages,
       inlineEmojiFallbacks,
     );
   }
 
   ctx.font = `17px ${fontFamily}`;
-  ctx.fillStyle = '#737c92';
+  ctx.fillStyle = colors.muted;
   ctx.fillText(`DisQord · ${input.traceLabel ?? ''}`, horizontalPadding, height - 38);
   return canvas.toBuffer('image/png');
+}
+
+function drawThemeChrome(
+  ctx: SKRSContext2D,
+  theme: CardThemeDefinition,
+  height: number,
+  platform: 'qq' | 'discord',
+): void {
+  const { colors, layout } = theme;
+  if (layout === 'support') {
+    ctx.fillStyle = colors.panel;
+    roundedRect(ctx, 18, 18, width - 36, 122, 20);
+    ctx.fill();
+    ctx.fillStyle = colors.accent;
+    roundedRect(ctx, 34, 34, 9, 90, 5);
+    ctx.fill();
+    return;
+  }
+  if (layout === 'timeline') {
+    ctx.strokeStyle = colors.panelBorder;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(27, 62);
+    ctx.lineTo(27, Math.max(100, height - 62));
+    ctx.stroke();
+    ctx.fillStyle = colors.accent;
+    ctx.beginPath();
+    ctx.arc(27, 86, 10, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  if (layout === 'compact') {
+    ctx.strokeStyle = colors.panelBorder;
+    ctx.lineWidth = 2;
+    roundedRect(ctx, 16, 16, width - 32, height - 32, 20);
+    ctx.stroke();
+    return;
+  }
+  if (layout === 'desktop') {
+    for (const [index, alpha] of [0.75, 0.55, 0.35].entries()) {
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath();
+      ctx.arc(34 + index * 22, 27, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.font = `600 14px ${fontFamily}`;
+    ctx.fillStyle = colors.muted;
+    ctx.fillText('MESSAGE PREVIEW', 112, 32);
+    return;
+  }
+  if (layout === 'board') {
+    ctx.fillStyle = colors.panel;
+    roundedRect(ctx, 18, 18, 120, height - 36, 20);
+    ctx.fill();
+    ctx.save();
+    ctx.translate(44, Math.min(height - 96, 188));
+    ctx.rotate(Math.PI / 2);
+    ctx.font = `700 16px ${fontFamily}`;
+    ctx.fillStyle = colors.accentText;
+    ctx.fillText(platform.toUpperCase(), 0, 0);
+    ctx.restore();
+  }
 }
 
 async function loadDataImage(dataUri: string): Promise<Image | undefined> {
@@ -564,10 +640,10 @@ function planImageBands(
  * rounded corners only at the image's real top/bottom.  Seam edges are square
  * so consecutive messages stitch without a background notch.
  */
-function renderImageTileCard(band: ImageBand): Buffer {
+function renderImageTileCard(band: ImageBand, theme: CardThemeDefinition): Buffer {
   const canvas = createCanvas(width, band.h);
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#0b0d13';
+  ctx.fillStyle = theme.colors.imageBackground;
   ctx.fillRect(0, 0, width, band.h);
   const radius = Math.min(22, band.h / 2);
   ctx.save();

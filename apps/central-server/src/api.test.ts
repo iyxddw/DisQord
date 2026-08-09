@@ -79,8 +79,12 @@ describe('central control-plane API', () => {
       cookies: { disqord_session: token },
     });
     expect(read.json()).toMatchObject({
-      baseUrl: 'https://llm.example.test/v1',
-      apiKeyConfigured: true,
+      providers: [
+        {
+          baseUrl: 'https://llm.example.test/v1',
+          apiKeyConfigured: true,
+        },
+      ],
     });
     expect(read.body).not.toContain('top-secret-api-key');
     await central.app.close();

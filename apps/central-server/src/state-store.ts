@@ -270,8 +270,12 @@ export class AppendLogStore implements StateStore {
   }
 
   #publicEntry<T>(entry: StoredStateEntry<T>): StateEntry<T> {
-    const { namespace: _namespace, ...publicEntry } = entry;
-    return publicEntry;
+    return {
+      key: entry.key,
+      value: entry.value,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    };
   }
 
   #append(entry: StoredStateEntry | StoredTombstone): void {

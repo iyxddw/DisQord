@@ -39,6 +39,20 @@ async function hasRedPixel(png: Buffer): Promise<boolean> {
 }
 
 describe('message card renderer', () => {
+  it('renders different local palettes for different theme ids', async () => {
+    const base = {
+      sourcePlatform: 'qq' as const,
+      sourceName: '测试群',
+      senderName: 'Alice',
+      sentAt: '2026-08-09 12:00',
+      primaryText: '主题测试',
+      images: [],
+    };
+    const [dark] = await renderMessageCards({ ...base, themeId: 'midnight' });
+    const [light] = await renderMessageCards({ ...base, themeId: 'mint-support' });
+    expect(await readRgbPixel(dark!, 500, 20)).not.toEqual(await readRgbPixel(light!, 500, 20));
+  });
+
   it('renders a PNG with reply context and a translucent original section', async () => {
     const input = {
       sourcePlatform: 'qq' as const,

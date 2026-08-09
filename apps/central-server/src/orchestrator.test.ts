@@ -346,6 +346,77 @@ describe('blueprint message pipeline', () => {
     ).toEqual({ sourceUrl: 'https://q1.qlogo.cn/g?b=qq&nk=12345&s=640' });
   });
 
+  it('tries LLM providers in order until one succeeds', async () => {
+    const setup = await fixture([], [], {});
+    const secrets = new InMemorySecretStore();
+    await setup.store.set('settings', 'llm', {
+      providers: [
+        {
+          id: 'primary',
+          name: '主模型',
+          enabled: true,
+          baseUrl: 'https://primary.example.test/v1',
+          translationModel: 'primary-translate',
+          moderationModel: 'primary-moderate',
+        },
+        {
+          id: 'fallback',
+          name: '备用模型',
+          enabled: true,
+          baseUrl: 'https://fallback.example.test/v1',
+          translationModel: 'fallback-translate',
+          moderationModel: 'fallback-moderate',
+        },
+      ],
+    });
+    await secrets.set('llm-api-key:primary', 'primary-key');
+    await secrets.set('llm-api-key:fallback', 'fallback-key');
+    const request = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith('https://primary.example.test')) {
+        return new Response('{"error":{"message":"insufficient balance"}}', {
+          status: 402,
+          statusText: 'Payment Required',
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  detectedLanguage: 'zh',
+                  translatedText: 'Hello',
+                  confidence: 0.99,
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', request);
+    try {
+      const processor = new CentralMessageProcessor(setup.store, secrets);
+      const result = await processor.translate(
+        message(setup.sourceSession.nodeId),
+        setup.targetSession,
+        '你好',
+        '准确翻译。',
+        [],
+        false,
+        false,
+      );
+      expect(result).toMatchObject({ translatedText: 'Hello', model: 'fallback-translate' });
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(String(request.mock.calls[0]?.[0])).toContain('primary.example.test');
+      expect(String(request.mock.calls[1]?.[0])).toContain('fallback.example.test');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('passes local message and reply emojis into the client render spec', async () => {
     const setup = await fixture([], [], {});
     const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
@@ -568,7 +639,7 @@ describe('blueprint message pipeline', () => {
     );
   });
 
-  it('records the full LLM failure for a simulated run', async () => {
+  it('records the full LLM failure and still delivers a visible error card', async () => {
     const input = randomUUID();
     const translation = randomUUID();
     const output = randomUUID();
@@ -600,12 +671,35 @@ describe('blueprint message pipeline', () => {
         translate: vi.fn(async () => {
           throw failure;
         }),
+        prepareRender: vi.fn(async (incoming, target, text) => ({
+          themeId: 'midnight' as const,
+          sourcePlatform: incoming.source.platform,
+          targetLanguage: target.platform === 'discord' ? ('en' as const) : ('zh' as const),
+          sourceName: incoming.source.channelId,
+          senderName: incoming.sender.displayName,
+          sentAt: incoming.sentAt,
+          primaryText: text,
+          ...(incoming.text ? { originalText: incoming.text } : {}),
+          images: [],
+          traceLabel: incoming.traceId.slice(0, 8),
+        })),
       },
     );
 
     await expect(
       setup.orchestrator.handleSimulatedInput(setup.blueprint.id, input, '你好'),
-    ).rejects.toThrow('trailing content');
+    ).resolves.toEqual({ traceId: expect.any(String) });
+
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver',
+      expect.objectContaining({
+        render: expect.objectContaining({
+          primaryText: expect.stringContaining('DisQord 翻译异常'),
+          originalText: '你好',
+        }),
+      }),
+    );
 
     const logs = (await setup.store.list<Record<string, unknown>>('trace-log')).map(
       (entry) => entry.value,
@@ -622,11 +716,11 @@ describe('blueprint message pipeline', () => {
             }),
           }),
         }),
-        expect.objectContaining({
-          event: 'blueprint_failed',
-          details: expect.objectContaining({ simulatedInput: true }),
-        }),
+        expect.objectContaining({ event: 'blueprint_completed' }),
       ]),
+    );
+    expect(logs).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ event: 'blueprint_failed' })]),
     );
   });
 
@@ -867,7 +961,7 @@ describe('blueprint message pipeline', () => {
     );
   });
 
-  it('routes an unavailable image review to the blocked output even at a 100% threshold', async () => {
+  it('surfaces unavailable image review and keeps the message on the passed route', async () => {
     const input = randomUUID();
     const moderation = randomUUID();
     const output = randomUUID();
@@ -901,7 +995,20 @@ describe('blueprint message pipeline', () => {
           targetNodeId: blocked,
         },
       ],
-      { moderate },
+      {
+        moderate,
+        prepareRender: vi.fn(async (message, target, text) => ({
+          themeId: 'midnight' as const,
+          sourcePlatform: message.source.platform,
+          targetLanguage: target.platform === 'discord' ? ('en' as const) : ('zh' as const),
+          sourceName: message.source.channelId,
+          senderName: message.sender.displayName,
+          sentAt: message.sentAt,
+          primaryText: text,
+          images: [],
+          traceLabel: message.traceId.slice(0, 8),
+        })),
+      },
     );
     const incoming = {
       ...message(setup.sourceSession.nodeId),
@@ -926,21 +1033,33 @@ describe('blueprint message pipeline', () => {
       frameId: randomUUID(),
     });
 
-    await waitFor(() => moderate.mock.calls.length === 1);
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
     expect(moderate).toHaveBeenCalledWith(
       '',
       '审核图片',
       expect.objectContaining({ imageReviewRequested: true, imageCount: 1 }),
     );
-    expect(setup.sendToNode).not.toHaveBeenCalled();
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver.batch',
+      expect.objectContaining({
+        deliveries: expect.arrayContaining([
+          expect.objectContaining({
+            render: expect.objectContaining({
+              primaryText: expect.stringContaining('DisQord 内容审核异常'),
+            }),
+          }),
+        ]),
+      }),
+    );
     expect(await setup.store.list('moderation-review')).toHaveLength(0);
     const activities = (await setup.store.list<Record<string, unknown>>('blueprint-activity')).map(
       (entry) => entry.value,
     );
     expect(activities).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ nodeId: moderation, route: 'blocked', violationScore: 1 }),
-        expect.objectContaining({ nodeId: blocked }),
+        expect.objectContaining({ nodeId: moderation, route: 'passed', violationScore: 1 }),
+        expect.objectContaining({ nodeId: output }),
       ]),
     );
   });

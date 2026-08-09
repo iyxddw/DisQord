@@ -4,11 +4,22 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assertTaskTransition,
+  cardSettingsSchema,
+  cardThemes,
   createMessageIdempotencyKey,
   createProgramDescriptor,
   messageEnvelopeSchema,
   messageUploadBatchSchema,
 } from './index.js';
+
+describe('message card themes', () => {
+  it('ships at least twenty themes with multiple dark choices', () => {
+    expect(cardThemes.length).toBeGreaterThanOrEqual(20);
+    expect(cardThemes.filter((theme) => theme.dark).length).toBeGreaterThanOrEqual(6);
+    expect(new Set(cardThemes.map((theme) => theme.id)).size).toBe(cardThemes.length);
+    expect(cardSettingsSchema.parse({}).themeId).toBe('midnight');
+  });
+});
 
 describe('createProgramDescriptor', () => {
   it('keeps the central server role fixed', () => {

@@ -5,7 +5,6 @@ import { dirname, join } from 'node:path';
 import { AvatarCache, renderMessageCards } from '@disqord/card-renderer';
 import { FileTaskQueue, type QueueItem } from '@disqord/queue';
 import {
-  avatarRequestSchema,
   avatarResponseSchema,
   messageCardRenderSpecSchema,
   messageEnvelopeSchema,
@@ -504,19 +503,44 @@ export class NodeBridgeRuntime {
                 renderSpec = { ...renderSpec, senderAvatar: cachedAvatar.dataUri };
               }
             }
-            const rendered = await renderMessageCards(renderSpec);
-            cards = rendered.map((card) => card.toString('base64'));
-            // Once rendered, retain the PNGs in the local queue so a network
-            // retry never downloads media or renders the same message twice.
-            const { render: _render, ...withoutRender } = item.payload;
-            const renderedPayload: DeliveryCommand = { ...withoutRender, cards };
-            queue.updatePayload(taskId, renderedPayload);
-            item = { ...item, payload: renderedPayload };
-            this.#log('info', 'client_card_render_succeeded', {
-              taskId,
-              cardCount: cards.length,
-              byteSizes: rendered.map((card) => card.byteLength),
-            });
+            try {
+              const rendered = await renderMessageCards(renderSpec);
+              cards = rendered.map((card) => card.toString('base64'));
+              // Once rendered, retain the PNGs in the local queue so a network
+              // retry never downloads media or renders the same message twice.
+              const renderedPayload: DeliveryCommand = { ...item.payload, cards };
+              delete renderedPayload.render;
+              queue.updatePayload(taskId, renderedPayload);
+              item = { ...item, payload: renderedPayload };
+              this.#log('info', 'client_card_render_succeeded', {
+                taskId,
+                cardCount: cards.length,
+                byteSizes: rendered.map((card) => card.byteLength),
+              });
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error);
+              const fallbackText = `【DisQord 卡片渲染异常】原消息已改用文本继续发送，请联系管理员并提供追踪号 ${renderSpec.traceLabel ?? taskId.slice(0, 8)}。\n${renderSpec.primaryText || renderSpec.originalText || '消息内容不可用'}`;
+              this.#log('error', 'client_card_render_failed_forwarding_as_text', {
+                taskId,
+                targetSessionId: item.payload.targetSessionId,
+                error: detail,
+              });
+              firstMessageId = await this.#adapter.sendText(
+                item.payload.externalId,
+                fallbackText,
+                item.payload.replyMessageId,
+              );
+              const fallbackPayload: DeliveryCommand = {
+                ...item.payload,
+                mode: 'text',
+                cards: [],
+                text: fallbackText,
+                senderName: renderSpec.senderName,
+              };
+              delete fallbackPayload.render;
+              queue.updatePayload(taskId, fallbackPayload);
+              item = { ...item, payload: fallbackPayload };
+            }
           }
           for (const [index, card] of cards.entries()) {
             const messageId = await this.#adapter.sendCard(
@@ -573,7 +597,9 @@ export class NodeBridgeRuntime {
   }
 
   async #resolveInlineEmojiData(renderSpec: MessageCardRenderSpec): Promise<MessageCardRenderSpec> {
-    const { inlineEmojis: _inlineEmojis, reply, ...withoutInlineEmojis } = renderSpec;
+    const reply = renderSpec.reply;
+    const withoutInlineEmojis = { ...renderSpec };
+    delete withoutInlineEmojis.inlineEmojis;
     const inlineEmojis = await this.#resolveInlineEmojiList(renderSpec.inlineEmojis);
     if (!reply) {
       return {
@@ -581,7 +607,8 @@ export class NodeBridgeRuntime {
         ...(inlineEmojis.length ? { inlineEmojis } : {}),
       };
     }
-    const { inlineEmojis: _replyInlineEmojis, ...replyWithoutInlineEmojis } = reply;
+    const replyWithoutInlineEmojis = { ...reply };
+    delete replyWithoutInlineEmojis.inlineEmojis;
     const replyInlineEmojis = await this.#resolveInlineEmojiList(reply.inlineEmojis);
     return {
       ...withoutInlineEmojis,

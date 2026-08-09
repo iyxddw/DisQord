@@ -5,9 +5,12 @@ import { resolve } from 'node:path';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { simulateBlueprint, validateBlueprint } from '@disqord/blueprint';
+import { llmProviderSettingsSchema, llmSettingsSchema } from '@disqord/llm';
 import {
   blueprintVersionSchema,
   blueprintSchema,
+  cardSettingsSchema,
+  cardThemes,
   chatSessionSchema,
   messageEnvelopeSchema,
   promptPurposeSchema,
@@ -67,27 +70,45 @@ const nodeLogResponseSchema = z.object({
   requestId: z.uuid(),
   page: nodeLogPageSchema,
 });
-const llmSettingsInputSchema = z.object({
-  baseUrl: z.url(),
+const llmProviderInputSchema = llmProviderSettingsSchema.extend({
   apiKey: z.string().min(1).max(10_000).optional(),
-  translationModel: z.string().min(1).max(256),
-  moderationModel: z.string().min(1).max(256),
-  imageModerationModel: z.string().trim().max(256).default(''),
-  imageModerationDetail: z.enum(['auto', 'low', 'high']).default('auto'),
-  maxImageCount: z.number().int().min(1).max(10).default(10),
-  maxImageBytes: z
-    .number()
-    .int()
-    .min(256 * 1024)
-    .max(20 * 1024 * 1024)
-    .default(10 * 1024 * 1024),
-  timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
-  maxRetries: z.number().int().min(0).max(5).default(2),
-  maxTokens: z.number().int().min(64).max(65_536).optional(),
+});
+const normalizedLlmSettingsInputSchema = z.object({
+  providers: z.array(llmProviderInputSchema).min(1).max(12),
   concurrency: z.number().int().min(1).max(100).default(4),
   fastMode: z.boolean().default(false),
   fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(1_500),
 });
+const llmSettingsInputSchema = z.preprocess((candidate) => {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return candidate;
+  const value = candidate as Record<string, unknown>;
+  if (Array.isArray(value.providers)) return value;
+  if (typeof value.baseUrl !== 'string') return value;
+  const providerKeys = [
+    'baseUrl',
+    'apiKey',
+    'translationModel',
+    'moderationModel',
+    'imageModerationModel',
+    'imageModerationDetail',
+    'maxImageCount',
+    'maxImageBytes',
+    'timeoutMs',
+    'maxRetries',
+    'maxTokens',
+  ] as const;
+  const provider = Object.fromEntries(
+    providerKeys.flatMap((key) => (value[key] === undefined ? [] : [[key, value[key]]])),
+  );
+  return {
+    providers: [{ id: 'legacy-provider', name: '默认模型', enabled: true, ...provider }],
+    ...(value.concurrency === undefined ? {} : { concurrency: value.concurrency }),
+    ...(value.fastMode === undefined ? {} : { fastMode: value.fastMode }),
+    ...(value.fastDeliveryIntervalMs === undefined
+      ? {}
+      : { fastDeliveryIntervalMs: value.fastDeliveryIntervalMs }),
+  };
+}, normalizedLlmSettingsInputSchema);
 const promptDraftBodySchema = z.object({ content: z.string().min(1).max(50_000) });
 const blueprintDraftBodySchema = z.object({
   name: z.string().min(1).max(256),
@@ -337,20 +358,74 @@ export function createCentralApplication(options: CentralApplicationOptions) {
 
   app.get('/api/settings/llm', { preHandler: requireAdmin }, async () => {
     const entry = await options.store.get('settings', 'llm');
+    if (!entry) {
+      return { providers: [], concurrency: 4, fastMode: false, fastDeliveryIntervalMs: 1_500 };
+    }
+    const settings = llmSettingsSchema.parse(entry.value);
+    const legacySecretConfigured = await options.secrets.has('llm-api-key');
     return {
-      ...(entry?.value as Record<string, unknown> | undefined),
-      apiKeyConfigured: await options.secrets.has('llm-api-key'),
+      ...settings,
+      providers: await Promise.all(
+        settings.providers.map(async (provider, index) => ({
+          ...provider,
+          apiKeyConfigured:
+            (await options.secrets.has(`llm-api-key:${provider.id}`)) ||
+            (index === 0 && legacySecretConfigured),
+        })),
+      ),
     };
   });
 
   app.put('/api/settings/llm', { preHandler: requireAdmin }, async (request, reply) => {
     try {
       const input = llmSettingsInputSchema.parse(request.body);
-      const { apiKey, ...settings } = input;
-      if (apiKey) await options.secrets.set('llm-api-key', apiKey);
+      const providers = input.providers.map((provider) =>
+        llmProviderSettingsSchema.parse(provider),
+      );
+      const settings = llmSettingsSchema.parse({
+        providers,
+        concurrency: input.concurrency,
+        fastMode: input.fastMode,
+        fastDeliveryIntervalMs: input.fastDeliveryIntervalMs,
+      });
+      await Promise.all(
+        input.providers.map(async (provider) => {
+          if (provider.apiKey) {
+            await options.secrets.set(`llm-api-key:${provider.id}`, provider.apiKey);
+          }
+        }),
+      );
       await options.store.set('settings', 'llm', settings);
       void broadcastRuntimeSettings(settings.fastMode, settings.fastDeliveryIntervalMs);
-      return { ...settings, apiKeyConfigured: await options.secrets.has('llm-api-key') };
+      return {
+        ...settings,
+        providers: await Promise.all(
+          settings.providers.map(async (provider, index) => ({
+            ...provider,
+            apiKeyConfigured:
+              (await options.secrets.has(`llm-api-key:${provider.id}`)) ||
+              (index === 0 && (await options.secrets.has('llm-api-key'))),
+          })),
+        ),
+      };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get('/api/settings/card', { preHandler: requireAdmin }, async () => {
+    const entry = await options.store.get('settings', 'card');
+    return {
+      ...cardSettingsSchema.parse(entry?.value ?? {}),
+      themes: cardThemes,
+    };
+  });
+
+  app.put('/api/settings/card', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const settings = cardSettingsSchema.parse(request.body);
+      await options.store.set('settings', 'card', settings);
+      return { ...settings, themes: cardThemes };
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
     }

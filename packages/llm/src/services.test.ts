@@ -406,14 +406,14 @@ describe('LLM translation and moderation', () => {
       moderationModel: 'moderate',
       maxTokens: 4096,
     });
-    expect(withCap.maxTokens).toBe(4096);
+    expect(withCap.providers[0]?.maxTokens).toBe(4096);
 
     const withoutCap = llmSettingsSchema.parse({
       baseUrl: 'https://llm.example.test/v1',
       translationModel: 'translate',
       moderationModel: 'moderate',
     });
-    expect(withoutCap.maxTokens).toBeUndefined();
+    expect(withoutCap.providers[0]?.maxTokens).toBeUndefined();
   });
 });
 

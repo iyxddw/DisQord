@@ -135,7 +135,10 @@ export class LlmModerationService {
   }
 }
 
-export const llmSettingsSchema = z.object({
+export const llmProviderSettingsSchema = z.object({
+  id: z.string().trim().min(1).max(128),
+  name: z.string().trim().min(1).max(128),
+  enabled: z.boolean().default(true),
   baseUrl: z.url(),
   translationModel: z.string().trim().min(1).max(256),
   moderationModel: z.string().trim().min(1).max(256),
@@ -151,9 +154,59 @@ export const llmSettingsSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
   maxRetries: z.number().int().min(0).max(5).default(2),
   maxTokens: z.number().int().min(64).max(65_536).optional(),
+});
+
+const normalizedLlmSettingsSchema = z.object({
+  providers: z
+    .array(llmProviderSettingsSchema)
+    .min(1)
+    .max(12)
+    .refine(
+      (providers) => new Set(providers.map((provider) => provider.id)).size === providers.length,
+      {
+        message: 'LLM provider ids must be unique.',
+      },
+    ),
   concurrency: z.number().int().min(1).max(100).default(4),
   fastMode: z.boolean().default(false),
   fastDeliveryIntervalMs: z.number().int().min(0).max(60_000).default(1_500),
 });
 
+/**
+ * Accepts the original single-provider object and normalizes it to an ordered
+ * provider list. This lets existing deployments upgrade without editing their
+ * state file; the first provider also keeps using the legacy secret key until
+ * the administrator saves it again.
+ */
+export const llmSettingsSchema = z.preprocess((candidate) => {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return candidate;
+  const value = candidate as Record<string, unknown>;
+  if (Array.isArray(value.providers)) return value;
+  if (typeof value.baseUrl !== 'string') return value;
+  const providerKeys = [
+    'baseUrl',
+    'translationModel',
+    'moderationModel',
+    'imageModerationModel',
+    'imageModerationDetail',
+    'maxImageCount',
+    'maxImageBytes',
+    'timeoutMs',
+    'maxRetries',
+    'maxTokens',
+  ] as const;
+  const provider = Object.fromEntries(
+    providerKeys.flatMap((key) => (value[key] === undefined ? [] : [[key, value[key]]])),
+  );
+  return {
+    providers: [{ id: 'legacy-provider', name: '默认模型', enabled: true, ...provider }],
+    ...(value.concurrency === undefined ? {} : { concurrency: value.concurrency }),
+    ...(value.fastMode === undefined ? {} : { fastMode: value.fastMode }),
+    ...(value.fastDeliveryIntervalMs === undefined
+      ? {}
+      : { fastDeliveryIntervalMs: value.fastDeliveryIntervalMs }),
+  };
+}, normalizedLlmSettingsSchema);
+
 export type LlmSettings = z.infer<typeof llmSettingsSchema>;
+export type LlmProviderSettings = z.infer<typeof llmProviderSettingsSchema>;

@@ -1,3 +1,4 @@
+/* global __dirname, module */
 // PM2 进程配置：三个服务共用一份，从 DisQord 项目根目录启动。
 // 依赖：根目录存在 central.env / qq.env / discord.env。
 // 由 Bash 启动器直接 exec node，避免 PM2 丢失 Node 的 --env-file 参数。

@@ -28,16 +28,21 @@ import {
 } from '@xyflow/react';
 import {
   Activity,
+  ArrowDown,
   ArrowRightLeft,
+  ArrowUp,
   Bot,
   Check,
   ChevronRight,
   CircleAlert,
   FileClock,
+  FlaskConical,
+  Gauge,
   LogOut,
   LoaderCircle,
   MessagesSquare,
   Network,
+  Palette,
   Pencil,
   Play,
   Plus,
@@ -166,6 +171,7 @@ function App() {
       '/chat-sessions',
       '/blueprints',
       '/settings/llm',
+      '/settings/card',
       '/settings/simulation',
       '/reviews',
       '/logs?page=1&pageSize=50&level=all&search=',
@@ -240,7 +246,7 @@ function App() {
           {page === 'sessions' && <Sessions />}
           {page === 'blueprint' && <BlueprintEditor />}
           {page === 'nodes' && <Nodes />}
-          {page === 'settings' && <LlmSettings />}
+          {page === 'settings' && <SettingsPage />}
           {page === 'reviews' && <Records kind="reviews" />}
           {page === 'logs' && <Records kind="logs" />}
         </section>
@@ -428,7 +434,7 @@ function Sessions() {
     }
   };
   const toggleFetchOnly = async (session: ChatSession) => {
-    const next = !Boolean(session.fetchOnly);
+    const next = !session.fetchOnly;
     const previous = data;
     setData((current) =>
       current.map((item) => (item.id === session.id ? { ...item, fetchOnly: next } : item)),
@@ -2420,254 +2426,567 @@ function Nodes() {
   );
 }
 
-function LlmSettings() {
-  const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
-  const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
-  const [form, setForm] = useState({
+type SettingsSection = 'llm' | 'delivery' | 'cards' | 'simulation';
+
+interface LlmProviderForm {
+  id: string;
+  name: string;
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  apiKeyConfigured: boolean;
+  translationModel: string;
+  moderationModel: string;
+  imageModerationModel: string;
+  imageModerationDetail: 'auto' | 'low' | 'high';
+  maxImageCount: number;
+  maxImageBytes: number;
+  timeoutMs: number;
+  maxRetries: number;
+  maxTokens: number | '';
+}
+
+interface CardThemeView {
+  id: string;
+  name: string;
+  description: string;
+  dark: boolean;
+  layout: string;
+  colors: {
+    backgroundStart: string;
+    backgroundMid: string;
+    backgroundEnd: string;
+    text: string;
+    muted: string;
+    accent: string;
+    panel: string;
+    panelBorder: string;
+  };
+}
+
+interface CardSettingsView {
+  themeId: string;
+  themes: CardThemeView[];
+}
+
+function createProvider(index = 0): LlmProviderForm {
+  return {
+    id:
+      typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `provider-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    name: `模型配置 ${index + 1}`,
+    enabled: true,
     baseUrl: '',
     apiKey: '',
+    apiKeyConfigured: false,
     translationModel: '',
     moderationModel: '',
     imageModerationModel: '',
-    imageModerationDetail: 'auto' as 'auto' | 'low' | 'high',
+    imageModerationDetail: 'auto',
     maxImageCount: 10,
     maxImageBytes: 10 * 1024 * 1024,
-    timeoutMs: 30000,
+    timeoutMs: 30_000,
     maxRetries: 2,
-    maxTokens: 2048 as number | '',
-    concurrency: 4,
-    fastMode: false,
-    fastDeliveryIntervalMs: 1500,
-  });
+    maxTokens: 2_048,
+  };
+}
+
+function SettingsPage() {
+  const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
+  const cards = useLoad<CardSettingsView>('/settings/card', { themeId: 'midnight', themes: [] });
+  const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
+  const [section, setSection] = useState<SettingsSection>('llm');
+  const [providers, setProviders] = useState<LlmProviderForm[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState('');
+  const [concurrency, setConcurrency] = useState(4);
+  const [fastMode, setFastMode] = useState(false);
+  const [fastDeliveryIntervalMs, setFastDeliveryIntervalMs] = useState(1_500);
+  const [themeId, setThemeId] = useState('midnight');
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => {
-    if (Object.keys(settings.data).length)
-      setForm((current) => ({
-        ...current,
-        ...settings.data,
-        maxTokens: (settings.data.maxTokens as number | undefined) ?? '',
-        apiKey: '',
-      }));
+    if (!Object.keys(settings.data).length) return;
+    const loaded = Array.isArray(settings.data.providers)
+      ? (settings.data.providers as Array<Record<string, unknown>>).map(
+          (provider, index) =>
+            ({
+              ...createProvider(index),
+              ...provider,
+              apiKey: '',
+              apiKeyConfigured: Boolean(provider.apiKeyConfigured),
+              maxTokens: typeof provider.maxTokens === 'number' ? provider.maxTokens : '',
+            }) as LlmProviderForm,
+        )
+      : [];
+    const next = loaded.length ? loaded : [createProvider(0)];
+    setProviders(next);
+    setSelectedProviderId((current) =>
+      next.some((provider) => provider.id === current) ? current : next[0]!.id,
+    );
+    setConcurrency(Number(settings.data.concurrency ?? 4));
+    setFastMode(Boolean(settings.data.fastMode));
+    setFastDeliveryIntervalMs(Number(settings.data.fastDeliveryIntervalMs ?? 1_500));
   }, [settings.data]);
-  useEffect(() => {
-    setSimulationDelayMs(simulation.data.delayMs ?? 1_000);
-  }, [simulation.data.delayMs]);
+  useEffect(() => setThemeId(cards.data.themeId ?? 'midnight'), [cards.data.themeId]);
+  useEffect(
+    () => setSimulationDelayMs(simulation.data.delayMs ?? 1_000),
+    [simulation.data.delayMs],
+  );
+
+  const selected = providers.find((provider) => provider.id === selectedProviderId) ?? providers[0];
+  const updateSelected = (patch: Partial<LlmProviderForm>) => {
+    if (!selected) return;
+    setProviders((current) =>
+      current.map((provider) =>
+        provider.id === selected.id ? { ...provider, ...patch } : provider,
+      ),
+    );
+  };
+  const moveSelected = (offset: -1 | 1) => {
+    if (!selected) return;
+    setProviders((current) => {
+      const from = current.findIndex((provider) => provider.id === selected.id);
+      const to = from + offset;
+      if (from < 0 || to < 0 || to >= current.length) return current;
+      const copy = [...current];
+      [copy[from], copy[to]] = [copy[to]!, copy[from]!];
+      return copy;
+    });
+  };
+  const addProvider = () => {
+    const provider = createProvider(providers.length);
+    setProviders((current) => [...current, provider]);
+    setSelectedProviderId(provider.id);
+  };
+  const removeSelected = () => {
+    if (!selected || providers.length <= 1) return;
+    const index = providers.findIndex((provider) => provider.id === selected.id);
+    const next = providers.filter((provider) => provider.id !== selected.id);
+    setProviders(next);
+    setSelectedProviderId(next[Math.min(index, next.length - 1)]!.id);
+  };
   const save = async () => {
+    setSaving(true);
+    setNotice('');
     try {
-      const [savedSettings, savedSimulation] = await Promise.all([
-        apiRetry(
+      const [savedSettings, savedCards, savedSimulation] = await Promise.all([
+        apiRetry<Record<string, unknown>>(
           '/settings/llm',
           {
             method: 'PUT',
             json: {
-              ...form,
-              ...(form.apiKey ? {} : { apiKey: undefined }),
-              ...(form.maxTokens === '' ? { maxTokens: undefined } : {}),
+              providers: providers.map((provider) => ({
+                id: provider.id,
+                name: provider.name,
+                enabled: provider.enabled,
+                baseUrl: provider.baseUrl,
+                ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+                translationModel: provider.translationModel,
+                moderationModel: provider.moderationModel,
+                imageModerationModel: provider.imageModerationModel,
+                imageModerationDetail: provider.imageModerationDetail,
+                maxImageCount: provider.maxImageCount,
+                maxImageBytes: provider.maxImageBytes,
+                timeoutMs: provider.timeoutMs,
+                maxRetries: provider.maxRetries,
+                ...(provider.maxTokens === '' ? {} : { maxTokens: provider.maxTokens }),
+              })),
+              concurrency,
+              fastMode,
+              fastDeliveryIntervalMs,
             },
           },
           { attempts: 3 },
         ),
-        apiRetry(
+        apiRetry<CardSettingsView>(
+          '/settings/card',
+          { method: 'PUT', json: { themeId } },
+          { attempts: 3 },
+        ),
+        apiRetry<{ delayMs: number }>(
           '/settings/simulation',
           { method: 'PUT', json: { delayMs: simulationDelayMs } },
           { attempts: 3 },
         ),
       ]);
-      settings.setData(savedSettings as Record<string, unknown>);
-      simulation.setData(savedSimulation as { delayMs: number });
-      setNotice('设置已保存，API 密钥不会回传到浏览器。');
+      settings.setData(savedSettings);
+      cards.setData(savedCards);
+      simulation.setData(savedSimulation);
+      setNotice('全部设置已保存；模型会按列表顺序故障转移，API 密钥不会回传。');
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : '保存失败');
+    } finally {
+      setSaving(false);
     }
   };
-  if (settings.loading || simulation.loading) return <LoadingState text="正在读取基础设置" />;
+
+  if (settings.loading || cards.loading || simulation.loading) {
+    return <LoadingState text="正在读取基础设置" />;
+  }
+  const sections: Array<{ id: SettingsSection; label: string; hint: string; icon: typeof Bot }> = [
+    { id: 'llm', label: '模型接入', hint: '多模型与故障转移', icon: Bot },
+    { id: 'delivery', label: '投递性能', hint: '并发与疾速模式', icon: Gauge },
+    {
+      id: 'cards',
+      label: '卡片主题',
+      hint: `${cards.data.themes.length} 套本地主题`,
+      icon: Palette,
+    },
+    { id: 'simulation', label: '模拟器', hint: '蓝图播放节奏', icon: FlaskConical },
+  ];
+
   return (
-    <div className="panel form-panel">
-      <PanelTitle
-        title="大模型 API"
-        subtitle="兼容 OpenAI Chat Completions 接口；翻译与审核可使用不同模型"
-      />
-      <div className="form-grid">
-        <label className="wide">
-          API 基础地址
-          <input
-            value={form.baseUrl}
-            placeholder="https://api.example.com/v1"
-            onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-          />
-        </label>
-        <label className="wide">
-          API 密钥
-          <input
-            type="password"
-            value={form.apiKey}
-            placeholder={settings.data.apiKeyConfigured ? '已保存；留空表示不修改' : 'sk-…'}
-            onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-          />
-        </label>
-        <label>
-          翻译模型
-          <input
-            value={form.translationModel}
-            onChange={(event) => setForm({ ...form, translationModel: event.target.value })}
-          />
-        </label>
-        <label>
-          审核模型
-          <input
-            value={form.moderationModel}
-            onChange={(event) => setForm({ ...form, moderationModel: event.target.value })}
-          />
-        </label>
-        <label>
-          图片审核模型
-          <input
-            value={form.imageModerationModel}
-            placeholder="留空则图片自动判定为未过审"
-            onChange={(event) => setForm({ ...form, imageModerationModel: event.target.value })}
-          />
-          <small className="field-hint">需要支持视觉输入；模型不支持或请求失败时统一拦截。</small>
-        </label>
-        <label>
-          图片细节级别
-          <select
-            value={form.imageModerationDetail}
-            onChange={(event) =>
-              setForm({
-                ...form,
-                imageModerationDetail: event.target.value as 'auto' | 'low' | 'high',
-              })
-            }
-          >
-            <option value="auto">自动</option>
-            <option value="low">低（省 token）</option>
-            <option value="high">高（更细致）</option>
-          </select>
-        </label>
-        <label>
-          单条最多审核图片数
-          <input
-            type="number"
-            min="1"
-            max="10"
-            value={form.maxImageCount}
-            onChange={(event) => setForm({ ...form, maxImageCount: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          单张图片上限（MB）
-          <input
-            type="number"
-            min="0.25"
-            max="20"
-            step="0.25"
-            value={Math.round((form.maxImageBytes / 1024 / 1024) * 100) / 100}
-            onChange={(event) =>
-              setForm({
-                ...form,
-                maxImageBytes: Math.round(Number(event.target.value) * 1024 * 1024),
-              })
-            }
-          />
-        </label>
-        <label>
-          超时（毫秒）
-          <input
-            type="number"
-            value={form.timeoutMs}
-            onChange={(event) => setForm({ ...form, timeoutMs: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          失败重试次数
-          <input
-            type="number"
-            min="0"
-            max="5"
-            value={form.maxRetries}
-            onChange={(event) => setForm({ ...form, maxRetries: Number(event.target.value) })}
-          />
-          <small className="field-hint">仅对限流和服务器错误自动重试。</small>
-        </label>
-        <label>
-          最大输出 token 数
-          <input
-            type="number"
-            min="64"
-            max="65536"
-            value={form.maxTokens}
-            placeholder="留空则不发送，使用服务商默认"
-            onChange={(event) =>
-              setForm({
-                ...form,
-                maxTokens: event.target.value === '' ? '' : Number(event.target.value),
-              })
-            }
-          />
-          <small className="field-hint">
-            默认 2048；留空表示不发送
-            max_tokens，采用服务商默认（部分服务商默认较低，长文本可能被截断）。
-          </small>
-        </label>
-        <label>
-          并发数
-          <input
-            type="number"
-            value={form.concurrency}
-            onChange={(event) => setForm({ ...form, concurrency: Number(event.target.value) })}
-          />
-        </label>
-        <label className="wide setting-toggle">
-          <span>
-            <input
-              type="checkbox"
-              checked={Boolean(form.fastMode)}
-              onChange={(event) => setForm({ ...form, fastMode: event.target.checked })}
-            />{' '}
-            疾速模式
-          </span>
-          <small className="field-hint">
-            关闭图片下载与合成，直接发送文本；客户端不等待打组，立即入队并发处理，发送间隔由下方设置控制，失败最多重试
-            4 次。翻译和审核仍会执行；图片审核无法读取图片时按未通过处理。
-          </small>
-        </label>
-        <label>
-          疾速发送间隔（毫秒）
-          <input
-            type="number"
-            min="0"
-            max="60000"
-            step="100"
-            value={form.fastDeliveryIntervalMs}
-            onChange={(event) =>
-              setForm({ ...form, fastDeliveryIntervalMs: Number(event.target.value) })
-            }
-          />
-          <small className="field-hint">只限制同一目标会话的连续发送；填 0 表示不额外等待。</small>
-        </label>
-        <label>
-          蓝图模拟节点间隔（毫秒）
-          <input
-            type="number"
-            min="0"
-            max="10000"
-            step="100"
-            value={simulationDelayMs}
-            onChange={(event) => setSimulationDelayMs(Number(event.target.value))}
-          />
-          <small className="field-hint">只影响模拟播放的视觉节奏，不会给真实消息增加延迟。</small>
-        </label>
+    <div className="settings-page">
+      <div className="settings-tabs" role="tablist" aria-label="设置功能区">
+        {sections.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              className={section === item.id ? 'active' : ''}
+              key={item.id}
+              role="tab"
+              aria-selected={section === item.id}
+              onClick={() => setSection(item.id)}
+            >
+              <Icon size={18} />
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.hint}</small>
+              </span>
+            </button>
+          );
+        })}
       </div>
-      <div className="safety-note">
-        <ShieldCheck size={17} />
-        <span>这里只配置模型连接；翻译、审核提示词与审核阈值均在蓝图模块内设置。</span>
+
+      {section === 'llm' && (
+        <div className="settings-provider-layout">
+          <aside className="provider-list panel">
+            <div className="provider-list-head">
+              <div>
+                <strong>调用顺序</strong>
+                <small>失败后自动尝试下一项</small>
+              </div>
+              <button title="添加模型配置" onClick={addProvider}>
+                <Plus size={16} />
+              </button>
+            </div>
+            {providers.map((provider, index) => (
+              <button
+                className={`provider-record ${selected?.id === provider.id ? 'active' : ''}`}
+                key={provider.id}
+                onClick={() => setSelectedProviderId(provider.id)}
+              >
+                <span className={`provider-order ${provider.enabled ? '' : 'disabled'}`}>
+                  {index + 1}
+                </span>
+                <span>
+                  <strong>{provider.name || '未命名配置'}</strong>
+                  <small>{provider.enabled ? provider.baseUrl || '等待填写地址' : '已停用'}</small>
+                </span>
+              </button>
+            ))}
+            <div className="provider-help">
+              仅网络、额度、鉴权、格式等技术失败会切换下一项；模型成功返回的审核结论不会重试。
+            </div>
+          </aside>
+
+          {selected && (
+            <section className="panel provider-editor">
+              <div className="provider-editor-head">
+                <div>
+                  <span>
+                    优先级 {providers.findIndex((provider) => provider.id === selected.id) + 1}
+                  </span>
+                  <h2>{selected.name || '未命名配置'}</h2>
+                </div>
+                <div>
+                  <button title="上移" onClick={() => moveSelected(-1)}>
+                    <ArrowUp size={16} />
+                  </button>
+                  <button title="下移" onClick={() => moveSelected(1)}>
+                    <ArrowDown size={16} />
+                  </button>
+                  <button
+                    className="danger-text"
+                    title="删除"
+                    disabled={providers.length <= 1}
+                    onClick={removeSelected}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              </div>
+              <div className="form-grid">
+                <label>
+                  配置名称
+                  <input
+                    value={selected.name}
+                    onChange={(event) => updateSelected({ name: event.target.value })}
+                  />
+                </label>
+                <label className="provider-enabled">
+                  启用状态
+                  <span>
+                    <input
+                      type="checkbox"
+                      checked={selected.enabled}
+                      onChange={(event) => updateSelected({ enabled: event.target.checked })}
+                    />
+                    参与故障转移
+                  </span>
+                </label>
+                <label className="wide">
+                  API 基础地址
+                  <input
+                    value={selected.baseUrl}
+                    placeholder="https://api.example.com/v1"
+                    onChange={(event) => updateSelected({ baseUrl: event.target.value })}
+                  />
+                </label>
+                <label className="wide">
+                  API 密钥
+                  <input
+                    type="password"
+                    value={selected.apiKey}
+                    placeholder={selected.apiKeyConfigured ? '已保存；留空表示不修改' : 'sk-…'}
+                    onChange={(event) => updateSelected({ apiKey: event.target.value })}
+                  />
+                </label>
+                <label>
+                  翻译模型
+                  <input
+                    value={selected.translationModel}
+                    onChange={(event) => updateSelected({ translationModel: event.target.value })}
+                  />
+                </label>
+                <label>
+                  文本审核模型
+                  <input
+                    value={selected.moderationModel}
+                    onChange={(event) => updateSelected({ moderationModel: event.target.value })}
+                  />
+                </label>
+                <label>
+                  图片审核模型
+                  <input
+                    value={selected.imageModerationModel}
+                    placeholder="留空则跳过该配置的图片审核"
+                    onChange={(event) =>
+                      updateSelected({ imageModerationModel: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  图片细节级别
+                  <select
+                    value={selected.imageModerationDetail}
+                    onChange={(event) =>
+                      updateSelected({
+                        imageModerationDetail: event.target
+                          .value as LlmProviderForm['imageModerationDetail'],
+                      })
+                    }
+                  >
+                    <option value="auto">自动</option>
+                    <option value="low">低（省 token）</option>
+                    <option value="high">高</option>
+                  </select>
+                </label>
+                <label>
+                  单条最多图片数
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={selected.maxImageCount}
+                    onChange={(event) =>
+                      updateSelected({ maxImageCount: Number(event.target.value) })
+                    }
+                  />
+                </label>
+                <label>
+                  单张图片上限（MB）
+                  <input
+                    type="number"
+                    min="0.25"
+                    max="20"
+                    step="0.25"
+                    value={Math.round((selected.maxImageBytes / 1024 / 1024) * 100) / 100}
+                    onChange={(event) =>
+                      updateSelected({
+                        maxImageBytes: Math.round(Number(event.target.value) * 1024 * 1024),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  超时（毫秒）
+                  <input
+                    type="number"
+                    min="1000"
+                    max="120000"
+                    value={selected.timeoutMs}
+                    onChange={(event) => updateSelected({ timeoutMs: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  内部重试次数
+                  <input
+                    type="number"
+                    min="0"
+                    max="5"
+                    value={selected.maxRetries}
+                    onChange={(event) => updateSelected({ maxRetries: Number(event.target.value) })}
+                  />
+                  <small className="field-hint">该项耗尽后才会切换下一配置。</small>
+                </label>
+                <label>
+                  最大输出 token
+                  <input
+                    type="number"
+                    min="64"
+                    max="65536"
+                    value={selected.maxTokens}
+                    placeholder="服务商默认"
+                    onChange={(event) =>
+                      updateSelected({
+                        maxTokens: event.target.value === '' ? '' : Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+              </div>
+              <div className="safety-note">
+                <ShieldCheck size={17} />
+                <span>提示词和审核阈值仍在蓝图中配置；此处只管理连接、模型和容灾顺序。</span>
+              </div>
+            </section>
+          )}
+        </div>
+      )}
+
+      {section === 'delivery' && (
+        <section className="panel settings-section-panel">
+          <PanelTitle title="投递与性能" subtitle="这些设置作用于整个中央端和所有已连接节点" />
+          <div className="form-grid">
+            <label>
+              LLM 并发数
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={concurrency}
+                onChange={(event) => setConcurrency(Number(event.target.value))}
+              />
+              <small className="field-hint">限制中央端同时处理的消息数。</small>
+            </label>
+            <label>
+              疾速发送间隔（毫秒）
+              <input
+                type="number"
+                min="0"
+                max="60000"
+                step="100"
+                value={fastDeliveryIntervalMs}
+                onChange={(event) => setFastDeliveryIntervalMs(Number(event.target.value))}
+              />
+              <small className="field-hint">同一目标会话连续发送的最小间隔。</small>
+            </label>
+            <label className="wide setting-toggle">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={fastMode}
+                  onChange={(event) => setFastMode(event.target.checked)}
+                />{' '}
+                疾速模式
+              </span>
+              <small className="field-hint">
+                关闭图片下载与卡片合成，直接发文本。翻译与审核仍执行；任何处理故障会显示给收件人并继续投递。
+              </small>
+            </label>
+          </div>
+        </section>
+      )}
+
+      {section === 'cards' && (
+        <section className="panel settings-section-panel card-theme-section">
+          <PanelTitle
+            title="消息卡片主题"
+            subtitle="主题参数保存在节点本地，每条消息只传一个短 ID，不增加图片流量"
+          />
+          <div className="theme-grid">
+            {cards.data.themes.map((theme) => (
+              <button
+                className={`theme-choice ${themeId === theme.id ? 'selected' : ''}`}
+                key={theme.id}
+                onClick={() => setThemeId(theme.id)}
+                style={
+                  {
+                    '--theme-a': theme.colors.backgroundStart,
+                    '--theme-b': theme.colors.backgroundEnd,
+                    '--theme-text': theme.colors.text,
+                    '--theme-muted': theme.colors.muted,
+                    '--theme-accent': theme.colors.accent,
+                    '--theme-panel': theme.colors.panel,
+                    '--theme-border': theme.colors.panelBorder,
+                  } as CSSProperties
+                }
+              >
+                <span className="theme-preview">
+                  <i className="theme-avatar" />
+                  <i className="theme-line main" />
+                  <i className="theme-line muted" />
+                  <i className="theme-platform">QQ</i>
+                  <i className="theme-message" />
+                  <i className="theme-quote" />
+                </span>
+                <span className="theme-meta">
+                  <strong>{theme.name}</strong>
+                  <small>{theme.description}</small>
+                </span>
+                <span className="theme-kind">
+                  {theme.dark ? '暗色' : '亮色'} · {theme.layout}
+                </span>
+                {themeId === theme.id && <Check className="theme-check" size={17} />}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {section === 'simulation' && (
+        <section className="panel settings-section-panel">
+          <PanelTitle
+            title="蓝图模拟器"
+            subtitle="只改变管理页面中的播放节奏，不影响真实消息延迟"
+          />
+          <div className="form-grid">
+            <label>
+              节点间隔（毫秒）
+              <input
+                type="number"
+                min="0"
+                max="10000"
+                step="100"
+                value={simulationDelayMs}
+                onChange={(event) => setSimulationDelayMs(Number(event.target.value))}
+              />
+            </label>
+          </div>
+        </section>
+      )}
+
+      <div className="settings-savebar">
+        <span>{notice || '修改完成后统一保存；切换分栏不会丢失未保存内容。'}</span>
+        <button className="primary fit" disabled={saving} onClick={() => void save()}>
+          {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+          {saving ? '保存中' : '保存全部设置'}
+        </button>
       </div>
-      {notice && <div className="notice">{notice}</div>}
-      <button className="primary fit" onClick={() => void save()}>
-        <Save size={16} />
-        保存设置
-      </button>
     </div>
   );
 }

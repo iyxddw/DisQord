@@ -8,6 +8,8 @@ import {
   OpenAICompatibleClient,
   getLlmFailureDetails,
   llmSettingsSchema,
+  type LlmFailureDetails,
+  type LlmProviderSettings,
   type ViolationAssessment,
 } from '@disqord/llm';
 import {
@@ -15,6 +17,7 @@ import {
   avatarRequestSchema,
   blueprintVersionSchema,
   blueprintSchema,
+  cardSettingsSchema,
   chatSessionSchema,
   createAvatarKey,
   createMessageIdempotencyKey,
@@ -85,7 +88,51 @@ function describeError(error: unknown): Record<string, unknown> {
   if (error instanceof Error && error.stack) base.stack = error.stack.slice(0, 12_000);
   const llm = getLlmFailureDetails(error);
   if (llm) base.llm = llm;
+  if (error instanceof AggregateError) {
+    base.causes = error.errors.slice(0, 12).map((cause) => describeError(cause));
+  }
   return base;
+}
+
+function firstLlmFailure(error: unknown): LlmFailureDetails | undefined {
+  const direct = getLlmFailureDetails(error);
+  if (direct) return direct;
+  if (error instanceof AggregateError) {
+    for (const cause of error.errors) {
+      const nested = firstLlmFailure(cause);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
+function processingFailureText(
+  stage: 'translation' | 'moderation' | 'rendering',
+  traceId: string,
+  error: unknown,
+): string {
+  const label = stage === 'translation' ? '翻译' : stage === 'moderation' ? '内容审核' : '卡片渲染';
+  const failure = firstLlmFailure(error);
+  const reason =
+    failure?.status === 401 || failure?.status === 403
+      ? '模型密钥无效或没有访问权限'
+      : failure?.status === 402
+        ? '模型账户余额或额度不足'
+        : failure?.status === 429
+          ? '模型服务额度耗尽或请求过于频繁'
+          : failure?.stage === 'network'
+            ? '模型服务暂时无法连接'
+            : stage === 'rendering'
+              ? '渲染组件暂时不可用'
+              : '所有已启用的模型配置均处理失败';
+  return `【DisQord ${label}异常】${reason}。原消息已继续转发，请联系管理员并提供追踪号 ${traceId.slice(0, 8)}。`;
+}
+
+class LlmProviderChainError extends AggregateError {
+  constructor(operation: string, errors: readonly Error[]) {
+    super(errors, `${operation} failed on every enabled LLM provider.`);
+    this.name = 'LlmProviderChainError';
+  }
 }
 
 export interface NodeCommandBus {
@@ -1249,7 +1296,7 @@ export class MessageOrchestrator {
           recentMessages: config.memoryMode ? recentMessages : [],
           repliedMessage: config.memoryMode ? message.replyTo : undefined,
         });
-        let result: TranslationResult;
+        let result: TranslationResult | undefined;
         try {
           result = await this.#processor.translate(
             message,
@@ -1268,7 +1315,7 @@ export class MessageOrchestrator {
             inputText: state.text,
             error: errorDetails,
           });
-          const llm = getLlmFailureDetails(error);
+          const llm = firstLlmFailure(error);
           if (llm) {
             await this.#log(message.traceId, 'error', 'llm_request_failed', {
               nodeId: node.id,
@@ -1277,17 +1324,27 @@ export class MessageOrchestrator {
               failure: llm,
             });
           }
-          throw error;
+          state = {
+            ...state,
+            text: processingFailureText('translation', message.traceId, error),
+            fixedText: false,
+          };
+          await recordActivity(node, processedSteps, {
+            message: '翻译失败；已换成用户可见的错误说明并继续流程',
+            text: state.text,
+          });
         }
-        await this.#log(message.traceId, 'info', 'translation_response', {
-          nodeId: node.id,
-          rawResult: result,
-        });
-        state = { ...state, text: result.translatedText, fixedText: false };
-        await recordActivity(node, processedSteps, {
-          message: `翻译结果：${result.translatedText}`,
-          text: result.translatedText,
-        });
+        if (result) {
+          await this.#log(message.traceId, 'info', 'translation_response', {
+            nodeId: node.id,
+            rawResult: result,
+          });
+          state = { ...state, text: result.translatedText, fixedText: false };
+          await recordActivity(node, processedSteps, {
+            message: `翻译结果：${result.translatedText}`,
+            text: result.translatedText,
+          });
+        }
       } else if (node.type === 'llm-moderation') {
         const config = moderationConfigSchema.parse(node.config);
         let assessment: ViolationAssessment;
@@ -1335,7 +1392,7 @@ export class MessageOrchestrator {
                 : {}),
               error: errorDetails,
             });
-            const llm = getLlmFailureDetails(error);
+            const llm = firstLlmFailure(error);
             if (llm) {
               await this.#log(message.traceId, 'error', 'llm_request_failed', {
                 nodeId: node.id,
@@ -1344,11 +1401,38 @@ export class MessageOrchestrator {
                 failure: llm,
               });
             }
-            throw error;
+            assessment = {
+              violationScore: 0,
+              categories: ['processing-unavailable'],
+              reason: '审核服务不可用；消息按故障放行策略继续。',
+              confidence: 0,
+              model: 'processing-unavailable',
+              diagnostics: { error: errorDetails },
+            };
+            state = {
+              ...state,
+              text: processingFailureText('moderation', message.traceId, error),
+              fixedText: false,
+            };
           }
         }
-        const imageReviewUnavailable = assessment.model === 'image-review-unavailable';
-        const passed = !imageReviewUnavailable && assessment.violationScore <= config.threshold;
+        const processingUnavailable =
+          assessment.model === 'image-review-unavailable' ||
+          assessment.model === 'processing-unavailable';
+        if (processingUnavailable && assessment.model === 'image-review-unavailable') {
+          state = {
+            ...state,
+            text: processingFailureText(
+              'moderation',
+              message.traceId,
+              new Error(assessment.reason),
+            ),
+            fixedText: false,
+          };
+        }
+        // A technical failure is not a moderation verdict. Keep delivery moving
+        // through the normal passed branch while surfacing the failure in-card.
+        const passed = processingUnavailable || assessment.violationScore <= config.threshold;
         await this.#log(message.traceId, 'info', 'moderation_response', {
           nodeId: node.id,
           threshold: config.threshold,
@@ -1357,7 +1441,9 @@ export class MessageOrchestrator {
           rawResult: assessment,
         });
         await recordActivity(node, processedSteps, {
-          message: `此消息违规程度为 ${Math.round(assessment.violationScore * 100)}%，走“${passed ? '过审' : '未过'}”出口`,
+          message: processingUnavailable
+            ? '审核服务异常；已显示错误并按故障放行策略继续'
+            : `此消息违规程度为 ${Math.round(assessment.violationScore * 100)}%，走“${passed ? '过审' : '未过'}”出口`,
           text: state.text,
           violationScore: assessment.violationScore,
           route: passed ? 'passed' : 'blocked',
@@ -1635,7 +1721,25 @@ export class MessageOrchestrator {
     // bytes inside a client render spec would cost more bandwidth than sending
     // the already-composited card, especially when the same image is retried.
     if (hasImageContent(message) && this.#processor.render) {
-      return { cards: await this.#render(message, target, text, fixedText) };
+      try {
+        return { cards: await this.#render(message, target, text, fixedText) };
+      } catch (error) {
+        await this.#log(message.traceId, 'error', 'central_card_render_failed_forwarding', {
+          targetSessionId: target.id,
+          error: describeError(error),
+        });
+        if (this.#processor.prepareRender) {
+          return {
+            renderSpec: await this.#processor.prepareRender(
+              message,
+              target,
+              processingFailureText('rendering', message.traceId, error),
+              false,
+            ),
+          };
+        }
+        throw error;
+      }
     }
     if (this.#processor.prepareRender) {
       return { renderSpec: await this.#processor.prepareRender(message, target, text, fixedText) };
@@ -1884,7 +1988,11 @@ export class MessageOrchestrator {
       const targetName = targetEntry
         ? chatSessionSchema.parse(targetEntry.value).displayName
         : '未知会话';
+      const cardSettings = cardSettingsSchema.parse(
+        (await this.#store.get('settings', 'card'))?.value ?? {},
+      );
       const spec: MessageCardRenderSpec = {
+        themeId: cardSettings.themeId,
         sourcePlatform: sourceSession.platform,
         targetLanguage: sourceSession.platform === 'discord' ? 'en' : 'zh',
         sourceName: targetName,
@@ -2095,6 +2203,11 @@ export class MessageOrchestrator {
   }
 }
 
+interface LlmProviderConnection {
+  readonly provider: LlmProviderSettings;
+  readonly client: OpenAICompatibleClient;
+}
+
 export class CentralMessageProcessor implements MessageProcessor {
   readonly #store: StateStore;
   readonly #secrets: SecretStore;
@@ -2126,35 +2239,42 @@ export class CentralMessageProcessor implements MessageProcessor {
     memoryMode: boolean,
     enableThinking: boolean,
   ): Promise<TranslationResult> {
-    const { settings, client } = await this.#client();
     const protectedText = protectCustomEmojiText(text, message.customEmojis);
-    const result = await new LlmTranslationService(client).translate({
-      text: protectedText.text,
-      targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
-      model: settings.translationModel,
-      prompt: { content: prompt, version: 1 },
-      enableThinking,
-      ...(memoryMode
-        ? {
-            recentMessages: recentMessages
-              .filter((item) => item.text?.trim())
-              .slice(-5)
-              .map((item) => ({ sender: item.sender.displayName, text: item.text! })),
-            ...(message.replyTo?.textPreview
-              ? {
-                  repliedMessage: {
-                    sender: message.replyTo.senderDisplayName,
-                    text: message.replyTo.textPreview,
-                  },
-                }
-              : {}),
-          }
-        : {}),
-    });
-    return {
-      ...result,
-      translatedText: protectedText.restore(result.translatedText),
-    };
+    const failures: Error[] = [];
+    for (const { provider, client } of await this.#clients()) {
+      try {
+        const result = await new LlmTranslationService(client).translate({
+          text: protectedText.text,
+          targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
+          model: provider.translationModel,
+          prompt: { content: prompt, version: 1 },
+          enableThinking,
+          ...(memoryMode
+            ? {
+                recentMessages: recentMessages
+                  .filter((item) => item.text?.trim())
+                  .slice(-5)
+                  .map((item) => ({ sender: item.sender.displayName, text: item.text! })),
+                ...(message.replyTo?.textPreview
+                  ? {
+                      repliedMessage: {
+                        sender: message.replyTo.senderDisplayName,
+                        text: message.replyTo.textPreview,
+                      },
+                    }
+                  : {}),
+              }
+            : {}),
+        });
+        return {
+          ...result,
+          translatedText: protectedText.restore(result.translatedText),
+        };
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    throw new LlmProviderChainError('Translation', failures);
   }
 
   async moderate(
@@ -2167,86 +2287,78 @@ export class CentralMessageProcessor implements MessageProcessor {
       readonly enableThinking?: boolean;
     },
   ): Promise<ViolationAssessment> {
-    const unavailable = (
-      reason: string,
-      diagnostics?: Record<string, unknown>,
-    ): ViolationAssessment => ({
-      violationScore: 1,
-      categories: ['image-review-unavailable'],
-      reason,
-      confidence: 1,
-      model: 'image-review-unavailable',
-      ...(diagnostics ? { diagnostics } : {}),
-    });
+    const connections = await this.#clients();
+    const failures: Error[] = [];
     if (!options?.imageReviewRequested) {
-      const { settings, client } = await this.#client();
-      return await new LlmModerationService(client).moderate({
-        text,
-        model: settings.moderationModel,
-        prompt: { content: prompt, version: 1 },
-        ...(options?.enableThinking === undefined
-          ? {}
-          : { enableThinking: options.enableThinking }),
-      });
+      for (const { provider, client } of connections) {
+        try {
+          return await new LlmModerationService(client).moderate({
+            text,
+            model: provider.moderationModel,
+            prompt: { content: prompt, version: 1 },
+            ...(options?.enableThinking === undefined
+              ? {}
+              : { enableThinking: options.enableThinking }),
+          });
+        } catch (error) {
+          failures.push(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+      throw new LlmProviderChainError('Moderation', failures);
     }
 
-    let settings: z.infer<typeof llmSettingsSchema>;
-    let client: OpenAICompatibleClient;
-    try {
-      const connection = await this.#client();
-      settings = connection.settings;
-      client = connection.client;
-    } catch (error) {
-      return unavailable('图片审核配置或模型客户端不可用。', {
-        error: describeError(error),
-      });
-    }
-    if (!settings.imageModerationModel.trim()) {
-      return unavailable('未配置图片审核模型，无法审核图片。');
-    }
     const imageUrls = options.imageUrls ?? [];
-    if (
-      !imageUrls.length ||
-      imageUrls.length !== options.imageCount ||
-      imageUrls.length > settings.maxImageCount
-    ) {
-      return unavailable('图片地址缺失或图片数量超过审核限制，无法审核图片。');
+    if (!imageUrls.length || imageUrls.length !== options.imageCount) {
+      throw new LlmProviderChainError('Image moderation', [
+        new Error('图片地址缺失，无法进行图片审核。'),
+      ]);
+    }
+    const eligible = connections.filter(
+      ({ provider }) =>
+        Boolean(provider.imageModerationModel.trim()) && imageUrls.length <= provider.maxImageCount,
+    );
+    if (!eligible.length) {
+      throw new LlmProviderChainError('Image moderation', [
+        new Error('没有可处理当前图片数量的视觉模型配置。'),
+      ]);
     }
 
     let images: string[];
     try {
+      const maxBytes = Math.max(...eligible.map(({ provider }) => provider.maxImageBytes));
       images = await Promise.all(
         imageUrls.map(
           async (url) =>
             (
               await downloadExternalImage(url, {
-                maxBytes: settings.maxImageBytes,
+                maxBytes,
               })
             ).dataUri,
         ),
       );
     } catch (error) {
-      return unavailable('图片下载或解码失败，无法审核图片。', {
-        error: describeError(error),
-      });
+      throw new LlmProviderChainError('Image moderation', [
+        error instanceof Error ? error : new Error(String(error)),
+      ]);
     }
 
-    try {
-      return await new LlmModerationService(client).moderate({
-        text,
-        model: settings.imageModerationModel,
-        prompt: { content: prompt, version: 1 },
-        images,
-        imageDetail: settings.imageModerationDetail,
-        ...(options?.enableThinking === undefined
-          ? {}
-          : { enableThinking: options.enableThinking }),
-      });
-    } catch (error) {
-      return unavailable('图片审核模型不支持视觉输入或请求失败。', {
-        error: describeError(error),
-      });
+    for (const { provider, client } of eligible) {
+      try {
+        return await new LlmModerationService(client).moderate({
+          text,
+          model: provider.imageModerationModel,
+          prompt: { content: prompt, version: 1 },
+          images,
+          imageDetail: provider.imageModerationDetail,
+          ...(options?.enableThinking === undefined
+            ? {}
+            : { enableThinking: options.enableThinking }),
+        });
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
     }
+    throw new LlmProviderChainError('Image moderation', failures);
   }
 
   async resolveAvatar(avatarKey: string): Promise<string | undefined> {
@@ -2277,6 +2389,8 @@ export class CentralMessageProcessor implements MessageProcessor {
     fixedText: boolean,
     includeImages: boolean,
   ): Promise<MessageCardRenderSpec> {
+    const cardSettingsEntry = await this.#store.get('settings', 'card');
+    const cardSettings = cardSettingsSchema.parse(cardSettingsEntry?.value ?? {});
     const sourceSession = (await this.#store.list<ChatSession>('chat-session'))
       .map((entry) => chatSessionSchema.parse(entry.value))
       .find(
@@ -2318,6 +2432,7 @@ export class CentralMessageProcessor implements MessageProcessor {
       this.#resolveInlineEmojis(message.replyTo?.customEmojis),
     ]);
     return {
+      themeId: cardSettings.themeId,
       sourcePlatform: message.source.platform,
       targetLanguage: target.platform === 'discord' ? 'en' : 'zh',
       sourceName: message.source.channelId,
@@ -2399,26 +2514,43 @@ export class CentralMessageProcessor implements MessageProcessor {
     );
   }
 
-  async #client(): Promise<{
-    settings: z.infer<typeof llmSettingsSchema>;
-    apiKey: string;
-    client: OpenAICompatibleClient;
-  }> {
+  async #clients(): Promise<readonly LlmProviderConnection[]> {
     const settingsEntry = await this.#store.get('settings', 'llm');
-    const apiKey = await this.#secrets.get('llm-api-key');
-    if (!settingsEntry || !apiKey) throw new Error('大模型 API 设置或密钥尚未配置。');
+    if (!settingsEntry) throw new Error('大模型 API 尚未配置。');
     const settings = llmSettingsSchema.parse(settingsEntry.value);
-    return {
-      settings,
-      apiKey,
-      client: new OpenAICompatibleClient({
-        baseUrl: settings.baseUrl,
-        apiKey,
-        timeoutMs: settings.timeoutMs,
-        maxRetries: settings.maxRetries,
-        ...(settings.maxTokens === undefined ? {} : { maxTokens: settings.maxTokens }),
-      }),
-    };
+    const connections: LlmProviderConnection[] = [];
+    const failures: Error[] = [];
+    const enabled = settings.providers.filter((provider) => provider.enabled);
+    for (const [index, provider] of enabled.entries()) {
+      const apiKey =
+        (await this.#secrets.get(`llm-api-key:${provider.id}`)) ??
+        (index === 0 ? await this.#secrets.get('llm-api-key') : undefined);
+      if (!apiKey) {
+        failures.push(new Error(`${provider.name} 未配置 API 密钥。`));
+        continue;
+      }
+      try {
+        connections.push({
+          provider,
+          client: new OpenAICompatibleClient({
+            baseUrl: provider.baseUrl,
+            apiKey,
+            timeoutMs: provider.timeoutMs,
+            maxRetries: provider.maxRetries,
+            ...(provider.maxTokens === undefined ? {} : { maxTokens: provider.maxTokens }),
+          }),
+        });
+      } catch (error) {
+        failures.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    if (!connections.length) {
+      throw new LlmProviderChainError(
+        'LLM setup',
+        failures.length ? failures : [new Error('没有已启用的模型配置。')],
+      );
+    }
+    return connections;
   }
 }
 
