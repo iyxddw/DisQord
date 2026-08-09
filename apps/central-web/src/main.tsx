@@ -33,8 +33,10 @@ import {
   ArrowUp,
   Bot,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleAlert,
+  Copy,
   FileClock,
   FlaskConical,
   Gauge,
@@ -43,6 +45,7 @@ import {
   MessagesSquare,
   Network,
   Palette,
+  Pause,
   Pencil,
   Play,
   Plus,
@@ -159,11 +162,16 @@ function useLoad<T>(path: string, fallback: T) {
 function App() {
   const [auth, setAuth] = useState<AuthStatus>();
   const [page, setPage] = useState<Page>('overview');
-  useEffect(() => {
-    void api<AuthStatus>('/auth/status')
-      .then(setAuth)
-      .catch(() => setAuth({ configured: false, authenticated: false }));
+  const refreshAuth = useCallback(async () => {
+    try {
+      setAuth(await api<AuthStatus>('/auth/status'));
+    } catch {
+      setAuth({ configured: false, authenticated: false, onboardingComplete: false });
+    }
   }, []);
+  useEffect(() => {
+    void refreshAuth();
+  }, [refreshAuth]);
 
   useEffect(() => {
     if (!auth?.authenticated) return;
@@ -182,10 +190,12 @@ function App() {
 
   if (!auth) return <Splash />;
   if (!auth.authenticated) {
+    return <Login configured={auth.configured} onDone={refreshAuth} />;
+  }
+  if (!auth.onboardingComplete) {
     return (
-      <Login
-        configured={auth.configured}
-        onDone={() => setAuth({ configured: true, authenticated: true })}
+      <CentralSetupGuide
+        onDone={() => setAuth({ configured: true, authenticated: true, onboardingComplete: true })}
       />
     );
   }
@@ -265,13 +275,19 @@ function Splash() {
   );
 }
 
-function Login({ configured, onDone }: { configured: boolean; onDone: () => void }) {
+function Login({
+  configured,
+  onDone,
+}: {
+  configured: boolean;
+  onDone: () => void | Promise<void>;
+}) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const submit = async () => {
     try {
       await api(configured ? '/auth/login' : '/auth/setup', { method: 'POST', json: { password } });
-      onDone();
+      await onDone();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '操作失败');
     }
@@ -308,6 +324,215 @@ function Login({ configured, onDone }: { configured: boolean; onDone: () => void
           {configured ? '登录控制台' : '完成初始化'}
         </button>
       </div>
+    </div>
+  );
+}
+
+function CentralSetupGuide({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState(0);
+  const [baseUrl, setBaseUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [textModel, setTextModel] = useState('');
+  const [imageModel, setImageModel] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const saveLlm = async () => {
+    if (!baseUrl.trim() || !textModel.trim()) {
+      setError('请填写 API 基础地址和文本模型；也可以选择稍后配置。');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api('/settings/llm', {
+        method: 'PUT',
+        json: {
+          providers: [
+            {
+              id: 'initial-provider',
+              name: '默认模型',
+              enabled: true,
+              translationEnabled: true,
+              moderationEnabled: true,
+              imageModerationEnabled: Boolean(imageModel.trim()),
+              baseUrl: baseUrl.trim(),
+              ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+              translationModel: textModel.trim(),
+              moderationModel: textModel.trim(),
+              imageModerationModel: imageModel.trim(),
+            },
+          ],
+          concurrency: 4,
+          fastMode: false,
+          fastDeliveryIntervalMs: 1_500,
+        },
+      });
+      setStep(2);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '模型配置保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const finish = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      await api('/setup/complete', { method: 'POST' });
+      onDone();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '初始化状态保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="setup-page">
+      <section className="setup-shell">
+        <div className="auth-brand">
+          <MessagesSquare className="brand-symbol" size={21} />
+          <div>
+            <strong>DisQord</strong>
+            <span>中央端首次启动</span>
+          </div>
+        </div>
+        <div className="setup-progress" aria-label={`初始化步骤 ${step + 1}/3`}>
+          {[0, 1, 2].map((index) => (
+            <i className={index <= step ? 'active' : ''} key={index} />
+          ))}
+        </div>
+
+        {step === 0 && (
+          <div className="setup-content">
+            <span className="setup-step">步骤 1 / 3</span>
+            <h1>中央服务已经启动</h1>
+            <p>
+              管理员账号已经创建。接下来可以接入模型服务，也可以先跳过，稍后在“基础设置”中配置多个模型和故障转移顺序。
+            </p>
+            <div className="setup-checklist">
+              <div>
+                <Check size={16} />
+                <span>中央数据与密钥保存在本机</span>
+              </div>
+              <div>
+                <Check size={16} />
+                <span>节点只会主动连接中央服务</span>
+              </div>
+              <div>
+                <Check size={16} />
+                <span>所有设置之后仍可修改</span>
+              </div>
+            </div>
+            <button className="primary" onClick={() => setStep(1)}>
+              继续配置模型 <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div className="setup-content">
+            <span className="setup-step">步骤 2 / 3</span>
+            <h1>接入第一个模型</h1>
+            <p>
+              支持 OpenAI 兼容的 Chat Completions
+              接口。这里只创建第一项，完成后可以继续添加备用模型。
+            </p>
+            <div className="setup-form">
+              <label>
+                API 基础地址
+                <input
+                  autoFocus
+                  placeholder="https://api.example.com/v1"
+                  value={baseUrl}
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                />
+              </label>
+              <label>
+                API 密钥
+                <input
+                  type="password"
+                  placeholder="仅保存在中央端"
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+              </label>
+              <label>
+                文本模型
+                <input
+                  placeholder="用于翻译和文本审核"
+                  value={textModel}
+                  onChange={(event) => setTextModel(event.target.value)}
+                />
+              </label>
+              <label>
+                图片审核模型（可选）
+                <input
+                  placeholder="留空表示暂不启用图片审核模型"
+                  value={imageModel}
+                  onChange={(event) => setImageModel(event.target.value)}
+                />
+              </label>
+            </div>
+            {error && (
+              <div className="error">
+                <CircleAlert size={15} />
+                {error}
+              </div>
+            )}
+            {saving && <LoadingProgress text="正在保存模型配置" />}
+            <div className="setup-actions">
+              <button
+                disabled={saving}
+                onClick={() => {
+                  setError('');
+                  setStep(2);
+                }}
+              >
+                稍后配置
+              </button>
+              <button className="primary" disabled={saving} onClick={() => void saveLlm()}>
+                <Save size={16} />
+                保存并继续
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="setup-content">
+            <span className="setup-step">步骤 3 / 3</span>
+            <h1>准备完成</h1>
+            <p>进入控制台后，按顺序连接节点、验证聊天会话，再创建并发布转发蓝图。</p>
+            <ol className="setup-next">
+              <li>
+                <strong>连接客户端</strong>
+                <span>在 QQ 或 Discord 节点首次向导中填写中央 WebSocket 地址。</span>
+              </li>
+              <li>
+                <strong>绑定会话</strong>
+                <span>选择群聊或频道，并发送验证码完成验证。</span>
+              </li>
+              <li>
+                <strong>发布蓝图</strong>
+                <span>为 QQ → Discord 和 Discord → QQ 分别配置消息流。</span>
+              </li>
+            </ol>
+            {error && (
+              <div className="error">
+                <CircleAlert size={15} />
+                {error}
+              </div>
+            )}
+            {saving && <LoadingProgress text="正在完成初始化" />}
+            <button className="primary" disabled={saving} onClick={() => void finish()}>
+              进入中央控制台 <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -3171,31 +3396,15 @@ function SettingsPage() {
 }
 
 function Records({ kind }: { kind: 'reviews' | 'logs' }) {
-  const [logLevel, setLogLevel] = useState('all');
-  const [logSearch, setLogSearch] = useState('');
-  const [logPage, setLogPage] = useState(1);
-  const [logDevice, setLogDevice] = useState('central');
-  const reviewRecords = useLoad<Array<Record<string, unknown>>>('/reviews', []);
-  const logNodes = useLoad<NodeRuntime[]>('/nodes', []);
-  const logPath =
-    logDevice === 'central'
-      ? `/logs?page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel)}&search=${encodeURIComponent(logSearch)}`
-      : `/node-logs?nodeId=${encodeURIComponent(logDevice)}&page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel === 'warn' || logLevel === 'error' ? logLevel : 'all')}&search=${encodeURIComponent(logSearch)}`;
-  const logs = useLoad<LogPage>(logPath, {
-    items: [],
-    page: 1,
-    pageSize: 50,
-    total: 0,
-    totalPages: 1,
-  });
-  const records = kind === 'reviews' ? reviewRecords : logs;
-  const visibleRecords =
-    kind === 'reviews'
-      ? reviewRecords.data.filter((record) => record.status === 'pending')
-      : logs.data.items;
+  return kind === 'reviews' ? <ReviewRecords /> : <LogRecords />;
+}
+
+function ReviewRecords() {
+  const records = useLoad<Array<Record<string, unknown>>>('/reviews', []);
+  const visibleRecords = records.data.filter((record) => record.status === 'pending');
   const decide = async (taskId: string, decision: 'approve' | 'reject') => {
-    const previous = reviewRecords.data;
-    reviewRecords.setData((current) =>
+    const previous = records.data;
+    records.setData((current) =>
       current.map((record) =>
         record.taskId === taskId
           ? { ...record, status: decision === 'approve' ? 'approved' : 'rejected' }
@@ -3208,123 +3417,56 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
         { method: 'POST', json: { decision } },
         { attempts: 3 },
       );
-      reviewRecords.setError('');
+      records.setError('');
     } catch (cause) {
-      reviewRecords.setData(previous);
-      reviewRecords.setError(cause instanceof Error ? cause.message : '审核操作失败');
+      records.setData(previous);
+      records.setError(cause instanceof Error ? cause.message : '审核操作失败');
     }
   };
   const clearReviews = async () => {
     if (!window.confirm('确定清除全部人工审核记录吗？仍在等待的消息将不会继续转发。')) return;
-    const previous = reviewRecords.data;
-    reviewRecords.setData([]);
+    const previous = records.data;
+    records.setData([]);
     try {
       await apiRetry('/reviews', { method: 'DELETE' }, { attempts: 3 });
-      reviewRecords.setError('');
+      records.setError('');
     } catch (cause) {
-      reviewRecords.setData(previous);
-      reviewRecords.setError(cause instanceof Error ? cause.message : '清除审核记录失败');
+      records.setData(previous);
+      records.setError(cause instanceof Error ? cause.message : '清除审核记录失败');
     }
   };
-  const refresh = () => void (kind === 'reviews' ? reviewRecords.reload() : logs.reload());
   return (
     <div className="panel">
       <PanelTitle
-        title={kind === 'reviews' ? '待审核消息' : '追踪日志'}
-        subtitle={
-          kind === 'reviews'
-            ? '消息会停在人工审核节点；操作后从“通过”或“拦截”出口继续'
-            : '按 traceId 追踪消息在中心的处理过程'
-        }
+        title="待审核消息"
+        subtitle="消息会停在人工审核节点；操作后从“通过”或“拦截”出口继续"
         action={
           <div className="log-actions">
-            {kind === 'logs' && (
-              <>
-                <select
-                  value={logDevice}
-                  onChange={(event) => {
-                    setLogDevice(event.target.value);
-                    setLogPage(1);
-                    if (
-                      event.target.value !== 'central' &&
-                      !['all', 'warn', 'error'].includes(logLevel)
-                    ) {
-                      setLogLevel('all');
-                    }
-                  }}
-                  title="选择日志设备"
-                >
-                  <option value="central">中央服务</option>
-                  {logNodes.data.map((node) => (
-                    <option key={node.nodeId} value={node.nodeId}>
-                      {node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'} ·{' '}
-                      {node.nodeId.slice(0, 8)}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  className="log-search"
-                  value={logSearch}
-                  placeholder="搜索日志"
-                  onChange={(event) => {
-                    setLogSearch(event.target.value);
-                    setLogPage(1);
-                  }}
-                />
-                <select
-                  value={logLevel}
-                  onChange={(event) => {
-                    setLogLevel(event.target.value);
-                    setLogPage(1);
-                  }}
-                >
-                  <option value="all">全部级别</option>
-                  {logDevice === 'central' && <option value="debug">Debug</option>}
-                  {logDevice === 'central' && <option value="info">Info</option>}
-                  <option value="warn">Warn</option>
-                  <option value="error">Error</option>
-                </select>
-              </>
-            )}
-            {kind === 'reviews' && (
-              <button
-                className="clear-button"
-                disabled={!reviewRecords.data.length}
-                onClick={() => void clearReviews()}
-              >
-                <Trash2 size={15} />
-                一键清除
-              </button>
-            )}
-            <button className="icon-button" onClick={refresh}>
+            <button
+              className="clear-button"
+              disabled={!records.data.length}
+              onClick={() => void clearReviews()}
+            >
+              <Trash2 size={15} />
+              一键清除
+            </button>
+            <button className="icon-button" onClick={() => void records.reload()}>
               <RefreshCw size={16} />
             </button>
           </div>
         }
       />
       {records.error && <div className="error">{records.error}</div>}
-      {(records.loading || (kind === 'logs' && logNodes.loading)) && (
-        <LoadingProgress text={kind === 'reviews' ? '正在读取待审核消息' : '正在读取运行日志'} />
-      )}
+      {records.loading && <LoadingProgress text="正在读取待审核消息" />}
       <div className="record-list">
         {visibleRecords.map((record, index) => (
-          <div
-            className={`record ${kind === 'logs' ? `log-${String(record.level ?? 'info')}` : ''}`}
-            key={String(record.taskId ?? record.id ?? index)}
-          >
+          <div className="record" key={String(record.taskId ?? record.id ?? index)}>
             <div>
-              <strong>
-                {translateLogEvent(String(record.event ?? record.reason ?? '审核任务'))}
-              </strong>
+              <strong>{translateLogEvent(String(record.reason ?? '审核任务'))}</strong>
               <span>{formatTime(String(record.createdAt ?? ''))}</span>
             </div>
-            {kind === 'logs' && (
-              <span className={`log-level ${String(record.level ?? 'info')}`}>
-                {String(record.level ?? 'info').toUpperCase()}
-              </span>
-            )}
-            <code>{String(record.traceId ?? record.taskId ?? '')}</code>
-            {kind === 'reviews' && record.status === 'pending' && (
+            <code>{String(record.taskId ?? '')}</code>
+            {record.status === 'pending' && (
               <div className="review-actions">
                 <button onClick={() => void decide(String(record.taskId), 'reject')}>拦截</button>
                 <button
@@ -3338,11 +3480,245 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
             <pre>{JSON.stringify(record, null, 2)}</pre>
           </div>
         ))}
-        {!records.loading && !visibleRecords.length && (
-          <Empty text={kind === 'reviews' ? '目前没有待处理内容' : '暂无日志'} />
-        )}
+        {!records.loading && !visibleRecords.length && <Empty text="目前没有待处理内容" />}
       </div>
-      {kind === 'logs' && logs.data.totalPages > 1 && (
+    </div>
+  );
+}
+
+type LogView = 'traces' | 'events';
+type TraceFilter = 'all' | 'problems' | 'retry' | 'slow';
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+interface TraceLogGroup {
+  traceId: string;
+  level: LogLevel;
+  event: string;
+  startedAt: string;
+  createdAt: string;
+  durationMs: number;
+  eventCount: number;
+  events: Array<Record<string, unknown>>;
+}
+
+function LogRecords() {
+  const [logLevel, setLogLevel] = useState('all');
+  const [logSearch, setLogSearch] = useState('');
+  const [logPage, setLogPage] = useState(1);
+  const [logDevice, setLogDevice] = useState('central');
+  const [logView, setLogView] = useState<LogView>('traces');
+  const [traceFilter, setTraceFilter] = useState<TraceFilter>('all');
+  const [expandedTraces, setExpandedTraces] = useState<Set<string>>(() => new Set());
+  const [copiedTrace, setCopiedTrace] = useState('');
+  const [live, setLive] = useState(true);
+  const logNodes = useLoad<NodeRuntime[]>('/nodes', []);
+  const isCentral = logDevice === 'central';
+  const effectiveView: LogView = isCentral ? logView : 'events';
+  const logPath = isCentral
+    ? `/logs?page=${logPage}&pageSize=${effectiveView === 'traces' ? 20 : 50}&level=${encodeURIComponent(logLevel)}&search=${encodeURIComponent(logSearch)}&view=${effectiveView}&traceFilter=${traceFilter}`
+    : `/node-logs?nodeId=${encodeURIComponent(logDevice)}&page=${logPage}&pageSize=50&level=${encodeURIComponent(logLevel === 'warn' || logLevel === 'error' ? logLevel : 'all')}&search=${encodeURIComponent(logSearch)}`;
+  const logs = useLoad<LogPage>(logPath, {
+    items: [],
+    page: 1,
+    pageSize: 50,
+    total: 0,
+    totalPages: 1,
+  });
+  const groups =
+    effectiveView === 'traces'
+      ? (logs.data.items.filter((item) => Array.isArray(item.events)) as unknown as TraceLogGroup[])
+      : [];
+  const rawRecords =
+    effectiveView === 'events' ? logs.data.items.filter((item) => !Array.isArray(item.events)) : [];
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => void logs.reload({ background: true }), 5_000);
+    return () => window.clearInterval(timer);
+  }, [live, logs.reload]);
+  useEffect(() => {
+    if (effectiveView !== 'traces') return;
+    setExpandedTraces((current) => {
+      const next = new Set(current);
+      for (const group of groups) {
+        if (group.level === 'warn' || group.level === 'error') next.add(group.traceId);
+      }
+      return next;
+    });
+  }, [effectiveView, logs.data.items]);
+  const setDevice = (device: string) => {
+    setLogDevice(device);
+    setLogPage(1);
+    setLogLevel('all');
+    if (device !== 'central') setLogView('events');
+  };
+  const setView = (view: LogView) => {
+    setLogView(view);
+    setLogPage(1);
+    setLogLevel('all');
+    setTraceFilter('all');
+  };
+  const copyTraceId = async (traceId: string) => {
+    try {
+      await navigator.clipboard.writeText(traceId);
+      setCopiedTrace(traceId);
+      window.setTimeout(
+        () => setCopiedTrace((current) => (current === traceId ? '' : current)),
+        1_500,
+      );
+    } catch {
+      setCopiedTrace('');
+    }
+  };
+  const toggleTrace = (traceId: string) =>
+    setExpandedTraces((current) => {
+      const next = new Set(current);
+      if (next.has(traceId)) next.delete(traceId);
+      else next.add(traceId);
+      return next;
+    });
+  const problemCount = groups.filter(
+    (group) => group.level === 'warn' || group.level === 'error',
+  ).length;
+  const averageDuration = groups.length
+    ? groups.reduce((total, group) => total + group.durationMs, 0) / groups.length
+    : 0;
+  return (
+    <div className="panel log-panel">
+      <PanelTitle
+        title="运行日志"
+        subtitle={
+          effectiveView === 'traces'
+            ? '每一项代表一条完整消息链路；异常会自动展开'
+            : '按写入顺序查看未经聚合的底层事件'
+        }
+        action={
+          <div className="log-actions">
+            <select value={logDevice} onChange={(event) => setDevice(event.target.value)}>
+              <option value="central">中央服务</option>
+              {logNodes.data.map((node) => (
+                <option key={node.nodeId} value={node.nodeId}>
+                  {node.nodeType === 'qq' ? 'QQ 客户端' : 'Discord 客户端'} ·{' '}
+                  {node.nodeId.slice(0, 8)}
+                </option>
+              ))}
+            </select>
+            <input
+              className="log-search"
+              value={logSearch}
+              placeholder="traceId、消息 ID、用户或事件"
+              onChange={(event) => {
+                setLogSearch(event.target.value);
+                setLogPage(1);
+              }}
+            />
+            <button className="icon-button" title="立即刷新" onClick={() => void logs.reload()}>
+              <RefreshCw size={16} />
+            </button>
+          </div>
+        }
+      />
+      <div className="log-viewbar">
+        <div className="log-view-switch" aria-label="日志显示方式">
+          <button
+            className={effectiveView === 'traces' ? 'active' : ''}
+            disabled={!isCentral}
+            onClick={() => setView('traces')}
+          >
+            消息任务
+          </button>
+          <button
+            className={effectiveView === 'events' ? 'active' : ''}
+            onClick={() => setView('events')}
+          >
+            原始事件
+          </button>
+        </div>
+        {effectiveView === 'traces' ? (
+          <div className="trace-filters">
+            {(
+              [
+                ['all', '全部任务'],
+                ['problems', '仅异常'],
+                ['retry', '发生重试'],
+                ['slow', '慢处理 ≥ 2 秒'],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                className={traceFilter === id ? 'active' : ''}
+                key={id}
+                onClick={() => {
+                  setTraceFilter(id);
+                  setLogPage(1);
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <select
+            className="raw-level-filter"
+            value={logLevel}
+            onChange={(event) => {
+              setLogLevel(event.target.value);
+              setLogPage(1);
+            }}
+          >
+            <option value="all">全部级别</option>
+            {isCentral && <option value="debug">Debug</option>}
+            {isCentral && <option value="info">Info</option>}
+            <option value="warn">Warn</option>
+            <option value="error">Error</option>
+          </select>
+        )}
+        <button
+          className={`live-toggle ${live ? 'active' : ''}`}
+          onClick={() => setLive((current) => !current)}
+        >
+          {live ? <Pause size={14} /> : <Play size={14} />}
+          {live ? '自动刷新' : '已暂停'}
+        </button>
+      </div>
+
+      {logs.error && <div className="error">{logs.error}</div>}
+      {(logs.loading || logNodes.loading) && <LoadingProgress text="正在读取运行日志" />}
+
+      {effectiveView === 'traces' && !logs.loading && groups.length > 0 && (
+        <div className="trace-page-summary">
+          <div>
+            <span>本页任务</span>
+            <strong>{groups.length}</strong>
+          </div>
+          <div>
+            <span>异常任务</span>
+            <strong>{problemCount}</strong>
+          </div>
+          <div>
+            <span>平均耗时</span>
+            <strong>{formatDuration(averageDuration)}</strong>
+          </div>
+        </div>
+      )}
+
+      {effectiveView === 'traces' ? (
+        <div className="trace-list">
+          {groups.map((group) => (
+            <TraceLogCard
+              copied={copiedTrace === group.traceId}
+              expanded={expandedTraces.has(group.traceId)}
+              group={group}
+              key={group.traceId || `${group.createdAt}:${group.event}`}
+              onCopy={() => void copyTraceId(group.traceId)}
+              onToggle={() => toggleTrace(group.traceId)}
+            />
+          ))}
+          {!logs.loading && !groups.length && <Empty text="没有匹配的消息任务" />}
+        </div>
+      ) : (
+        <RawLogList records={rawRecords} loading={logs.loading} />
+      )}
+
+      {logs.data.totalPages > 1 && (
         <div className="log-pagination">
           <span>
             第 {logs.data.page} / {logs.data.totalPages} 页 · 共 {logs.data.total} 条
@@ -3365,6 +3741,218 @@ function Records({ kind }: { kind: 'reviews' | 'logs' }) {
       )}
     </div>
   );
+}
+
+function TraceLogCard({
+  group,
+  expanded,
+  copied,
+  onToggle,
+  onCopy,
+}: {
+  group: TraceLogGroup;
+  expanded: boolean;
+  copied: boolean;
+  onToggle: () => void;
+  onCopy: () => void;
+}) {
+  const state = traceState(group);
+  const route = traceRoute(group.events);
+  const count = traceMessageCount(group.events);
+  const start = Date.parse(group.startedAt);
+  return (
+    <article className={`trace-card ${state.id} ${expanded ? 'expanded' : ''}`}>
+      <button className="trace-card-summary" aria-expanded={expanded} onClick={onToggle}>
+        <span className="trace-state-icon">
+          {state.id === 'error' || state.id === 'warn' ? (
+            <CircleAlert size={17} />
+          ) : (
+            <Check size={17} />
+          )}
+        </span>
+        <span className="trace-primary">
+          <span className="trace-title-row">
+            <strong>{route || '消息处理任务'}</strong>
+            <span className={`trace-status ${state.id}`}>{state.label}</span>
+          </span>
+          <span className="trace-subtitle">
+            {translateLogEvent(group.event)} · {count} 条消息 · {group.eventCount} 个步骤
+          </span>
+        </span>
+        <span className="trace-numbers">
+          <time>{formatTime(group.createdAt)}</time>
+          <span>{formatDuration(group.durationMs)}</span>
+        </span>
+        <ChevronDown className="trace-chevron" size={17} />
+      </button>
+      {expanded && (
+        <div className="trace-card-body">
+          <div className="trace-identity">
+            <span>追踪号</span>
+            <code title={group.traceId}>{shortTraceId(group.traceId)}</code>
+            <button title="复制完整追踪号" disabled={!group.traceId} onClick={onCopy}>
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              {copied ? '已复制' : '复制'}
+            </button>
+          </div>
+          <div className="trace-timeline">
+            {group.events.map((record, index) => {
+              const createdAt = String(record.createdAt ?? '');
+              const timestamp = Date.parse(createdAt);
+              const delta =
+                Number.isFinite(start) && Number.isFinite(timestamp) ? timestamp - start : 0;
+              const level = normalizeLogLevel(record.level);
+              return (
+                <details
+                  className={`trace-step ${level}`}
+                  key={String(record.id ?? `${createdAt}:${String(record.event)}:${index}`)}
+                >
+                  <summary>
+                    <i />
+                    <time>+{formatDuration(delta)}</time>
+                    <strong>{translateLogEvent(String(record.event ?? 'unknown'))}</strong>
+                    {(level === 'warn' || level === 'error') && (
+                      <span className={`log-level ${level}`}>{level.toUpperCase()}</span>
+                    )}
+                    <code>{String(record.event ?? '')}</code>
+                    <ChevronRight size={14} />
+                  </summary>
+                  <div className="trace-step-detail">
+                    <span>{formatTime(createdAt)}</span>
+                    <pre>{JSON.stringify(record.details ?? {}, null, 2)}</pre>
+                  </div>
+                </details>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function RawLogList({
+  records,
+  loading,
+}: {
+  records: Array<Record<string, unknown>>;
+  loading: boolean;
+}) {
+  return (
+    <div className="raw-log-list">
+      {records.map((record, index) => {
+        const level = normalizeLogLevel(record.level);
+        return (
+          <details className={`raw-log-record ${level}`} key={String(record.id ?? index)}>
+            <summary>
+              <span className={`log-level ${level}`}>{level.toUpperCase()}</span>
+              <strong>{translateLogEvent(String(record.event ?? 'unknown'))}</strong>
+              <code title={String(record.traceId ?? '')}>
+                {shortTraceId(String(record.traceId ?? ''))}
+              </code>
+              <time>{formatTime(String(record.createdAt ?? ''))}</time>
+              <ChevronRight size={14} />
+            </summary>
+            <pre>{JSON.stringify(record, null, 2)}</pre>
+          </details>
+        );
+      })}
+      {!loading && !records.length && <Empty text="暂无日志" />}
+    </div>
+  );
+}
+
+function traceState(group: TraceLogGroup): {
+  id: 'success' | 'running' | 'waiting' | 'warn' | 'error';
+  label: string;
+} {
+  const events = new Set(group.events.map((record) => String(record.event ?? '')));
+  if (group.level === 'error') {
+    if (events.has('delivery_succeeded')) return { id: 'error', label: '异常后完成' };
+    if (events.has('delivery_queued')) return { id: 'error', label: '异常后继续' };
+    return { id: 'error', label: '失败' };
+  }
+  if (group.level === 'warn') {
+    if (
+      events.has('delivery_succeeded') ||
+      events.has('message_upload_batch_completed') ||
+      events.has('blueprint_completed')
+    )
+      return { id: 'warn', label: '重试后完成' };
+    return { id: 'warn', label: '需要注意' };
+  }
+  if (events.has('manual_review_created') || events.has('blueprint_paused'))
+    return { id: 'waiting', label: '等待处理' };
+  if (
+    [...events].some((event) =>
+      ['delivery_succeeded', 'message_upload_batch_completed', 'blueprint_completed'].includes(
+        event,
+      ),
+    )
+  )
+    return { id: 'success', label: '已完成' };
+  return { id: 'running', label: '处理中' };
+}
+
+function traceRoute(events: Array<Record<string, unknown>>): string {
+  let source = '';
+  let target = '';
+  for (const record of events) {
+    const details = asRecord(record.details);
+    const message = asRecord(details.message);
+    const messageSource = asRecord(message.source);
+    const deliveryTarget = asRecord(details.target);
+    source ||= platformLabel(
+      messageSource.platform ?? asRecord(details.authenticatedNode).nodeType,
+    );
+    target ||= platformLabel(deliveryTarget.platform);
+  }
+  if (source && target) return `${source} → ${target}`;
+  if (source) return `${source} 消息任务`;
+  if (target) return `发往 ${target}`;
+  return '';
+}
+
+function traceMessageCount(events: Array<Record<string, unknown>>): number {
+  let count = 1;
+  for (const record of events) {
+    const details = asRecord(record.details);
+    for (const value of [details.batchSize, details.messageCount, details.deliveryCount]) {
+      if (typeof value === 'number' && Number.isFinite(value)) count = Math.max(count, value);
+    }
+  }
+  return count;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function platformLabel(value: unknown): string {
+  return String(value ?? '').toLowerCase() === 'discord'
+    ? 'Discord'
+    : String(value ?? '').toLowerCase() === 'qq'
+      ? 'QQ'
+      : '';
+}
+
+function normalizeLogLevel(value: unknown): LogLevel {
+  const level = String(value ?? 'info');
+  return level === 'debug' || level === 'warn' || level === 'error' ? level : 'info';
+}
+
+function shortTraceId(traceId: string): string {
+  if (!traceId) return '无追踪号';
+  return traceId.length > 12 ? `${traceId.slice(0, 8)}…` : traceId;
+}
+
+function formatDuration(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0ms';
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  if (value < 60_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}s`;
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1_000)}s`;
 }
 
 function PanelTitle({

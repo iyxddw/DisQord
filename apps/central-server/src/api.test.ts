@@ -38,6 +38,12 @@ async function configureAdministrator(
 describe('central control-plane API', () => {
   it('requires setup and authenticates control-plane mutations', async () => {
     const central = createTestApplication();
+    const initialStatus = await central.app.inject({ method: 'GET', url: '/api/auth/status' });
+    expect(initialStatus.json()).toMatchObject({
+      configured: false,
+      authenticated: false,
+      onboardingComplete: false,
+    });
     const unauthorized = await central.app.inject({
       method: 'POST',
       url: '/api/chat-sessions',
@@ -46,6 +52,28 @@ describe('central control-plane API', () => {
     expect(unauthorized.statusCode).toBe(401);
 
     const token = await configureAdministrator(central);
+    const setupStatus = await central.app.inject({
+      method: 'GET',
+      url: '/api/auth/status',
+      cookies: { disqord_session: token },
+    });
+    expect(setupStatus.json()).toMatchObject({
+      configured: true,
+      authenticated: true,
+      onboardingComplete: false,
+    });
+    const complete = await central.app.inject({
+      method: 'POST',
+      url: '/api/setup/complete',
+      cookies: { disqord_session: token },
+    });
+    expect(complete.statusCode).toBe(200);
+    const completedStatus = await central.app.inject({
+      method: 'GET',
+      url: '/api/auth/status',
+      cookies: { disqord_session: token },
+    });
+    expect(completedStatus.json()).toMatchObject({ onboardingComplete: true });
     const nodes = await central.app.inject({
       method: 'GET',
       url: '/api/nodes',
@@ -249,6 +277,38 @@ describe('central control-plane API', () => {
       items: expect.arrayContaining([
         expect.objectContaining({ event: 'message_received', level: 'info' }),
       ]),
+    });
+
+    for (const [index, level] of ['info', 'warn', 'info'].entries()) {
+      await central.store.set('trace-log', randomUUID(), {
+        id: randomUUID(),
+        traceId: 'trace-grouped',
+        level,
+        event: index === 1 ? 'delivery_retry_scheduled' : `grouped_step_${index}`,
+        details: { index },
+        createdAt: new Date(Date.UTC(2026, 0, 2, 0, 0, index)).toISOString(),
+      });
+    }
+    const groupedPage = await central.app.inject({
+      method: 'GET',
+      url: '/api/logs?page=1&pageSize=10&view=traces&traceFilter=retry&search=trace-grouped',
+      cookies: { disqord_session: token },
+    });
+    expect(groupedPage.statusCode).toBe(200);
+    expect(groupedPage.json()).toMatchObject({
+      total: 1,
+      items: [
+        {
+          traceId: 'trace-grouped',
+          level: 'warn',
+          event: 'delivery_retry_scheduled',
+          durationMs: 2_000,
+          eventCount: 3,
+          events: expect.arrayContaining([
+            expect.objectContaining({ event: 'delivery_retry_scheduled' }),
+          ]),
+        },
+      ],
     });
     await central.app.close();
   });

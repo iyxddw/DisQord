@@ -1,18 +1,25 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { createServer, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 
 import type { NodeLogPage, NodeLogQuery } from './logger.js';
 
 export interface NodeControlStatus {
   readonly program: 'qq-node' | 'discord-node';
-  readonly state: 'starting' | 'connected' | 'retrying' | 'stopped';
+  readonly configured: boolean;
+  readonly state: 'setup' | 'starting' | 'connected' | 'retrying' | 'stopped';
   readonly detail?: string;
   readonly centralUrl: string;
   readonly platformConnected: boolean;
   readonly startedAt: string;
   readonly logPath?: string;
+  readonly configuration?: {
+    readonly centralUrl: string;
+    readonly platformUrl?: string;
+    readonly allowInsecureCentral: boolean;
+    readonly platformTokenConfigured: boolean;
+  };
 }
 
 export interface NodeControlServerOptions {
@@ -23,6 +30,7 @@ export interface NodeControlServerOptions {
   readonly getStatus: () => NodeControlStatus;
   readonly refreshSessions: () => Promise<void>;
   readonly getLogs?: (query: NodeLogQuery) => NodeLogPage;
+  readonly saveSetup?: (input: unknown) => Promise<{ restartRequired: boolean }>;
 }
 
 export class NodeControlServer {
@@ -35,12 +43,7 @@ export class NodeControlServer {
     }
     this.#options = options;
     this.#server = createServer((request, response) => {
-      void this.#handle(
-        request.url ?? '/',
-        request.method ?? 'GET',
-        request.headers.authorization,
-        response,
-      );
+      void this.#handle(request, response);
     });
   }
 
@@ -57,16 +60,16 @@ export class NodeControlServer {
     );
   }
 
-  async #handle(
-    url: string,
-    method: string,
-    authorization: string | undefined,
-    response: ServerResponse,
-  ): Promise<void> {
+  async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
+      const url = request.url ?? '/';
+      const method = request.method ?? 'GET';
       const parsed = new URL(url, 'http://node.local');
       if (parsed.pathname.startsWith('/api/')) {
-        if (this.#options.adminToken && authorization !== `Bearer ${this.#options.adminToken}`) {
+        if (
+          this.#options.adminToken &&
+          request.headers.authorization !== `Bearer ${this.#options.adminToken}`
+        ) {
           return json(response, 401, { error: 'Node panel token required.' });
         }
         if (method === 'GET' && parsed.pathname === '/api/node/status') {
@@ -79,6 +82,24 @@ export class NodeControlServer {
         if (method === 'GET' && parsed.pathname === '/api/node/logs') {
           if (!this.#options.getLogs) return json(response, 404, { error: 'Logs unavailable.' });
           return json(response, 200, this.#options.getLogs(parseLogQuery(parsed.searchParams)));
+        }
+        if (method === 'POST' && parsed.pathname === '/api/node/setup') {
+          if (!this.#options.saveSetup) {
+            return json(response, 404, { error: 'Node setup is unavailable.' });
+          }
+          const origin = request.headers.origin;
+          const host = request.headers.host;
+          if (origin && host && new URL(origin).host !== host) {
+            return json(response, 403, { error: 'Cross-origin mutation rejected.' });
+          }
+          try {
+            const result = await this.#options.saveSetup(await readJsonBody(request));
+            return json(response, 200, result);
+          } catch (error) {
+            return json(response, 400, {
+              error: error instanceof Error ? error.message : 'Node setup is invalid.',
+            });
+          }
         }
         return json(response, 404, { error: 'API route not found.' });
       }
@@ -111,6 +132,19 @@ export class NodeControlServer {
     );
     createReadStream(selected).pipe(response);
   }
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 64 * 1024) throw new Error('Request body is too large.');
+    chunks.push(buffer);
+  }
+  if (!chunks.length) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
 }
 
 function parseLogQuery(params: URLSearchParams): NodeLogQuery {

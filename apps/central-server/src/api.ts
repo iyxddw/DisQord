@@ -285,15 +285,23 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     now: new Date().toISOString(),
   }));
 
-  app.get('/api/auth/status', async (request) => ({
-    configured: await auth.isConfigured(),
-    authenticated: await auth.authenticate(request.cookies.disqord_session),
-  }));
+  app.get('/api/auth/status', async (request) => {
+    const configured = await auth.isConfigured();
+    const onboarding = await options.store.get<{ completed: boolean }>('setup', 'onboarding');
+    return {
+      configured,
+      authenticated: await auth.authenticate(request.cookies.disqord_session),
+      // Deployments created before the onboarding guide have no marker and
+      // must continue opening the dashboard normally.
+      onboardingComplete: configured ? (onboarding?.value.completed ?? true) : false,
+    };
+  });
 
   app.post('/api/auth/setup', async (request, reply) => {
     try {
       const { password } = passwordBodySchema.parse(request.body);
       const token = await auth.setup(password);
+      await options.store.set('setup', 'onboarding', { completed: false });
       setSessionCookie(reply, token, options.secureCookies ?? true);
       return { ok: true };
     } catch (error) {
@@ -315,6 +323,14 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   app.post('/api/auth/logout', { preHandler: requireAdmin }, async (request, reply) => {
     await auth.logout(request.cookies.disqord_session);
     reply.clearCookie('disqord_session', { path: '/' });
+    return { ok: true };
+  });
+
+  app.post('/api/setup/complete', { preHandler: requireAdmin }, async () => {
+    await options.store.set('setup', 'onboarding', {
+      completed: true,
+      completedAt: new Date().toISOString(),
+    });
     return { ok: true };
   });
 
@@ -1079,6 +1095,8 @@ export function createCentralApplication(options: CentralApplicationOptions) {
           pageSize: z.coerce.number().int().min(10).max(200).default(50),
           level: z.enum(['all', 'debug', 'info', 'warn', 'error']).default('all'),
           search: z.string().trim().max(200).default(''),
+          view: z.enum(['events', 'traces']).default('events'),
+          traceFilter: z.enum(['all', 'problems', 'retry', 'slow']).default('all'),
         })
         .parse(request.query);
       let records = (await options.store.list<Record<string, unknown>>('trace-log'))
@@ -1086,6 +1104,39 @@ export function createCentralApplication(options: CentralApplicationOptions) {
         .sort((left, right) =>
           String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? '')),
         );
+      if (query.view === 'traces') {
+        let groups = groupTraceLogs(records);
+        if (query.level !== 'all') {
+          groups = groups.filter((group) =>
+            group.events.some((record) => String(record.level ?? 'info') === query.level),
+          );
+        }
+        if (query.search) {
+          const needle = query.search.toLocaleLowerCase();
+          groups = groups.filter((group) =>
+            JSON.stringify(group).toLocaleLowerCase().includes(needle),
+          );
+        }
+        if (query.traceFilter === 'problems') {
+          groups = groups.filter((group) => group.level === 'warn' || group.level === 'error');
+        } else if (query.traceFilter === 'retry') {
+          groups = groups.filter((group) =>
+            group.events.some((record) => String(record.event ?? '').includes('retry')),
+          );
+        } else if (query.traceFilter === 'slow') {
+          groups = groups.filter((group) => group.durationMs >= 2_000);
+        }
+        const total = groups.length;
+        const totalPages = Math.max(1, Math.ceil(total / query.pageSize));
+        const page = Math.min(query.page, totalPages);
+        return {
+          items: groups.slice((page - 1) * query.pageSize, page * query.pageSize),
+          page,
+          pageSize: query.pageSize,
+          total,
+          totalPages,
+        };
+      }
       if (query.level !== 'all') {
         records = records.filter((record) => String(record.level ?? 'info') === query.level);
       }
@@ -1134,6 +1185,62 @@ export function createCentralApplication(options: CentralApplicationOptions) {
   });
 
   return { app, auth, getGateway: () => gateway };
+}
+
+const logLevelRank = { debug: 0, info: 1, warn: 2, error: 3 } as const;
+
+function groupTraceLogs(records: readonly Record<string, unknown>[]): Array<{
+  traceId: string;
+  level: keyof typeof logLevelRank;
+  event: string;
+  startedAt: string;
+  createdAt: string;
+  durationMs: number;
+  eventCount: number;
+  events: Record<string, unknown>[];
+}> {
+  const grouped = new Map<string, Record<string, unknown>[]>();
+  for (const [index, record] of records.entries()) {
+    const traceId = String(record.traceId ?? '').trim();
+    const key = traceId || `untracked:${String(record.id ?? record.createdAt ?? index)}`;
+    const events = grouped.get(key) ?? [];
+    events.push(record);
+    grouped.set(key, events);
+  }
+  return [...grouped.entries()]
+    .map(([traceId, groupedEvents]) => {
+      const events = [...groupedEvents].sort((left, right) =>
+        String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? '')),
+      );
+      const first = events[0] ?? {};
+      const last = events.at(-1) ?? first;
+      const level = events.reduce<keyof typeof logLevelRank>((highest, record) => {
+        const candidate = normalizeLogLevel(record.level);
+        return logLevelRank[candidate] > logLevelRank[highest] ? candidate : highest;
+      }, 'debug');
+      const representative =
+        [...events].reverse().find((record) => normalizeLogLevel(record.level) === level) ?? last;
+      const startedAt = String(first.createdAt ?? '');
+      const createdAt = String(last.createdAt ?? startedAt);
+      const start = Date.parse(startedAt);
+      const end = Date.parse(createdAt);
+      return {
+        traceId: traceId.replace(/^untracked:/u, ''),
+        level,
+        event: String(representative.event ?? last.event ?? 'unknown'),
+        startedAt,
+        createdAt,
+        durationMs: Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0,
+        eventCount: events.length,
+        events,
+      };
+    })
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function normalizeLogLevel(value: unknown): keyof typeof logLevelRank {
+  const level = String(value ?? 'info');
+  return level === 'debug' || level === 'warn' || level === 'error' ? level : 'info';
 }
 
 function setSessionCookie(reply: FastifyReply, token: string, secure: boolean): void {

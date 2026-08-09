@@ -6,6 +6,9 @@ coverage/
 .env
 .env.*
 !.env.example
+central.env
+qq.env
+discord.env
 
 *.log
 *.tsbuildinfo

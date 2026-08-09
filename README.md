@@ -76,7 +76,38 @@ DisQord 是一个自托管的 QQ ↔ Discord 消息桥。它把 QQ 群和 Discor
   sudo fc-cache -f
   ```
 
-## 安装和构建
+## 安装
+
+推荐直接使用交互式安装器：
+
+```bash
+git clone https://github.com/iyxddw/DisQord.git
+cd DisQord
+bash install.sh
+```
+
+菜单使用方向键移动、空格多选、回车确认。选好中央端、QQ 节点或 Discord 节点后，安装器只询问各角色的 Web 端口，其余参数在对应网页的首次启动向导中填写。
+
+安装器会完成以下工作：
+
+- 检查 Node.js 版本，启用项目指定的 pnpm，并在需要时安装 PM2；在 Debian/Ubuntu 上安装节点渲染所需的 Noto 字体；
+- 自动生成中央配对密钥和节点面板令牌；
+- 创建权限为 `0600` 的本机环境文件，不覆盖已有平台凭据；
+- 安装锁定依赖、构建选中的角色并使用 PM2 启动；
+- 打印首次配置网址以及节点面板令牌。
+
+也可以非交互安装：
+
+```bash
+bash install.sh central --central-port 8080 --yes
+bash install.sh qq --qq-port 8090 --yes
+bash install.sh discord --discord-port 8091 --yes
+bash install.sh all --central-port 8080 --qq-port 8090 --discord-port 8091 --yes
+```
+
+使用 `--no-start` 可以只安装和构建，使用 `--verify` 会额外执行完整类型检查和测试。运行安装器需要 Node.js `>=22.22.0 <25`；QQ 和 Discord 的外部平台准备工作仍需提前完成。
+
+### 手动安装和构建
 
 ```bash
 git clone https://github.com/iyxddw/DisQord.git
@@ -100,7 +131,9 @@ qq.env         # QQ Node
 discord.env    # Discord Node
 ```
 
-环境变量示例见 [`.env.example`](.env.example) 和 [`deploy/native/`](deploy/native/)。至少需要配置：
+使用 `install.sh` 时不需要提前手写完整环境文件。安装器只写入监听端口、数据路径和自动生成的本机密钥；节点平台凭据保存在 `NODE_SETUP_PATH` 指向的受限权限 JSON 文件中。
+
+手动部署时，环境变量示例见 [`.env.example`](.env.example) 和 [`deploy/native/`](deploy/native/)。至少需要配置：
 
 - Central：监听地址、数据路径、`PAIRING_PEPPER` 和 Cookie 安全选项；
 - QQ Node：Central WebSocket 地址、NapCat OneBot 地址和 Access Token；
@@ -131,12 +164,15 @@ pnpm dev:node-web
 
 ## 第一次使用
 
-1. 启动 Central Server，以及至少一个平台节点。
-2. 打开中央 Web 面板，第一次进入时设置管理员密码。
-3. 在“绑定会话”中选择节点上报的 QQ 群或 Discord 频道。
-4. 发送验证码，并把验证码回填到面板完成验证。
-5. 在“转发蓝图”中添加消息入口、处理模块和发送目标，然后保存并发布。
-6. 双向转发需要为两个方向分别创建一条蓝图。
+1. 打开中央 Web。首次启动向导会创建管理员、可选接入第一个 LLM，并说明后续绑定流程；LLM 可以跳过，之后可在“基础设置”中配置多个模型和故障转移顺序。
+2. 打开 QQ 或 Discord 节点 Web，输入安装完成时打印的面板令牌。
+3. 节点向导中填写中央 `ws://` / `wss://` 地址，以及 NapCat 或 Discord Bot 凭据。保存后 PM2 会自动重启该节点。
+4. 回到中央端的“绑定会话”，选择节点上报的 QQ 群或 Discord 频道。
+5. 发送验证码，并把验证码回填到面板完成验证。
+6. 在“转发蓝图”中添加消息入口、处理模块和发送目标，然后保存并发布。
+7. 双向转发需要为两个方向分别创建一条蓝图。
+
+已有中央管理员但没有首次向导标记的旧部署会直接进入原控制台，不会被强制重新初始化。节点也继续兼容直接在环境文件中提供 `CENTRAL_WSS_URL`、`NAPCAT_ONEBOT_WS_URL` 或 `DISCORD_BOT_TOKEN` 的传统配置方式。
 
 蓝图只能使用已经验证的会话。更换 QQ 群或 Discord 频道时，需要重新绑定并验证。
 

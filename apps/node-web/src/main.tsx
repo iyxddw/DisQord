@@ -3,12 +3,14 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity,
   CheckCircle2,
+  ChevronRight,
   CircleAlert,
   Clock3,
   FileClock,
   KeyRound,
   Link2,
   RefreshCw,
+  Save,
   Server,
   Settings,
   ShieldCheck,
@@ -18,12 +20,19 @@ import './styles.css';
 
 interface Status {
   program: 'qq-node' | 'discord-node';
-  state: 'starting' | 'connected' | 'retrying' | 'stopped';
+  configured: boolean;
+  state: 'setup' | 'starting' | 'connected' | 'retrying' | 'stopped';
   detail?: string;
   centralUrl: string;
   platformConnected: boolean;
   startedAt: string;
   logPath?: string;
+  configuration?: {
+    centralUrl: string;
+    platformUrl?: string;
+    allowInsecureCentral: boolean;
+    platformTokenConfigured: boolean;
+  };
 }
 
 interface NodeLogRecord {
@@ -85,6 +94,11 @@ function App() {
   }, [token]);
   useEffect(() => {
     const loadLogs = async (background = false) => {
+      if (status?.configured === false) {
+        setLogsLoading(false);
+        setLogError('');
+        return;
+      }
       if (!background) setLogsLoading(true);
       try {
         const query = new URLSearchParams({
@@ -109,7 +123,7 @@ function App() {
     void loadLogs();
     const timer = setInterval(() => void loadLogs(true), 5000);
     return () => clearInterval(timer);
-  }, [logLevel, logPage, logSearch, token]);
+  }, [logLevel, logPage, logSearch, status?.configured, token]);
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
@@ -146,6 +160,13 @@ function App() {
 
   const nodeName = status?.program === 'discord-node' ? 'Discord 消息节点' : 'QQ 消息节点';
   const nodeKind = status?.program === 'discord-node' ? 'Discord Node' : 'QQ / NapCat Node';
+
+  if (!status && error === '需要节点面板令牌') {
+    return <NodeAccessGuide token={token} onTokenChange={saveToken} />;
+  }
+  if (status && !status.configured) {
+    return <NodeSetupGuide status={status} token={token} />;
+  }
 
   return (
     <div className="app-shell">
@@ -372,6 +393,191 @@ function App() {
   );
 }
 
+function NodeAccessGuide({
+  token,
+  onTokenChange,
+}: {
+  token: string;
+  onTokenChange: (value: string) => void;
+}) {
+  return (
+    <div className="node-setup-page">
+      <section className="node-setup-shell access-gate">
+        <div className="setup-brand">
+          <Link2 size={20} />
+          <div>
+            <strong>DisQord</strong>
+            <span>客户端首次启动</span>
+          </div>
+        </div>
+        <span className="setup-step">步骤 1 / 2</span>
+        <h1>验证本机管理令牌</h1>
+        <p>安装脚本已在完成摘要中显示该令牌。它只用于保护当前节点面板，不是中央配对密钥。</p>
+        <label>
+          节点面板令牌
+          <input
+            autoFocus
+            type="password"
+            placeholder="NODE_WEB_TOKEN"
+            value={token}
+            onChange={(event) => onTokenChange(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && location.reload()}
+          />
+        </label>
+        <button className="primary" disabled={token.length < 16} onClick={() => location.reload()}>
+          继续 <ChevronRight size={16} />
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function NodeSetupGuide({ status, token }: { status: Status; token: string }) {
+  const discord = status.program === 'discord-node';
+  const configuration = status.configuration;
+  const [centralUrl, setCentralUrl] = useState(configuration?.centralUrl ?? '');
+  const [platformUrl, setPlatformUrl] = useState(
+    configuration?.platformUrl ?? 'ws://127.0.0.1:3001',
+  );
+  const [platformToken, setPlatformToken] = useState('');
+  const [allowInsecure, setAllowInsecure] = useState(configuration?.allowInsecureCentral ?? false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [restartRequired, setRestartRequired] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const response = await fetch('/api/node/setup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          centralUrl: centralUrl.trim(),
+          allowInsecureCentral: allowInsecure,
+          ...(discord
+            ? { discordBotToken: platformToken.trim() || undefined }
+            : {
+                napcatUrl: platformUrl.trim(),
+                napcatAccessToken: platformToken.trim() || undefined,
+              }),
+        }),
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        restartRequired?: boolean;
+      };
+      if (!response.ok) throw new Error(body.error ?? '配置保存失败');
+      setRestartRequired(Boolean(body.restartRequired));
+      setSaved(true);
+      if (body.restartRequired) window.setTimeout(() => location.reload(), 3_000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '配置保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (saved) {
+    return (
+      <div className="node-setup-page">
+        <section className="node-setup-shell setup-finished">
+          <CheckCircle2 size={25} />
+          <span className="setup-step">配置已保存</span>
+          <h1>{restartRequired ? '客户端正在重启' : '请重新启动客户端'}</h1>
+          <p>
+            {restartRequired
+              ? 'PM2 会自动重新加载刚才保存的配置，本页面将在几秒后刷新。'
+              : '当前不是由安装脚本的 PM2 模式启动，请手动重启节点后刷新页面。'}
+          </p>
+          {restartRequired && <LoadingProgress text="正在等待客户端恢复连接" />}
+          <button onClick={() => location.reload()}>立即刷新</button>
+        </section>
+      </div>
+    );
+  }
+
+  const tokenRequired = discord && !configuration?.platformTokenConfigured;
+  return (
+    <div className="node-setup-page">
+      <section className="node-setup-shell">
+        <div className="setup-brand">
+          <Link2 size={20} />
+          <div>
+            <strong>DisQord</strong>
+            <span>{discord ? 'Discord 客户端' : 'QQ 客户端'}首次启动</span>
+          </div>
+        </div>
+        <span className="setup-step">步骤 2 / 2</span>
+        <h1>连接中央服务和消息平台</h1>
+        <p>配置会以受限权限保存在当前服务器，不会返回到浏览器或中央端。</p>
+        <div className="node-setup-form">
+          <label>
+            中央 WebSocket 地址
+            <input
+              autoFocus
+              placeholder="wss://central.example.com/node"
+              value={centralUrl}
+              onChange={(event) => setCentralUrl(event.target.value)}
+            />
+            <small>生产环境使用 wss://；直接测试 HTTP 服务时才使用 ws://。</small>
+          </label>
+          {!discord && (
+            <label>
+              NapCat OneBot WebSocket 地址
+              <input
+                placeholder="ws://127.0.0.1:3001"
+                value={platformUrl}
+                onChange={(event) => setPlatformUrl(event.target.value)}
+              />
+            </label>
+          )}
+          <label>
+            {discord ? 'Discord Bot Token' : 'NapCat Access Token（可选）'}
+            <input
+              type="password"
+              placeholder={
+                configuration?.platformTokenConfigured ? '已保存；留空表示不修改' : '填写平台凭据'
+              }
+              value={platformToken}
+              onChange={(event) => setPlatformToken(event.target.value)}
+            />
+          </label>
+          <label className="setup-checkbox">
+            <input
+              type="checkbox"
+              checked={allowInsecure}
+              onChange={(event) => setAllowInsecure(event.target.checked)}
+            />
+            <span>
+              <strong>允许不安全的中央连接</strong>
+              <small>仅当使用 ws:// 进行局域网或本机测试时开启。</small>
+            </span>
+          </label>
+        </div>
+        {error && (
+          <div className="alert compact">
+            <CircleAlert size={16} />
+            <span>{error}</span>
+          </div>
+        )}
+        {saving && <LoadingProgress text="正在验证并保存客户端配置" />}
+        <button
+          className="primary setup-submit"
+          disabled={saving || !centralUrl.trim() || (tokenRequired && !platformToken.trim())}
+          onClick={() => void submit()}
+        >
+          <Save size={16} /> 保存并启动客户端
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function Metric({
   icon: Icon,
   title,
@@ -433,9 +639,13 @@ function Check({ label, ok }: { label: string; ok: boolean }) {
   );
 }
 function stateLabel(state?: Status['state']) {
-  return { starting: '启动中', connected: '运行正常', retrying: '正在重连', stopped: '已停止' }[
-    state ?? 'starting'
-  ];
+  return {
+    setup: '等待配置',
+    starting: '启动中',
+    connected: '运行正常',
+    retrying: '正在重连',
+    stopped: '已停止',
+  }[state ?? 'starting'];
 }
 
 const logEventLabels: Record<string, string> = {

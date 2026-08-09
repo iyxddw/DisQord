@@ -59,6 +59,7 @@ export async function apiRetry<T>(
 export interface AuthStatus {
   configured: boolean;
   authenticated: boolean;
+  onboardingComplete: boolean;
 }
 
 export interface ChatSession {
