@@ -25,6 +25,7 @@ input[type='checkbox'] {
   border: 1px solid #50555b;
   border-radius: 0;
   vertical-align: middle;
+  overflow: hidden;
   background: #3a3d41;
   cursor: pointer;
   transition:
@@ -33,21 +34,21 @@ input[type='checkbox'] {
 }
 input[type='checkbox']::before {
   position: absolute;
-  top: -1px;
-  left: -1px;
-  width: 17px;
-  height: 18px;
-  border: 1px solid #686e75;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 100%;
+  border: 0;
   background: #0d0f11;
   content: '';
   transition: transform 120ms ease;
 }
 input[type='checkbox']:checked {
-  border-color: #858c94;
-  background: #737980;
+  border-color: #fff;
+  background: #fff;
 }
 input[type='checkbox']:checked::before {
-  transform: translateX(17px);
+  transform: translateX(100%);
 }
 input[type='checkbox']:disabled {
   cursor: not-allowed;

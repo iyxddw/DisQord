@@ -234,10 +234,6 @@ function App() {
           })}
         </nav>
         <div className="sidebar-foot">
-          <span>
-            <i />
-            中央服务已连接
-          </span>
           <button
             onClick={() =>
               void api('/auth/logout', { method: 'POST' }).then(() => location.reload())
@@ -251,10 +247,6 @@ function App() {
       <main className="workspace">
         <header>
           <h1>{current.label}</h1>
-          <div className="header-status">
-            <ShieldCheck size={17} />
-            {location.protocol === 'https:' ? '管理连接已加密' : '管理连接使用明文 HTTP'}
-          </div>
         </header>
         <section className="page">
           {page === 'overview' && <Overview />}
@@ -2451,125 +2443,124 @@ function BlueprintEditor() {
   return (
     <div className="blueprint-layout">
       <div className="flow-toolbar">
-        <div className="blueprint-library-head">
-          <strong>已保存蓝图</strong>
-          <button onClick={resetEditor}>
-            <Plus size={14} />
-            新建
-          </button>
-        </div>
-        <div className="blueprint-library">
-          {blueprints.data.map((blueprint) => (
-            <div
-              className={`blueprint-record ${
-                currentBlueprintId === blueprint.id ? 'selected' : ''
-              }`}
-              key={blueprint.id}
-            >
-              <button className="blueprint-open" onClick={() => openBlueprint(blueprint)}>
-                <span>{blueprint.name}</span>
-                <small>
-                  {blueprint.enabled ? '运行中' : '已停用'} · v{blueprint.activeVersion ?? '—'}
-                </small>
-              </button>
-              <div className="blueprint-actions">
-                <button
-                  disabled={blueprintAction?.id === blueprint.id}
-                  title={blueprint.enabled ? '停用' : '启用'}
-                  onClick={() => void toggleBlueprint(blueprint)}
-                >
-                  {blueprintAction?.id === blueprint.id && blueprintAction.kind === 'toggle' ? (
-                    <LoaderCircle className="spin" size={13} />
-                  ) : (
-                    <Power size={13} />
-                  )}
+        <section className="blueprint-toolbar-section">
+          <div className="blueprint-library-head">
+            <strong>已保存蓝图</strong>
+            <button onClick={resetEditor}>
+              <Plus size={14} />
+              新建
+            </button>
+          </div>
+          <div className="blueprint-library">
+            {blueprints.data.map((blueprint) => (
+              <div
+                className={`blueprint-record ${
+                  currentBlueprintId === blueprint.id ? 'selected' : ''
+                }`}
+                key={blueprint.id}
+              >
+                <button className="blueprint-open" onClick={() => openBlueprint(blueprint)}>
+                  <span>{blueprint.name}</span>
+                  <small>
+                    {blueprint.enabled ? '运行中' : '已停用'} · v{blueprint.activeVersion ?? '—'}
+                  </small>
                 </button>
-                <button
-                  disabled={blueprintAction?.id === blueprint.id}
-                  title="删除"
-                  onClick={() => void deleteBlueprint(blueprint)}
-                >
-                  {blueprintAction?.id === blueprint.id && blueprintAction.kind === 'delete' ? (
-                    <LoaderCircle className="spin" size={13} />
-                  ) : (
-                    <Trash2 size={13} />
-                  )}
-                </button>
+                <div className="blueprint-actions">
+                  <button
+                    disabled={blueprintAction?.id === blueprint.id}
+                    title={blueprint.enabled ? '停用' : '启用'}
+                    onClick={() => void toggleBlueprint(blueprint)}
+                  >
+                    {blueprintAction?.id === blueprint.id && blueprintAction.kind === 'toggle' ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : (
+                      <Power size={13} />
+                    )}
+                  </button>
+                  <button
+                    disabled={blueprintAction?.id === blueprint.id}
+                    title="删除"
+                    onClick={() => void deleteBlueprint(blueprint)}
+                  >
+                    {blueprintAction?.id === blueprint.id && blueprintAction.kind === 'delete' ? (
+                      <LoaderCircle className="spin" size={13} />
+                    ) : (
+                      <Trash2 size={13} />
+                    )}
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
-          {!blueprints.data.length && <small className="muted">尚无已保存蓝图</small>}
-        </div>
-        <div className="toolbar-divider" />
-        <label>
-          蓝图名称
-          <input
-            value={name}
-            onChange={(event) => {
-              setName(event.target.value);
-              setDraftDirty(true);
-            }}
-          />
-        </label>
-        <label>
-          选择会话
-          <select value={selected} onChange={(event) => setSelected(event.target.value)}>
-            <option value="">请选择</option>
-            <optgroup label="模拟会话">
-              <option value="__simulated-input__">模拟输入</option>
-              <option value="__simulated-output__">模拟输出</option>
-            </optgroup>
-            <optgroup label="真实会话">
-              {usable.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {sessionLabel(session)}
-                </option>
-              ))}
-            </optgroup>
-          </select>
-        </label>
-        <div className="module-palette">
-          <button onClick={() => addNode('input')}>
-            <Plus size={15} />
-            消息入口
+            ))}
+            {!blueprints.data.length && <small className="muted">尚无已保存蓝图</small>}
+          </div>
+        </section>
+        <section className="blueprint-toolbar-section blueprint-builder-section">
+          <div className="blueprint-section-title">
+            <strong>编辑蓝图</strong>
+            <small>选择会话后添加所需模块</small>
+          </div>
+          <label>
+            蓝图名称
+            <input
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value);
+                setDraftDirty(true);
+              }}
+            />
+          </label>
+          <label>
+            选择会话
+            <select value={selected} onChange={(event) => setSelected(event.target.value)}>
+              <option value="">请选择</option>
+              <optgroup label="模拟会话">
+                <option value="__simulated-input__">模拟输入</option>
+                <option value="__simulated-output__">模拟输出</option>
+              </optgroup>
+              <optgroup label="真实会话">
+                {usable.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {sessionLabel(session)}
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </label>
+          <div className="module-palette">
+            <button onClick={() => addNode('input')}>
+              <Plus size={15} />
+              消息入口
+            </button>
+            <button onClick={() => addNode('output')}>
+              <Plus size={15} />
+              发送目标
+            </button>
+            <button onClick={() => addNode('translation')}>
+              <Plus size={15} />
+              翻译
+            </button>
+            <button onClick={() => addNode('moderation')}>
+              <Plus size={15} />
+              审核
+            </button>
+            <button onClick={() => addNode('review')}>
+              <Plus size={15} />
+              人工审核
+            </button>
+            <button onClick={() => addNode('fixed')}>
+              <Plus size={15} />
+              固定文本
+            </button>
+          </div>
+          <button className="primary" disabled={saving} onClick={() => void save()}>
+            {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+            {saving ? '发布中' : currentBlueprintId ? '发布新版本' : '保存并发布'}
           </button>
-          <button onClick={() => addNode('output')}>
-            <Plus size={15} />
-            发送目标
-          </button>
-          <button onClick={() => addNode('translation')}>
-            <Plus size={15} />
-            翻译
-          </button>
-          <button onClick={() => addNode('moderation')}>
-            <Plus size={15} />
-            审核
-          </button>
-          <button onClick={() => addNode('review')}>
-            <Plus size={15} />
-            人工审核
-          </button>
-          <button onClick={() => addNode('fixed')}>
-            <Plus size={15} />
-            固定文本
-          </button>
-        </div>
-        <button className="primary" disabled={saving} onClick={() => void save()}>
-          {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
-          {saving ? '发布中' : currentBlueprintId ? '发布新版本' : '保存并发布'}
-        </button>
+        </section>
         {currentBlueprintId && loadedVersion !== undefined && (
           <small className="editing-version">正在编辑 v{loadedVersion}</small>
         )}
         {notice && <p className="toolbar-notice">{notice}</p>}
-        <div className="tip">
-          <Network size={18} />
-          <p>
-            <strong>连线方法</strong>
-            <br />
-            从左到右连接模块；可在会话列表选择模拟输入或模拟输出。模拟输入连接真实目标时会实际发送，真实入口也可连接模拟输出。所有运行中的消息都会逐节点播放。
-          </p>
-        </div>
       </div>
       <div className="flow-canvas">
         <ReactFlow
