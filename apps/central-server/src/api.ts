@@ -60,6 +60,9 @@ const overviewActivityQuerySchema = z.object({
 const simulationSettingsSchema = z.object({
   delayMs: z.number().int().min(0).max(10_000).default(1_000),
 });
+const logSettingsSchema = z.object({
+  delayedMessageThresholdMs: z.number().int().min(100).max(3_600_000).default(2_000),
+});
 const nodeLogPageSchema = z.object({
   items: z.array(
     z.object({
@@ -635,6 +638,21 @@ export function createCentralApplication(options: CentralApplicationOptions) {
     try {
       const settings = simulationSettingsSchema.parse(request.body);
       await options.store.set('settings', 'simulation', settings);
+      return settings;
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get('/api/settings/logs', { preHandler: requireAdmin }, async () => {
+    const entry = await options.store.get('settings', 'logs');
+    return logSettingsSchema.parse(entry?.value ?? {});
+  });
+
+  app.put('/api/settings/logs', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const settings = logSettingsSchema.parse(request.body);
+      await options.store.set('settings', 'logs', settings);
       return settings;
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
@@ -1301,7 +1319,9 @@ export function createCentralApplication(options: CentralApplicationOptions) {
             group.events.some((record) => String(record.event ?? '').includes('retry')),
           );
         } else if (query.traceFilter === 'slow') {
-          groups = groups.filter((group) => group.durationMs >= 2_000);
+          const entry = await options.store.get('settings', 'logs');
+          const settings = logSettingsSchema.parse(entry?.value ?? {});
+          groups = groups.filter((group) => group.durationMs >= settings.delayedMessageThresholdMs);
         }
         const total = groups.length;
         const totalPages = Math.max(1, Math.ceil(total / query.pageSize));

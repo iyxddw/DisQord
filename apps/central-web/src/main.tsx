@@ -186,6 +186,7 @@ function App() {
       '/settings/llm',
       '/settings/card',
       '/settings/simulation',
+      '/settings/logs',
       '/reviews',
       '/logs?page=1&pageSize=50&level=all&search=',
     ];
@@ -700,7 +701,6 @@ function Overview() {
               : `${online} 个客户端在线`}
           </span>
           <h2>中央服务正常</h2>
-          <p>节点心跳、会话和待审核消息均来自当前中央服务。</p>
         </div>
         <dl className="overview-metrics">
           <div>
@@ -727,7 +727,6 @@ function Overview() {
       <section className="panel activity-panel">
         <PanelTitle
           title="聊天活跃趋势"
-          subtitle="仅统计需要转发的会话，并严格排除 QQ 与 Discord 机器人自己发送的消息"
           action={
             <div className="range-switch" aria-label="统计时间范围">
               {(['24h', '7d', '30d'] as const).map((item) => (
@@ -1326,11 +1325,14 @@ type MobileBlueprintFlowProps = {
 };
 
 function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
-  const [rootId, setRootId] = useState('');
   const [choices, setChoices] = useState<Record<string, string>>({});
   const incoming = useMemo(() => {
     const map = new Set(edges.map((edge) => edge.target));
-    return nodes.filter((node) => !map.has(node.id));
+    return nodes
+      .filter((node) => !map.has(node.id))
+      .sort(
+        (left, right) => left.position.y - right.position.y || left.position.x - right.position.x,
+      );
   }, [edges, nodes]);
   const outgoing = useMemo(() => {
     const map = new Map<string, Edge[]>();
@@ -1342,34 +1344,30 @@ function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
     return map;
   }, [edges]);
 
-  useEffect(() => {
-    if (!rootId || !nodes.some((node) => node.id === rootId)) {
-      setRootId(incoming[0]?.id ?? nodes[0]?.id ?? '');
-    }
-  }, [incoming, nodes, rootId]);
-
-  const pathView = useMemo(() => {
-    const pathNodes: Node<FlowData>[] = [];
-    const pathEdges: Edge[] = [];
-    const visited = new Set<string>();
-    let currentId = rootId;
-    while (currentId && !visited.has(currentId)) {
-      visited.add(currentId);
-      const node = nodes.find((item) => item.id === currentId);
-      if (!node) break;
-      pathNodes.push(node);
-      const next = outgoing.get(currentId) ?? [];
-      if (!next.length) break;
-      const chosen = choices[currentId];
-      const selected = next.find((edge) => edge.id === chosen) ?? next[0];
-      if (!selected) break;
-      pathEdges.push(selected);
-      currentId = selected.target;
-    }
-    return { nodes: pathNodes, edges: pathEdges };
-  }, [choices, nodes, outgoing, rootId]);
-  const orderedPath = pathView.nodes;
-  const pathIds = new Set(orderedPath.map((node) => node.id));
+  const pathViews = useMemo(() => {
+    const roots = incoming.length ? incoming : nodes.slice(0, 1);
+    return roots.map((root) => {
+      const pathNodes: Node<FlowData>[] = [];
+      const pathEdges: Edge[] = [];
+      const visited = new Set<string>();
+      let currentId = root.id;
+      while (currentId && !visited.has(currentId)) {
+        visited.add(currentId);
+        const node = nodes.find((item) => item.id === currentId);
+        if (!node) break;
+        pathNodes.push(node);
+        const next = outgoing.get(currentId) ?? [];
+        if (!next.length) break;
+        const chosen = choices[currentId];
+        const selected = next.find((edge) => edge.id === chosen) ?? next[0];
+        if (!selected) break;
+        pathEdges.push(selected);
+        currentId = selected.target;
+      }
+      return { rootId: root.id, nodes: pathNodes, edges: pathEdges };
+    });
+  }, [choices, incoming, nodes, outgoing]);
+  const pathIds = new Set(pathViews.flatMap((path) => path.nodes.map((node) => node.id)));
   const connectedIds = new Set(edges.flatMap((edge) => [edge.source, edge.target]));
   const disconnected = nodes.filter((node) => !pathIds.has(node.id) && !connectedIds.has(node.id));
 
@@ -1390,53 +1388,49 @@ function MobileBlueprintFlow({ nodes, edges }: MobileBlueprintFlowProps) {
       <div className="mobile-flow-heading">
         <div>
           <strong>流程预览</strong>
-          <span>点击分支按钮可以查看不同出口的后续路径。</span>
+          <span>
+            {pathViews.length > 1 ? `共 ${pathViews.length} 条独立线路；` : ''}
+            点击分支按钮可以查看不同出口的后续路径。
+          </span>
         </div>
-        {incoming.length > 1 && (
-          <label>
-            起始入口
-            <select value={rootId} onChange={(event) => setRootId(event.target.value)}>
-              {incoming.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {node.data.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
       </div>
       <div className="mobile-flow-path">
-        {orderedPath.map((node, index) => {
-          const branches = outgoing.get(node.id) ?? [];
-          return (
-            <div className="mobile-flow-step" key={node.id}>
-              <MobileFlowCard node={node} allNodes={nodes} outgoing={branches} />
-              {branches.length > 1 && (
-                <div className="mobile-branch-picker">
-                  <span>选择下一条路径</span>
-                  <div>
-                    {branches.map((edge, branchIndex) => (
-                      <button
-                        className={choices[node.id] === edge.id ? 'active' : ''}
-                        key={edge.id}
-                        onClick={() =>
-                          setChoices((current) => ({ ...current, [node.id]: edge.id }))
-                        }
-                      >
-                        {mobileBranchLabel(edge, branchIndex)}
-                      </button>
-                    ))}
-                  </div>
+        {pathViews.map((path, routeIndex) => (
+          <div className="mobile-flow-route" key={path.rootId}>
+            {routeIndex > 0 && <div className="mobile-flow-route-divider" aria-hidden="true" />}
+            {path.nodes.map((node, index) => {
+              const branches = outgoing.get(node.id) ?? [];
+              return (
+                <div className="mobile-flow-step" key={node.id}>
+                  <MobileFlowCard node={node} allNodes={nodes} outgoing={branches} />
+                  {branches.length > 1 && (
+                    <div className="mobile-branch-picker">
+                      <span>选择下一条路径</span>
+                      <div>
+                        {branches.map((edge, branchIndex) => (
+                          <button
+                            className={choices[node.id] === edge.id ? 'active' : ''}
+                            key={edge.id}
+                            onClick={() =>
+                              setChoices((current) => ({ ...current, [node.id]: edge.id }))
+                            }
+                          >
+                            {mobileBranchLabel(edge, branchIndex)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {index < path.nodes.length - 1 && (
+                    <div className="mobile-flow-connector" aria-hidden="true">
+                      ↓
+                    </div>
+                  )}
                 </div>
-              )}
-              {index < orderedPath.length - 1 && branches.length <= 1 && (
-                <div className="mobile-flow-connector" aria-hidden="true">
-                  ↓
-                </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
       </div>
       {disconnected.length > 0 && (
         <details className="mobile-disconnected">
@@ -1608,6 +1602,7 @@ function BlueprintEditor() {
   >();
   const [editorKey, setEditorKey] = useState(0);
   const [notice, setNotice] = useState('');
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<FlowData>, Edge>>();
   const activityCursor = useRef('');
   const activityQueue = useRef<BlueprintActivity[]>([]);
@@ -2479,7 +2474,7 @@ function BlueprintEditor() {
   };
 
   return (
-    <div className="blueprint-layout">
+    <div className={`blueprint-layout ${toolbarCollapsed ? 'toolbar-collapsed' : ''}`}>
       <div className="flow-toolbar">
         <section className="blueprint-toolbar-section">
           <div className="blueprint-library-head">
@@ -2600,6 +2595,15 @@ function BlueprintEditor() {
         )}
         {notice && <p className="toolbar-notice">{notice}</p>}
       </div>
+      <button
+        className="blueprint-sidebar-toggle"
+        title={toolbarCollapsed ? '展开蓝图工具栏' : '收起蓝图工具栏'}
+        aria-label={toolbarCollapsed ? '展开蓝图工具栏' : '收起蓝图工具栏'}
+        aria-expanded={!toolbarCollapsed}
+        onClick={() => setToolbarCollapsed((current) => !current)}
+      >
+        <ChevronRight size={15} />
+      </button>
       <div className="flow-canvas">
         <ReactFlow
           key={editorKey}
@@ -3054,6 +3058,10 @@ function Nodes() {
 
 type SettingsSection = 'llm' | 'delivery' | 'cards' | 'simulation';
 
+interface LogSettingsView {
+  delayedMessageThresholdMs: number;
+}
+
 interface LlmProviderForm {
   id: string;
   name: string;
@@ -3200,6 +3208,9 @@ function SettingsPage() {
   const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
   const cards = useLoad<CardSettingsView>('/settings/card', { themeId: 'midnight', themes: [] });
   const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
+  const logSettings = useLoad<LogSettingsView>('/settings/logs', {
+    delayedMessageThresholdMs: 2_000,
+  });
   const [section, setSection] = useState<SettingsSection>('llm');
   const [providers, setProviders] = useState<LlmProviderForm[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState('');
@@ -3208,6 +3219,7 @@ function SettingsPage() {
   const [fastDeliveryIntervalMs, setFastDeliveryIntervalMs] = useState(1_500);
   const [themeId, setThemeId] = useState('midnight');
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
+  const [delayedMessageThresholdSeconds, setDelayedMessageThresholdSeconds] = useState(2);
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -3239,6 +3251,10 @@ function SettingsPage() {
   useEffect(
     () => setSimulationDelayMs(simulation.data.delayMs ?? 1_000),
     [simulation.data.delayMs],
+  );
+  useEffect(
+    () => setDelayedMessageThresholdSeconds(logSettings.data.delayedMessageThresholdMs / 1_000),
+    [logSettings.data.delayedMessageThresholdMs],
   );
 
   const selected = providers.find((provider) => provider.id === selectedProviderId) ?? providers[0];
@@ -3307,7 +3323,7 @@ function SettingsPage() {
     setSaving(true);
     setNotice('');
     try {
-      const [savedSettings, savedCards, savedSimulation] = await Promise.all([
+      const [savedSettings, savedCards, savedSimulation, savedLogSettings] = await Promise.all([
         apiRetry<Record<string, unknown>>(
           '/settings/llm',
           {
@@ -3353,10 +3369,21 @@ function SettingsPage() {
           { method: 'PUT', json: { delayMs: simulationDelayMs } },
           { attempts: 3 },
         ),
+        apiRetry<LogSettingsView>(
+          '/settings/logs',
+          {
+            method: 'PUT',
+            json: {
+              delayedMessageThresholdMs: Math.round(delayedMessageThresholdSeconds * 1_000),
+            },
+          },
+          { attempts: 3 },
+        ),
       ]);
       settings.setData(savedSettings);
       cards.setData(savedCards);
       simulation.setData(savedSimulation);
+      logSettings.setData(savedLogSettings);
       setNotice('全部设置已保存；模型会按列表顺序故障转移，API 密钥不会回传。');
       setDirty(false);
     } catch (cause) {
@@ -3366,12 +3393,12 @@ function SettingsPage() {
     }
   };
 
-  if (settings.loading || cards.loading || simulation.loading) {
+  if (settings.loading || cards.loading || simulation.loading || logSettings.loading) {
     return <LoadingState text="正在读取基础设置" />;
   }
   const sections: Array<{ id: SettingsSection; label: string; hint: string; icon: typeof Bot }> = [
     { id: 'llm', label: '模型接入', hint: '多模型与故障转移', icon: Bot },
-    { id: 'delivery', label: '发送性能', hint: '并发与疾速模式', icon: Gauge },
+    { id: 'delivery', label: '发送性能', hint: '并发、间隔与延迟阈值', icon: Gauge },
     {
       id: 'cards',
       label: '卡片主题',
@@ -3750,6 +3777,23 @@ function SettingsPage() {
               />
               <small className="field-hint">同一目标会话连续发送的最小间隔。</small>
             </label>
+            <label>
+              延迟消息阈值（秒）
+              <input
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                value={delayedMessageThresholdSeconds}
+                onChange={(event) => {
+                  setDelayedMessageThresholdSeconds(Number(event.target.value));
+                  markDirty();
+                }}
+              />
+              <small className="field-hint">
+                处理耗时达到该值的消息会出现在日志页的“延迟消息”筛选中。
+              </small>
+            </label>
             <label className="wide setting-toggle">
               <span>
                 <input
@@ -3915,7 +3959,7 @@ function ReviewRecords() {
         action={
           <div className="log-actions">
             <button
-              className="clear-button"
+              className="clear-button review-clear-button"
               disabled={!records.data.length}
               onClick={() => void clearReviews()}
             >
@@ -4048,13 +4092,8 @@ function LogRecords() {
     <div className="panel log-panel">
       <PanelTitle
         title="运行日志"
-        subtitle={
-          effectiveView === 'traces'
-            ? '每一项代表一条消息从接收到发送完成的全过程；点击后可以查看每一步发生了什么'
-            : '按时间顺序查看系统记录的每一步操作和完整字段'
-        }
         action={
-          <div className="log-actions">
+          <div className="log-actions log-query-actions">
             <select value={logDevice} onChange={(event) => setDevice(event.target.value)}>
               <option value="central">中央服务</option>
               {logNodes.data.map((node) => (
@@ -4102,7 +4141,7 @@ function LogRecords() {
                 ['all', '全部任务'],
                 ['problems', '仅异常'],
                 ['retry', '发生重试'],
-                ['slow', '处理时间超过 2 秒'],
+                ['slow', '延迟消息'],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -4460,14 +4499,14 @@ function PanelTitle({
   action,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   action?: ReactNode;
 }) {
   return (
     <div className="panel-title">
       <div>
         <h2>{title}</h2>
-        <p>{subtitle}</p>
+        {subtitle && <p>{subtitle}</p>}
       </div>
       {action}
     </div>

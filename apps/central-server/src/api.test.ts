@@ -118,6 +118,35 @@ describe('central control-plane API', () => {
     await central.app.close();
   });
 
+  it('persists the delayed-message threshold used by log filtering', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const initial = await central.app.inject({
+      method: 'GET',
+      url: '/api/settings/logs',
+      cookies: { disqord_session: token },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({ delayedMessageThresholdMs: 2_000 });
+
+    const update = await central.app.inject({
+      method: 'PUT',
+      url: '/api/settings/logs',
+      cookies: { disqord_session: token },
+      payload: { delayedMessageThresholdMs: 3_500 },
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toEqual({ delayedMessageThresholdMs: 3_500 });
+
+    const read = await central.app.inject({
+      method: 'GET',
+      url: '/api/settings/logs',
+      cookies: { disqord_session: token },
+    });
+    expect(read.json()).toEqual({ delayedMessageThresholdMs: 3_500 });
+    await central.app.close();
+  });
+
   it('persists client instance names and lists every instance separately', async () => {
     const central = createTestApplication();
     const token = await configureAdministrator(central);
