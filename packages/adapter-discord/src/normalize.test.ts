@@ -81,6 +81,7 @@ describe('normalizeDiscordMessage', () => {
     );
 
     expect(message).toMatchObject({ kind: 'unsupported', unsupportedType: 'file' });
+    expect(message?.unsupportedRawContent).toContain('document.pdf');
   });
 
   it('replaces Discord user mention tags with the resolved display name', () => {

@@ -147,6 +147,35 @@ describe('central control-plane API', () => {
     await central.app.close();
   });
 
+  it('persists developer handling for unsupported messages', async () => {
+    const central = createTestApplication();
+    const token = await configureAdministrator(central);
+    const initial = await central.app.inject({
+      method: 'GET',
+      url: '/api/settings/developer',
+      cookies: { disqord_session: token },
+    });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json()).toEqual({ replaceUnsupportedMessages: true });
+
+    const update = await central.app.inject({
+      method: 'PUT',
+      url: '/api/settings/developer',
+      cookies: { disqord_session: token },
+      payload: { replaceUnsupportedMessages: false },
+    });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toEqual({ replaceUnsupportedMessages: false });
+
+    const read = await central.app.inject({
+      method: 'GET',
+      url: '/api/settings/developer',
+      cookies: { disqord_session: token },
+    });
+    expect(read.json()).toEqual({ replaceUnsupportedMessages: false });
+    await central.app.close();
+  });
+
   it('persists client instance names and lists every instance separately', async () => {
     const central = createTestApplication();
     const token = await configureAdministrator(central);

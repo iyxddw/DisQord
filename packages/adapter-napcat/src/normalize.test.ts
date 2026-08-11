@@ -49,6 +49,7 @@ describe('normalizeNapCatGroupMessage', () => {
       randomUUID(),
     );
     expect(message).toMatchObject({ kind: 'unsupported', unsupportedType: 'record' });
+    expect(message?.unsupportedRawContent).toContain('"type":"record"');
   });
 
   it('marks messages produced by the logged-in QQ account as fromSelf', () => {

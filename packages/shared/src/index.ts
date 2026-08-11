@@ -2,6 +2,7 @@ export * from './blueprint.js';
 export * from './card-theme.js';
 export * from './chat-session.js';
 export * from './common.js';
+export * from './developer-settings.js';
 export * from './message.js';
 export * from './program.js';
 export * from './prompt.js';

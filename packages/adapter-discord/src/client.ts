@@ -206,6 +206,12 @@ export class DiscordBotAdapter {
         height: attachment.height,
       })),
       stickerCount: message.stickers.size,
+      stickerDetails: message.stickers.map((sticker) => ({
+        id: sticker.id,
+        name: sticker.name,
+        format: sticker.format,
+        url: sticker.url,
+      })),
       mentions,
       ...(referenced
         ? {

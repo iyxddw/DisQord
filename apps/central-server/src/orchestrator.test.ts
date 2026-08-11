@@ -403,6 +403,109 @@ describe('blueprint message pipeline', () => {
     ).toEqual({ sourceUrl: 'https://q1.qlogo.cn/g?b=qq&nk=12345&s=640' });
   });
 
+  it('switches unsupported cards between replacement text and the retained raw body', async () => {
+    const setup = await fixture([], [], {});
+    const processor = new CentralMessageProcessor(setup.store, new InMemorySecretStore());
+    const incoming: MessageEnvelope = {
+      ...message(setup.sourceSession.nodeId, '随附文字'),
+      kind: 'unsupported',
+      unsupportedType: 'record',
+      unsupportedRawContent: '{"message":[{"type":"record","data":{"file":"voice.amr"}}]}',
+    };
+
+    const replaced = await processor.prepareRender(
+      incoming,
+      setup.targetSession,
+      incoming.text!,
+      false,
+    );
+    expect(replaced.unsupportedType).toBe('record');
+
+    await setup.store.set('settings', 'developer', { replaceUnsupportedMessages: false });
+    const raw = await processor.prepareRender(
+      incoming,
+      setup.targetSession,
+      incoming.text!,
+      false,
+    );
+    expect(raw).toMatchObject({
+      primaryText: incoming.unsupportedRawContent,
+      images: [],
+    });
+    expect(raw.unsupportedType).toBeUndefined();
+    expect(raw.originalText).toBeUndefined();
+  });
+
+  it('skips translation and model moderation for unsupported messages', async () => {
+    const input = randomUUID();
+    const translation = randomUUID();
+    const moderation = randomUUID();
+    const output = randomUUID();
+    const blocked = randomUUID();
+    const translate = vi.fn();
+    const moderate = vi.fn();
+    const prepareRender = vi.fn(async (incoming: MessageEnvelope, target: ChatSession, text: string) => ({
+      sourcePlatform: incoming.source.platform,
+      targetLanguage: target.platform === 'discord' ? ('en' as const) : ('zh' as const),
+      sourceName: incoming.source.channelId,
+      senderName: incoming.sender.displayName,
+      sentAt: incoming.sentAt,
+      primaryText: text,
+      images: [],
+      traceLabel: incoming.traceId.slice(0, 8),
+    }));
+    const setup = await fixture(
+      [
+        node(input, 'chat-input', { sessionRole: 'source' }),
+        node(translation, 'llm-translation', { prompt: '翻译', memoryMode: false }),
+        node(moderation, 'llm-moderation', { prompt: '审核', threshold: 0.5 }),
+        node(output, 'chat-output', { sessionRole: 'target' }),
+        node(blocked, 'discard'),
+      ],
+      [
+        { id: randomUUID(), sourceNodeId: input, targetNodeId: translation },
+        { id: randomUUID(), sourceNodeId: translation, targetNodeId: moderation },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'passed',
+          targetNodeId: output,
+        },
+        {
+          id: randomUUID(),
+          sourceNodeId: moderation,
+          sourceHandle: 'blocked',
+          targetNodeId: blocked,
+        },
+      ],
+      { translate, moderate, prepareRender },
+    );
+    const incoming: MessageEnvelope = {
+      ...message(setup.sourceSession.nodeId, '[CQ:record,file=voice.amr]'),
+      kind: 'unsupported',
+      unsupportedType: 'record',
+      unsupportedRawContent: '{"message":[{"type":"record"}]}',
+    };
+
+    await setup.orchestrator.handleNodeFrame({
+      nodeId: setup.sourceSession.nodeId,
+      nodeType: 'qq',
+      kind: 'message.upload',
+      payload: incoming,
+      frameId: randomUUID(),
+    });
+
+    await waitFor(() => setup.sendToNode.mock.calls.length === 1);
+    expect(translate).not.toHaveBeenCalled();
+    expect(moderate).not.toHaveBeenCalled();
+    expect(prepareRender).toHaveBeenCalled();
+    expect(setup.sendToNode).toHaveBeenCalledWith(
+      setup.targetSession.nodeId,
+      'message.deliver.batch',
+      expect.objectContaining({ deliveries: expect.arrayContaining([expect.any(Object)]) }),
+    );
+  });
+
   it('tries LLM providers in order until one succeeds', async () => {
     const setup = await fixture([], [], {});
     const secrets = new InMemorySecretStore();

@@ -8,6 +8,7 @@ import {
   cardThemes,
   createMessageIdempotencyKey,
   createProgramDescriptor,
+  developerSettingsSchema,
   messageEnvelopeSchema,
   messageUploadBatchSchema,
 } from './index.js';
@@ -18,6 +19,12 @@ describe('message card themes', () => {
     expect(cardThemes.filter((theme) => theme.dark).length).toBeGreaterThanOrEqual(6);
     expect(new Set(cardThemes.map((theme) => theme.id)).size).toBe(cardThemes.length);
     expect(cardSettingsSchema.parse({}).themeId).toBe('midnight');
+  });
+});
+
+describe('developer settings', () => {
+  it('keeps unsupported-message replacement enabled by default', () => {
+    expect(developerSettingsSchema.parse({}).replaceUnsupportedMessages).toBe(true);
   });
 });
 

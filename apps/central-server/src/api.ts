@@ -12,6 +12,7 @@ import {
   cardSettingsSchema,
   cardThemes,
   chatSessionSchema,
+  developerSettingsSchema,
   messageEnvelopeSchema,
   promptPurposeSchema,
   promptTemplateVersionSchema,
@@ -624,6 +625,21 @@ export function createCentralApplication(options: CentralApplicationOptions) {
       const settings = cardSettingsSchema.parse(request.body);
       await options.store.set('settings', 'card', settings);
       return { ...settings, themes: cardThemes };
+    } catch (error) {
+      return await reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get('/api/settings/developer', { preHandler: requireAdmin }, async () => {
+    const entry = await options.store.get('settings', 'developer');
+    return developerSettingsSchema.parse(entry?.value ?? {});
+  });
+
+  app.put('/api/settings/developer', { preHandler: requireAdmin }, async (request, reply) => {
+    try {
+      const settings = developerSettingsSchema.parse(request.body);
+      await options.store.set('settings', 'developer', settings);
+      return settings;
     } catch (error) {
       return await reply.code(400).send({ error: errorMessage(error) });
     }

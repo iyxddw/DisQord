@@ -66,6 +66,8 @@ export const messageEnvelopeSchema = z
     attachments: z.array(mediaReferenceSchema).max(10).default([]),
     customEmojis: z.array(customEmojiReferenceSchema).max(32).optional(),
     unsupportedType: z.string().trim().min(1).max(128).optional(),
+    /** Original source body retained for diagnostics and targeted adapter work. */
+    unsupportedRawContent: z.string().max(20_000).optional(),
     replyTo: replyReferenceSchema.optional(),
     traceId: internalIdSchema,
   })

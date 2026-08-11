@@ -142,7 +142,7 @@ describe('message card renderer', () => {
     expect(cards.length).toBeGreaterThan(1);
   });
 
-  it('uses only Chinese interface labels for QQ targets', () => {
+  it('keeps QQ interface labels but uses an English unsupported-message notice', () => {
     const svg = buildMessageCardSvg({
       sourcePlatform: 'discord',
       targetLanguage: 'zh',
@@ -156,9 +156,9 @@ describe('message card renderer', () => {
     });
 
     expect(svg).toContain('>原文</text>');
-    expect(svg).toContain('不支持的消息');
+    expect(svg).toContain('Unsupported message');
     expect(svg).not.toContain('ORIGINAL');
-    expect(svg).not.toContain('Unsupported message');
+    expect(svg).not.toContain('不支持的消息');
   });
 
   it('renders reply images and a localized fallback when no preview is available', () => {

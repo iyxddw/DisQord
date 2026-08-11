@@ -21,6 +21,7 @@ import {
   chatSessionSchema,
   createAvatarKey,
   createMessageIdempotencyKey,
+  developerSettingsSchema,
   messageEnvelopeSchema,
   type MessageCardRenderSpec,
   messageUploadBatchSchema,
@@ -1277,7 +1278,17 @@ export class MessageOrchestrator {
         });
       }
 
-      if (node.type === 'llm-translation' && state.text.trim()) {
+      if (message.kind === 'unsupported' && node.type === 'llm-translation') {
+        await this.#log(message.traceId, 'info', 'unsupported_message_llm_skipped', {
+          nodeId: node.id,
+          nodeType: node.type,
+          unsupportedType: message.unsupportedType,
+        });
+        await recordActivity(node, processedSteps, {
+          message: '不支持的消息已跳过翻译模型',
+          text: state.text,
+        });
+      } else if (node.type === 'llm-translation' && state.text.trim()) {
         const config = translationConfigSchema.parse(node.config);
         const target =
           this.#findDownstreamTarget(node.id, nodes, outgoing, sessions) ??
@@ -1342,6 +1353,25 @@ export class MessageOrchestrator {
           });
         }
       } else if (node.type === 'llm-moderation') {
+        if (message.kind === 'unsupported') {
+          await this.#log(message.traceId, 'info', 'unsupported_message_llm_skipped', {
+            nodeId: node.id,
+            nodeType: node.type,
+            unsupportedType: message.unsupportedType,
+            selectedOutput: 'passed',
+          });
+          await recordActivity(node, processedSteps, {
+            message: '不支持的消息已跳过模型审核，并从“过审”出口继续',
+            text: state.text,
+            route: 'passed',
+          });
+          for (const edge of (outgoing.get(node.id) ?? []).filter(
+            (candidate) => candidate.sourceHandle === 'passed',
+          )) {
+            work.push({ nodeId: edge.targetNodeId, state });
+          }
+          continue;
+        }
         const config = moderationConfigSchema.parse(node.config);
         let assessment: ViolationAssessment;
         const moderationText = bridgeReplyOriginalText
@@ -1811,7 +1841,18 @@ export class MessageOrchestrator {
             mappingKey(sourceSession.id, message.replyTo.sourceMessageId, target.id),
           )
         )?.value.targetMessageId
-      : undefined;
+        : undefined;
+    let fastDeliveryText = processedText || 'Unsupported message';
+    if (fastMode && message.kind === 'unsupported') {
+      const developerSettings = developerSettingsSchema.parse(
+        (await this.#store.get('settings', 'developer'))?.value ?? {},
+      );
+      fastDeliveryText = developerSettings.replaceUnsupportedMessages
+        ? `Unsupported message\nType: ${message.unsupportedType ?? 'unknown'}`
+        : message.unsupportedRawContent ??
+          message.text ??
+          JSON.stringify({ type: message.unsupportedType ?? 'unknown' });
+    }
     const command: OutboundDeliveryCommand = {
       taskId,
       sourceSessionId: sourceSession.id,
@@ -1826,7 +1867,7 @@ export class MessageOrchestrator {
             // Images/attachments have no rendered card in speed mode.  Keep a
             // deterministic text fallback instead of sending an invalid empty
             // command to the node.
-            text: processedText || '不支持的消息',
+            text: fastDeliveryText,
             senderName: message.sender.displayName,
             fastMode: true,
           }
@@ -2472,6 +2513,17 @@ export class CentralMessageProcessor implements MessageProcessor {
   ): Promise<MessageCardRenderSpec> {
     const cardSettingsEntry = await this.#store.get('settings', 'card');
     const cardSettings = cardSettingsSchema.parse(cardSettingsEntry?.value ?? {});
+    const developerSettingsEntry = await this.#store.get('settings', 'developer');
+    const developerSettings = developerSettingsSchema.parse(developerSettingsEntry?.value ?? {});
+    const showUnsupportedRawContent =
+      !fixedText &&
+      message.kind === 'unsupported' &&
+      !developerSettings.replaceUnsupportedMessages;
+    const primaryText = showUnsupportedRawContent
+      ? message.unsupportedRawContent ??
+        message.text ??
+        JSON.stringify({ type: message.unsupportedType ?? 'unknown' })
+      : text;
     const sourceSession = (await this.#store.list<ChatSession>('chat-session'))
       .map((entry) => chatSessionSchema.parse(entry.value))
       .find(
@@ -2521,8 +2573,10 @@ export class CentralMessageProcessor implements MessageProcessor {
       ...(senderAvatarKey ? { senderAvatarKey } : {}),
       ...(avatar ? { senderAvatar: avatar.dataUri } : {}),
       sentAt: message.sentAt,
-      primaryText: text,
-      ...(!fixedText && message.text ? { originalText: message.text } : {}),
+      primaryText,
+      ...(!fixedText && !showUnsupportedRawContent && message.text
+        ? { originalText: message.text }
+        : {}),
       images: images.map((dataUri) => ({ dataUri })),
       ...(inlineEmojis.length ? { inlineEmojis } : {}),
       ...(message.replyTo
@@ -2535,7 +2589,7 @@ export class CentralMessageProcessor implements MessageProcessor {
             },
           }
         : {}),
-      ...(!fixedText && message.unsupportedType
+      ...(!fixedText && developerSettings.replaceUnsupportedMessages && message.unsupportedType
         ? { unsupportedType: message.unsupportedType }
         : {}),
       // A card forwarded out of a fetch-only channel is non-replyable: the

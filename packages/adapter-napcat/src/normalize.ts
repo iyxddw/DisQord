@@ -175,6 +175,11 @@ export function normalizeNapCatGroupMessage(
     attachments,
     ...(customEmojis ? { customEmojis } : {}),
     ...(unsupportedType ? { unsupportedType } : {}),
+    ...(unsupportedType
+      ? {
+          unsupportedRawContent: JSON.stringify({ message: event.message }).slice(0, 20_000),
+        }
+      : {}),
     ...(replyTo?.sourceMessageId ? { replyTo } : {}),
     traceId: randomUUID(),
   });

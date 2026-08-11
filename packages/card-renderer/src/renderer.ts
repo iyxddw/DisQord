@@ -1316,6 +1316,6 @@ function escapeXml(value: string): string {
     .replaceAll("'", '&apos;');
 }
 
-function unsupportedMessage(type: string, language: 'zh' | 'en'): string {
-  return language === 'zh' ? `不支持的消息\n类型：${type}` : `Unsupported message\nType: ${type}`;
+function unsupportedMessage(type: string, _language: 'zh' | 'en'): string {
+  return `Unsupported message\nType: ${type}`;
 }

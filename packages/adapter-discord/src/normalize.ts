@@ -37,6 +37,16 @@ export const discordMessageSnapshotSchema = z.object({
   }),
   attachments: z.array(discordAttachmentSchema),
   stickerCount: z.number().int().nonnegative().default(0),
+  stickerDetails: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        name: z.string().min(1),
+        format: z.number().int(),
+        url: z.url(),
+      }),
+    )
+    .optional(),
   mentions: z.array(discordMentionSchema).optional(),
   referencedMessage: z
     .object({
@@ -163,6 +173,16 @@ export function normalizeDiscordMessage(
     attachments,
     ...(customEmojis ? { customEmojis } : {}),
     ...(unsupportedType ? { unsupportedType } : {}),
+    ...(unsupportedType
+      ? {
+          unsupportedRawContent: JSON.stringify({
+            content: message.content,
+            type: message.type,
+            attachments: message.attachments,
+            stickers: message.stickerDetails ?? { count: message.stickerCount },
+          }).slice(0, 20_000),
+        }
+      : {}),
     ...(replyId
       ? {
           replyTo: {

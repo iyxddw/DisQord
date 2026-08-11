@@ -37,6 +37,7 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Code2,
   Copy,
   FileClock,
   FlaskConical,
@@ -185,6 +186,7 @@ function App() {
       '/blueprints',
       '/settings/llm',
       '/settings/card',
+      '/settings/developer',
       '/settings/simulation',
       '/settings/logs',
       '/reviews',
@@ -3131,7 +3133,7 @@ function Nodes() {
   );
 }
 
-type SettingsSection = 'llm' | 'delivery' | 'cards' | 'simulation';
+type SettingsSection = 'llm' | 'delivery' | 'cards' | 'simulation' | 'developer';
 
 interface LogSettingsView {
   delayedMessageThresholdMs: number;
@@ -3186,6 +3188,10 @@ interface CardThemeView {
 interface CardSettingsView {
   themeId: string;
   themes: CardThemeView[];
+}
+
+interface DeveloperSettingsView {
+  replaceUnsupportedMessages: boolean;
 }
 
 const cardThemeFamilies: readonly {
@@ -3282,6 +3288,9 @@ function createProvider(index = 0): LlmProviderForm {
 function SettingsPage() {
   const settings = useLoad<Record<string, unknown>>('/settings/llm', {});
   const cards = useLoad<CardSettingsView>('/settings/card', { themeId: 'midnight', themes: [] });
+  const developer = useLoad<DeveloperSettingsView>('/settings/developer', {
+    replaceUnsupportedMessages: true,
+  });
   const simulation = useLoad<{ delayMs: number }>('/settings/simulation', { delayMs: 1_000 });
   const logSettings = useLoad<LogSettingsView>('/settings/logs', {
     delayedMessageThresholdMs: 2_000,
@@ -3293,6 +3302,7 @@ function SettingsPage() {
   const [fastMode, setFastMode] = useState(false);
   const [fastDeliveryIntervalMs, setFastDeliveryIntervalMs] = useState(1_500);
   const [themeId, setThemeId] = useState('midnight');
+  const [replaceUnsupportedMessages, setReplaceUnsupportedMessages] = useState(true);
   const [simulationDelayMs, setSimulationDelayMs] = useState(1_000);
   const [delayedMessageThresholdSeconds, setDelayedMessageThresholdSeconds] = useState(2);
   const [notice, setNotice] = useState('');
@@ -3323,6 +3333,10 @@ function SettingsPage() {
     setFastDeliveryIntervalMs(Number(settings.data.fastDeliveryIntervalMs ?? 1_500));
   }, [settings.data]);
   useEffect(() => setThemeId(cards.data.themeId ?? 'midnight'), [cards.data.themeId]);
+  useEffect(
+    () => setReplaceUnsupportedMessages(developer.data.replaceUnsupportedMessages ?? true),
+    [developer.data.replaceUnsupportedMessages],
+  );
   useEffect(
     () => setSimulationDelayMs(simulation.data.delayMs ?? 1_000),
     [simulation.data.delayMs],
@@ -3398,65 +3412,72 @@ function SettingsPage() {
     setSaving(true);
     setNotice('');
     try {
-      const [savedSettings, savedCards, savedSimulation, savedLogSettings] = await Promise.all([
-        apiRetry<Record<string, unknown>>(
-          '/settings/llm',
-          {
-            method: 'PUT',
-            json: {
-              providers: providers.map((provider) => ({
-                id: provider.id,
-                name: provider.name,
-                enabled: provider.enabled,
-                translationEnabled: provider.translationEnabled,
-                moderationEnabled: provider.moderationEnabled,
-                imageModerationEnabled: provider.imageModerationEnabled,
-                baseUrl: provider.baseUrl,
-                ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-                translationModel: provider.translationModel,
-                moderationModel: provider.moderationModel,
-                imageModerationModel: provider.imageModerationModel,
-                imageModerationDetail: provider.imageModerationDetail,
-                maxImageCount: provider.maxImageCount,
-                maxImageBytes: provider.maxImageBytes,
-                timeoutMs: provider.timeoutMs,
-                maxRetries: provider.maxRetries,
-                retryDelayMs: provider.retryDelayMs,
-                ...(provider.maxTokens === '' ? {} : { maxTokens: provider.maxTokens }),
-                translationTemperature: provider.translationTemperature,
-                moderationTemperature: provider.moderationTemperature,
-                responseFormatMode: provider.responseFormatMode,
-              })),
-              concurrency,
-              fastMode,
-              fastDeliveryIntervalMs,
+      const [savedSettings, savedCards, savedDeveloper, savedSimulation, savedLogSettings] =
+        await Promise.all([
+          apiRetry<Record<string, unknown>>(
+            '/settings/llm',
+            {
+              method: 'PUT',
+              json: {
+                providers: providers.map((provider) => ({
+                  id: provider.id,
+                  name: provider.name,
+                  enabled: provider.enabled,
+                  translationEnabled: provider.translationEnabled,
+                  moderationEnabled: provider.moderationEnabled,
+                  imageModerationEnabled: provider.imageModerationEnabled,
+                  baseUrl: provider.baseUrl,
+                  ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+                  translationModel: provider.translationModel,
+                  moderationModel: provider.moderationModel,
+                  imageModerationModel: provider.imageModerationModel,
+                  imageModerationDetail: provider.imageModerationDetail,
+                  maxImageCount: provider.maxImageCount,
+                  maxImageBytes: provider.maxImageBytes,
+                  timeoutMs: provider.timeoutMs,
+                  maxRetries: provider.maxRetries,
+                  retryDelayMs: provider.retryDelayMs,
+                  ...(provider.maxTokens === '' ? {} : { maxTokens: provider.maxTokens }),
+                  translationTemperature: provider.translationTemperature,
+                  moderationTemperature: provider.moderationTemperature,
+                  responseFormatMode: provider.responseFormatMode,
+                })),
+                concurrency,
+                fastMode,
+                fastDeliveryIntervalMs,
+              },
             },
-          },
-          { attempts: 3 },
-        ),
-        apiRetry<CardSettingsView>(
-          '/settings/card',
-          { method: 'PUT', json: { themeId } },
-          { attempts: 3 },
-        ),
-        apiRetry<{ delayMs: number }>(
-          '/settings/simulation',
-          { method: 'PUT', json: { delayMs: simulationDelayMs } },
-          { attempts: 3 },
-        ),
-        apiRetry<LogSettingsView>(
-          '/settings/logs',
-          {
-            method: 'PUT',
-            json: {
-              delayedMessageThresholdMs: Math.round(delayedMessageThresholdSeconds * 1_000),
+            { attempts: 3 },
+          ),
+          apiRetry<CardSettingsView>(
+            '/settings/card',
+            { method: 'PUT', json: { themeId } },
+            { attempts: 3 },
+          ),
+          apiRetry<DeveloperSettingsView>(
+            '/settings/developer',
+            { method: 'PUT', json: { replaceUnsupportedMessages } },
+            { attempts: 3 },
+          ),
+          apiRetry<{ delayMs: number }>(
+            '/settings/simulation',
+            { method: 'PUT', json: { delayMs: simulationDelayMs } },
+            { attempts: 3 },
+          ),
+          apiRetry<LogSettingsView>(
+            '/settings/logs',
+            {
+              method: 'PUT',
+              json: {
+                delayedMessageThresholdMs: Math.round(delayedMessageThresholdSeconds * 1_000),
+              },
             },
-          },
-          { attempts: 3 },
-        ),
-      ]);
+            { attempts: 3 },
+          ),
+        ]);
       settings.setData(savedSettings);
       cards.setData(savedCards);
+      developer.setData(savedDeveloper);
       simulation.setData(savedSimulation);
       logSettings.setData(savedLogSettings);
       setNotice('全部设置已保存；模型会按列表顺序故障转移，API 密钥不会回传。');
@@ -3468,7 +3489,13 @@ function SettingsPage() {
     }
   };
 
-  if (settings.loading || cards.loading || simulation.loading || logSettings.loading) {
+  if (
+    settings.loading ||
+    cards.loading ||
+    developer.loading ||
+    simulation.loading ||
+    logSettings.loading
+  ) {
     return <LoadingState text="正在读取基础设置" />;
   }
   const sections: Array<{ id: SettingsSection; label: string; hint: string; icon: typeof Bot }> = [
@@ -3481,6 +3508,7 @@ function SettingsPage() {
       icon: Palette,
     },
     { id: 'simulation', label: '模拟器', hint: '蓝图播放节奏', icon: FlaskConical },
+    { id: 'developer', label: '开发模式', hint: '非预期内容处理', icon: Code2 },
   ];
 
   return (
@@ -3967,6 +3995,28 @@ function SettingsPage() {
                   markDirty();
                 }}
               />
+            </label>
+          </div>
+        </section>
+      )}
+
+      {section === 'developer' && (
+        <section className="panel settings-section-panel">
+          <PanelTitle title="开发模式" subtitle="用于检查和适配平台返回的非预期消息结构" />
+          <div className="form-grid">
+            <label className="wide setting-toggle">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={replaceUnsupportedMessages}
+                  onChange={(event) => {
+                    setReplaceUnsupportedMessages(event.target.checked);
+                    markDirty();
+                  }}
+                />{' '}
+                替换不支持的消息
+              </span>
+              <small className="field-hint">出现非预期内容时不做替换</small>
             </label>
           </div>
         </section>
