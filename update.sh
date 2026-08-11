@@ -265,6 +265,11 @@ show_selection() {
   [[ "$should_install" == true ]] && info '依赖：pnpm install --frozen-lockfile' || info '依赖：跳过安装'
   [[ "$should_restart" == true ]] && info '服务：构建成功后直接执行对应的 deploy/pm2-start-*.sh' || info '服务：不自动重启'
   [[ "$should_verify" == true ]] && info '验证：执行完整 typecheck 和 test' || info '验证：跳过完整 typecheck/test'
+
+  # 上面的目标列表允许部分选中；不要把最后一个未选中的目标当成失败状态
+  # 传给 set -e。后面的配置说明使用了 && ... || ...，本身会返回成功，
+  # 这里仍显式返回，避免未来调整输出顺序后再次出现同类问题。
+  return 0
 }
 
 countdown_auto_update() {

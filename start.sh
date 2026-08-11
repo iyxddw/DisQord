@@ -173,6 +173,10 @@ show_selection() {
   [[ "$central_selected" == true ]] && printf '  - 中央端（中央服务端）\n'
   [[ "$qq_selected" == true ]] && printf '  - QQ 节点\n'
   [[ "$discord_selected" == true ]] && printf '  - Discord 节点\n'
+
+  # 未选中最后一个目标不是错误。显式成功返回，避免 set -e 在只选择
+  # 中央端或 QQ 节点时把最后一个 [[ ... ]] 的状态 1 当成脚本失败。
+  return 0
 }
 
 confirm_plan() {
