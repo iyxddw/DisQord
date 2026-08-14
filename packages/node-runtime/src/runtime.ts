@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { link, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import { AvatarCache, renderMessageCards } from '@disqord/card-renderer';
+import {
+  AvatarCache,
+  downloadExternalImage,
+  renderMessageCards,
+} from '@disqord/card-renderer';
 import { FileTaskQueue, type QueueItem } from '@disqord/queue';
 import {
   avatarResponseSchema,
@@ -26,8 +30,12 @@ const DELIVERY_MAX_GAP_MS = 3_000;
 const FAST_DELIVERY_INTERVAL_MS = 1_500;
 const FAST_UPLOAD_RETRY_DELAY_MS = 250;
 const AVATAR_REQUEST_TIMEOUT_MS = 15_000;
+const QQ_FACE_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
 /** How long a just-delivered platform message ID is recognized as our own echo. */
 const DELIVERED_ECHO_WINDOW_MS = 5 * 60_000;
+
+const qqFaceImageUrl = (id: string): string =>
+  `https://framework.cdn-go.cn/qqmoji/latest/sysface/static/s${id}.png`;
 
 export interface PlatformSessionCandidate {
   readonly externalId: string;
@@ -130,7 +138,8 @@ export class NodeBridgeRuntime {
   readonly #logger: NodeLogger;
   readonly #avatarCache: AvatarCache;
   readonly #inlineEmojiDirectory: string | undefined;
-  readonly #inlineEmojiDataUriCache = new Map<string, string | undefined>();
+  readonly #inlineEmojiDataUriCache = new Map<string, string>();
+  readonly #inlineEmojiFetches = new Map<string, Promise<string | undefined>>();
   #queue: FileTaskQueue | undefined;
   #nodeConfig: PersistedNodeConfig | undefined;
   #client: AuthenticatedNodeClient | undefined;
@@ -666,22 +675,96 @@ export class NodeBridgeRuntime {
         if (!match || !this.#inlineEmojiDirectory) return undefined;
         const id = match[1]!;
         if (emoji.id && emoji.id !== id) return undefined;
-        let dataUri: string | undefined;
-        if (this.#inlineEmojiDataUriCache.has(id)) {
-          dataUri = this.#inlineEmojiDataUriCache.get(id);
-        } else {
-          try {
-            const bytes = await readFile(join(this.#inlineEmojiDirectory, `${id}.png`));
-            dataUri = `data:image/png;base64,${bytes.toString('base64')}`;
-          } catch {
-            dataUri = undefined;
-          }
-          this.#inlineEmojiDataUriCache.set(id, dataUri);
-        }
+        const dataUri = await this.#resolveInlineEmojiDataUri(id);
         return dataUri ? { ...emoji, id, dataUri } : undefined;
       }),
     );
     return resolved.filter((emoji): emoji is NonNullable<typeof emoji> => Boolean(emoji));
+  }
+
+  async #resolveInlineEmojiDataUri(id: string): Promise<string | undefined> {
+    const cached = this.#inlineEmojiDataUriCache.get(id);
+    if (cached) return cached;
+
+    const existingFetch = this.#inlineEmojiFetches.get(id);
+    if (existingFetch) return await existingFetch;
+
+    const fetchTask = this.#loadInlineEmojiDataUri(id);
+    this.#inlineEmojiFetches.set(id, fetchTask);
+    try {
+      const dataUri = await fetchTask;
+      if (dataUri) this.#inlineEmojiDataUriCache.set(id, dataUri);
+      return dataUri;
+    } finally {
+      if (this.#inlineEmojiFetches.get(id) === fetchTask) {
+        this.#inlineEmojiFetches.delete(id);
+      }
+    }
+  }
+
+  async #loadInlineEmojiDataUri(id: string): Promise<string | undefined> {
+    const directory = this.#inlineEmojiDirectory;
+    if (!directory) return undefined;
+
+    try {
+      const bytes = await readFile(join(directory, `${id}.png`));
+      return `data:image/png;base64,${bytes.toString('base64')}`;
+    } catch {
+      // The bundled/local asset is the normal path. Only fetch the remote
+      // fallback after that asset is unavailable.
+    }
+
+    let lastError: unknown;
+    try {
+      const image = await downloadExternalImage(qqFaceImageUrl(id), {
+        maxBytes: QQ_FACE_MAX_DOWNLOAD_BYTES,
+      });
+      try {
+        await this.#persistInlineEmoji(id, image.bytes);
+      } catch (error) {
+        // Rendering can still use this response even when the cache
+        // directory is temporarily unwritable.
+        this.#log('warn', 'inline_emoji_cache_write_failed', {
+          id,
+          error: describeError(error),
+        });
+      }
+      this.#log('info', 'inline_emoji_downloaded', {
+        id,
+        source: 'qqmoji-png',
+        byteSize: image.bytes.length,
+      });
+      return image.dataUri;
+    } catch (error) {
+      lastError = error;
+    }
+
+    this.#log('warn', 'inline_emoji_download_failed', {
+      id,
+      error: describeError(lastError),
+    });
+    return undefined;
+  }
+
+  async #persistInlineEmoji(id: string, bytes: Buffer): Promise<void> {
+    const directory = this.#inlineEmojiDirectory;
+    if (!directory) return;
+
+    await mkdir(directory, { recursive: true });
+    const targetPath = join(directory, `${id}.png`);
+    const temporaryPath = join(directory, `.${id}.${randomUUID()}.tmp`);
+    try {
+      // Write the complete asset first, then create the final directory entry
+      // atomically. A concurrent process that already cached the same face wins.
+      await writeFile(temporaryPath, bytes, { flag: 'wx' });
+      try {
+        await link(temporaryPath, targetPath);
+      } catch (error) {
+        if (!isFileExistsError(error)) throw error;
+      }
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
   }
 
   async #getAvatarDataUri(avatarKey: string): Promise<string | undefined> {
@@ -1097,6 +1180,10 @@ function randomInteger(min: number, max: number): number {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isFileExistsError(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === 'EEXIST';
 }
 
 async function delay(milliseconds: number): Promise<void> {
